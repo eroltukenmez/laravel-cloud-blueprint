@@ -20,6 +20,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
+use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
@@ -145,6 +146,57 @@ final class ApplyCommandTest extends TestCase
         }
     }
 
+    public function testCloudValidationErrorsRenderSafelyInTextAndJson(): void
+    {
+        $validation = new CloudValidationException(
+            'The given data was invalid.',
+            [
+                'variables.0.key' => ['The variable key is already present.'],
+                'variables.1.key' => ['The variable key format is invalid.'],
+            ],
+            'POST',
+            '/environments/env-created/variables',
+            422,
+            'request-422',
+        );
+
+        [$text] = $this->tester(
+            ApplyCommandCloudClient::withVariableValidationFailure($validation),
+            self::blueprintWithVariables(),
+        );
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $text->execute(['--auto-approve' => true]));
+        self::assertStringContainsString('Laravel Cloud rejected the request.', $text->getDisplay());
+        self::assertStringContainsString('The given data was invalid.', $text->getDisplay());
+        self::assertStringContainsString('variables.0.key:', $text->getDisplay());
+        self::assertStringContainsString('The variable key is already present.', $text->getDisplay());
+
+        [$json] = $this->tester(
+            ApplyCommandCloudClient::withVariableValidationFailure($validation),
+            self::blueprintWithVariables(),
+        );
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $json->execute([
+            '--auto-approve' => true,
+            '--json' => true,
+        ]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['resources']);
+        self::assertIsArray($decoded['resources'][2]);
+        self::assertIsArray($decoded['resources'][2]['validation']);
+        self::assertIsArray($decoded['resources'][2]['validation']['errors']);
+        self::assertSame('The given data was invalid.', $decoded['resources'][2]['validation']['message']);
+        self::assertSame(
+            ['The variable key is already present.'],
+            $decoded['resources'][2]['validation']['errors']['variables.0.key'],
+        );
+
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $rendered) {
+            self::assertStringNotContainsString('super-secret-token', $rendered);
+            self::assertStringNotContainsString('literal-secret-value', $rendered);
+            self::assertStringNotContainsString('resolved-apply-secret', $rendered);
+        }
+    }
+
     /** @return array{CommandTester, ApplyCommandCloudClient, ApplyCommandStateStore} */
     private function tester(
         ?ApplyCommandCloudClient $cloud = null,
@@ -264,6 +316,7 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
     private function __construct(
         private readonly array $applications,
         private readonly array $environments,
+        private readonly ?CloudValidationException $variableValidationFailure = null,
     ) {
     }
 
@@ -278,6 +331,11 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
             [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
             [new CloudEnvironment('env-existing', 'app-existing', 'production', 'main')],
         );
+    }
+
+    public static function withVariableValidationFailure(CloudValidationException $exception): self
+    {
+        return new self([], [], $exception);
     }
 
     public function organization(): CloudOrganization
@@ -315,6 +373,9 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
     {
         ++$this->mutationCount;
+        if ($this->variableValidationFailure !== null) {
+            throw $this->variableValidationFailure;
+        }
     }
 }
 

@@ -14,6 +14,7 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
@@ -96,7 +97,12 @@ final readonly class CreateOnlyApply
                         );
                     }
                 } catch (CloudException $exception) {
-                    $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $exception->getMessage());
+                    $outcomes[] = new ApplyResourceOutcome(
+                        $action->address,
+                        ApplyOutcomeOperation::FAILED,
+                        $exception->getMessage(),
+                        $exception instanceof CloudValidationException ? $exception : null,
+                    );
                     $status = $this->createdCount($outcomes) === 0 && !$exception instanceof CloudTransportException
                         ? ApplyStatus::FAILED
                         : ApplyStatus::PARTIAL_FAILURE;
@@ -164,6 +170,7 @@ final readonly class CreateOnlyApply
                         $group,
                         $exception->getMessage(),
                         $exception instanceof CloudTransportException,
+                        $exception instanceof CloudValidationException ? $exception : null,
                     );
                 }
                 unset($request, $inputs);
@@ -248,6 +255,7 @@ final readonly class CreateOnlyApply
         array $group,
         string $message,
         bool $uncertain = false,
+        ?CloudValidationException $validation = null,
     ): ApplyResult {
         foreach ($group as $item) {
             $outcomes[] = new ApplyResourceOutcome(
@@ -256,6 +264,7 @@ final readonly class CreateOnlyApply
                     ? ApplyOutcomeOperation::FAILED
                     : ApplyOutcomeOperation::UNCHANGED,
                 $item->action->operation === PlanOperation::CREATE ? $message : null,
+                $item->action->operation === PlanOperation::CREATE ? $validation : null,
             );
         }
 

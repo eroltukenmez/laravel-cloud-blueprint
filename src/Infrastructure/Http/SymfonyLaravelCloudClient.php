@@ -191,7 +191,14 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             );
         }
 
-        $this->guardStatus($status, $path, $requestId, 'POST');
+        $this->guardStatus(
+            $status,
+            $path,
+            $requestId,
+            'POST',
+            $response,
+            array_map(static fn (EnvironmentVariableInput $variable): string => $variable->value, $request->variables()),
+        );
         if ($status !== 200) {
             throw new CloudResponseException(
                 'Laravel Cloud variable response did not return HTTP 200.',
@@ -248,7 +255,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             throw new CloudTransportException('Unable to connect to Laravel Cloud.', 'GET', $this->safePath($path));
         }
 
-        $this->guardStatus($status, $path, $requestId);
+        $this->guardStatus($status, $path, $requestId, response: $response);
 
         try {
             $data = $response->toArray(false);
@@ -299,7 +306,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             );
         }
 
-        $this->guardStatus($status, $path, $requestId, 'POST');
+        $this->guardStatus($status, $path, $requestId, 'POST', $response, array_values($payload));
 
         if ($status !== 201) {
             throw new CloudResponseException('Laravel Cloud create response did not return HTTP 201.', 'POST', $path, $status, $requestId);
@@ -320,8 +327,15 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
         }
     }
 
-    private function guardStatus(int $status, string $path, ?string $requestId, string $method = 'GET'): void
-    {
+    /** @param list<string> $sensitiveValues */
+    private function guardStatus(
+        int $status,
+        string $path,
+        ?string $requestId,
+        string $method = 'GET',
+        ?ResponseInterface $response = null,
+        array $sensitiveValues = [],
+    ): void {
         if ($status >= 200 && $status < 300) {
             return;
         }
@@ -332,10 +346,78 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             $status === 401 || $status === 403 => new CloudAuthenticationException('Laravel Cloud authentication or authorization failed.', ...$context),
             $status === 404 => new CloudResourceNotFoundException('The requested Laravel Cloud resource was not found.', ...$context),
             $status === 429 => new CloudRateLimitException('Laravel Cloud API rate limit exceeded.', ...$context),
-            $status === 422 => new CloudValidationException('Laravel Cloud rejected the request.', ...$context),
+            $status === 422 => $this->validationException($response, $method, $path, $status, $requestId, $sensitiveValues),
             $status >= 500 => new CloudApiException('Laravel Cloud API is unavailable.', ...$context),
             default => new CloudApiException('Laravel Cloud API request failed.', ...$context),
         };
+    }
+
+    /**
+     * @param list<string> $sensitiveValues
+     */
+    private function validationException(
+        ?ResponseInterface $response,
+        string $method,
+        string $path,
+        int $status,
+        ?string $requestId,
+        array $sensitiveValues,
+    ): CloudValidationException {
+        $fallback = new CloudValidationException(null, [], $method, $this->safePath($path), $status, $requestId);
+        if ($response === null) {
+            return $fallback;
+        }
+
+        try {
+            $payload = $response->toArray(false);
+        } catch (DecodingExceptionInterface|TransportExceptionInterface) {
+            return $fallback;
+        }
+
+        if (!isset($payload['message'], $payload['errors'])
+            || !is_string($payload['message'])
+            || !is_array($payload['errors'])
+            || ($payload['errors'] !== [] && array_is_list($payload['errors']))) {
+            return $fallback;
+        }
+
+        $redactions = [$this->token->value(), ...$sensitiveValues];
+        $fieldErrors = [];
+        foreach ($payload['errors'] as $field => $messages) {
+            if (!is_string($field) || !is_array($messages) || !array_is_list($messages) || $messages === []) {
+                return $fallback;
+            }
+
+            $safeMessages = [];
+            foreach ($messages as $message) {
+                if (!is_string($message)) {
+                    return $fallback;
+                }
+                $safeMessages[] = $this->redact($message, $redactions);
+            }
+            $fieldErrors[$this->redact($field, $redactions)] = $safeMessages;
+        }
+
+        return new CloudValidationException(
+            $this->redact($payload['message'], $redactions),
+            $fieldErrors,
+            $method,
+            $this->safePath($path),
+            $status,
+            $requestId,
+        );
+    }
+
+    /** @param list<string> $values */
+    private function redact(string $message, array $values): string
+    {
+        foreach (array_unique($values) as $value) {
+            if ($value !== '') {
+                $message = str_replace($value, '[redacted]', $message);
+            }
+        }
+
+        return $message;
     }
 
     private function requestId(ResponseInterface $response): ?string

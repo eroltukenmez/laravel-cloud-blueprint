@@ -18,6 +18,7 @@ use LaravelCloudBlueprint\Blueprint\Decoder\StructuredDataDecodingException;
 use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
@@ -98,6 +99,8 @@ final class ApplyCommand extends Command
         try {
             $cloud = $this->clients->create($token);
             $plan = $this->planner->create($loaded->blueprint(), $cloud);
+        } catch (CloudValidationException $exception) {
+            return $this->renderCloudValidationFailure($exception, $output, $jsonOutput);
         } catch (OrganizationMismatchException|AmbiguousResourceMatchException|MissingEnvironmentValueException|CloudException $exception) {
             return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
         }
@@ -171,6 +174,9 @@ final class ApplyCommand extends Command
             if ($outcome->message !== null) {
                 $output->writeln('  ' . $outcome->message);
             }
+            if ($outcome->validation !== null) {
+                $this->renderValidationDetails($outcome->validation, $output, '  ');
+            }
         }
         $output->writeln(sprintf(
             'Apply %s: %d created, %d unchanged.',
@@ -185,15 +191,62 @@ final class ApplyCommand extends Command
         return $this->json([
             'status' => $result->status->value,
             'summary' => ['created' => $result->createdCount(), 'unchanged' => $result->unchangedCount()],
-            'resources' => array_map(
-                static fn (ApplyResourceOutcome $outcome): array => [
-                    'resource' => (string) $outcome->address,
-                    'operation' => $outcome->operation->value,
-                    ...($outcome->message === null ? [] : ['message' => $outcome->message]),
-                ],
-                iterator_to_array($result, false),
-            ),
+            'resources' => array_map($this->outcomeJson(...), iterator_to_array($result, false)),
         ], $output);
+    }
+
+    /** @return array<string, mixed> */
+    private function outcomeJson(ApplyResourceOutcome $outcome): array
+    {
+        return [
+            'resource' => (string) $outcome->address,
+            'operation' => $outcome->operation->value,
+            ...($outcome->message === null ? [] : ['message' => $outcome->message]),
+            ...($outcome->validation === null ? [] : [
+                'validation' => [
+                    'message' => $outcome->validation->apiMessage,
+                    'errors' => $outcome->validation->fieldErrors,
+                ],
+            ]),
+        ];
+    }
+
+    private function renderCloudValidationFailure(
+        CloudValidationException $exception,
+        OutputInterface $output,
+        bool $jsonOutput,
+    ): int {
+        if ($jsonOutput) {
+            $this->json([
+                'status' => 'error',
+                'message' => $exception->getMessage(),
+                'validation' => [
+                    'message' => $exception->apiMessage,
+                    'errors' => $exception->fieldErrors,
+                ],
+            ], $output);
+        } else {
+            $output->writeln(sprintf('<error>%s</error>', $exception->getMessage()));
+            $this->renderValidationDetails($exception, $output);
+        }
+
+        return ExitCode::GENERAL_ERROR->value;
+    }
+
+    private function renderValidationDetails(
+        CloudValidationException $exception,
+        OutputInterface $output,
+        string $indent = '',
+    ): void {
+        if ($exception->apiMessage !== null && $exception->apiMessage !== $exception->getMessage()) {
+            $output->writeln($indent . $exception->apiMessage);
+        }
+        foreach ($exception->fieldErrors as $field => $messages) {
+            $output->writeln($indent . $field . ':');
+            foreach ($messages as $message) {
+                $output->writeln($indent . '  ' . $message);
+            }
+        }
     }
 
     private function error(OutputInterface $output, string $message, ExitCode $code, bool $json = false): int

@@ -183,10 +183,78 @@ JSON);
 
     public function testCreateValidationFailureIsControlled(): void
     {
-        $this->expectException(CloudValidationException::class);
+        $response = new MockResponse(json_encode([
+            'message' => 'The given data was invalid.',
+            'errors' => [
+                'region' => ['The selected region is invalid.', 'The region is unavailable.'],
+                'repository' => ['The repository could not be found.'],
+            ],
+        ], JSON_THROW_ON_ERROR), [
+            'http_code' => 422,
+            'response_headers' => ['X-Request-Id: validation-request-1'],
+        ]);
 
-        $this->client([new MockResponse('{"message":"invalid","errors":{}}', ['http_code' => 422])])
-            ->createApplication(new CreateApplicationRequest('api', 'acme/api', 'eu-central-1', SourceProvider::GITHUB));
+        try {
+            $this->client([$response])->createApplication(
+                new CreateApplicationRequest('api', 'acme/api', 'eu-central-1', SourceProvider::GITHUB),
+            );
+            self::fail('Expected validation failure.');
+        } catch (CloudValidationException $exception) {
+            self::assertSame('Laravel Cloud rejected the request.', $exception->getMessage());
+            self::assertSame('The given data was invalid.', $exception->apiMessage);
+            self::assertSame([
+                'region' => ['The selected region is invalid.', 'The region is unavailable.'],
+                'repository' => ['The repository could not be found.'],
+            ], $exception->fieldErrors);
+            self::assertSame('POST', $exception->method);
+            self::assertSame('/applications', $exception->path);
+            self::assertSame(422, $exception->statusCode);
+            self::assertSame('validation-request-1', $exception->requestId);
+        }
+    }
+
+    public function testMalformedValidationPayloadFallsBackToTheGenericMessage(): void
+    {
+        try {
+            $this->client([new MockResponse(
+                '{"message":"unsafe detail","errors":{"region":"not-a-list"}}',
+                ['http_code' => 422],
+            )])->createApplication(
+                new CreateApplicationRequest('api', 'acme/api', 'eu-central-1', SourceProvider::GITHUB),
+            );
+            self::fail('Expected validation failure.');
+        } catch (CloudValidationException $exception) {
+            self::assertSame('Laravel Cloud rejected the request.', $exception->getMessage());
+            self::assertNull($exception->apiMessage);
+            self::assertSame([], $exception->fieldErrors);
+        }
+    }
+
+    public function testVariableValidationDetailsRedactTokenValuesAndEchoedRequestPayload(): void
+    {
+        $token = 'validation-api-token';
+        $secret = 'environment-variable-secret';
+        $requestPayload = '{"method":"set","variables":[{"key":"APP_KEY","value":"' . $secret . '"}]}';
+        $body = json_encode([
+            'message' => 'Rejected ' . $requestPayload . ' using ' . $token,
+            'errors' => [
+                'variables.0.value' => ['Invalid value ' . $secret . ' for token ' . $token],
+            ],
+        ], JSON_THROW_ON_ERROR);
+
+        try {
+            $this->client([new MockResponse($body, ['http_code' => 422])], $token)
+                ->setEnvironmentVariables('env-1', new SetEnvironmentVariablesRequest(
+                    new EnvironmentVariableInput('APP_KEY', $secret),
+                ));
+            self::fail('Expected validation failure.');
+        } catch (CloudValidationException $exception) {
+            $renderable = serialize([$exception->getMessage(), $exception->apiMessage, $exception->fieldErrors]);
+            self::assertStringNotContainsString($token, $renderable);
+            self::assertStringNotContainsString($secret, $renderable);
+            self::assertStringNotContainsString($requestPayload, $renderable);
+            self::assertStringContainsString('[redacted]', $renderable);
+        }
     }
 
     public function testPostTransportFailureIsNeverAutomaticallyRetried(): void
