@@ -10,6 +10,7 @@ use LaravelCloudBlueprint\Blueprint\Blueprint;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
@@ -53,6 +54,8 @@ final readonly class CreateOnlyApply
             $outcomes = [];
             $applicationId = null;
             $environmentIds = [];
+            /** @var array<string, CloudEnvironment> $implicitEnvironments */
+            $implicitEnvironments = [];
 
             foreach ($plan as $action) {
                 if ($action->resourceType === ResourceType::VARIABLE) {
@@ -84,15 +87,21 @@ final readonly class CreateOnlyApply
                             throw new StateStorageException('Unable to resolve the parent application ID.');
                         }
                         $desired = $blueprint->environments->get($action->address->name);
-                        $created = $cloud->createEnvironment(
-                            $applicationId,
-                            new CreateEnvironmentRequest($desired->name, $desired->branch),
-                        );
-                        $environmentIds[$desired->name] = $created->id;
+                        $implicit = $implicitEnvironments[$desired->name] ?? null;
+                        if ($implicit === null) {
+                            $created = $cloud->createEnvironment(
+                                $applicationId,
+                                new CreateEnvironmentRequest($desired->name, $desired->branch),
+                            );
+                            $environmentId = $created->id;
+                        } else {
+                            $environmentId = $implicit->id;
+                        }
+                        $environmentIds[$desired->name] = $environmentId;
                         $resource = new StateResource(
                             $action->address,
                             ResourceType::ENVIRONMENT,
-                            $created->id,
+                            $environmentId,
                             new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name),
                         );
                     }
@@ -124,6 +133,71 @@ final readonly class CreateOnlyApply
                 }
 
                 $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
+
+                if ($action->resourceType === ResourceType::APPLICATION) {
+                    $environmentCreateActions = $this->environmentCreateActions($plan);
+                    if ($environmentCreateActions === []) {
+                        continue;
+                    }
+
+                    try {
+                        $remoteEnvironments = $cloud->environments($applicationId);
+                    } catch (CloudException $exception) {
+                        return $this->implicitEnvironmentFailure(
+                            $outcomes,
+                            $environmentCreateActions[0],
+                            'Unable to reconcile environments created with the application: ' . $exception->getMessage(),
+                            $exception instanceof CloudValidationException ? $exception : null,
+                        );
+                    }
+
+                    foreach ($environmentCreateActions as $environmentAction) {
+                        $matches = array_values(array_filter(
+                            $remoteEnvironments,
+                            static fn (CloudEnvironment $environment): bool => $environment->name === $environmentAction->address->name,
+                        ));
+                        if (count($matches) > 1) {
+                            return $this->implicitEnvironmentFailure(
+                                $outcomes,
+                                $environmentAction,
+                                sprintf(
+                                    'Multiple environments named "%s" were discovered after application creation.',
+                                    $environmentAction->address->name,
+                                ),
+                            );
+                        }
+                        if ($matches === []) {
+                            continue;
+                        }
+
+                        $implicit = $matches[0];
+                        $desired = $blueprint->environments->get($environmentAction->address->name);
+                        if ($implicit->branch === null) {
+                            return $this->implicitEnvironmentFailure(
+                                $outcomes,
+                                $environmentAction,
+                                sprintf(
+                                    'Branch information is unavailable for implicitly created environment "%s".',
+                                    $desired->name,
+                                ),
+                            );
+                        }
+                        if ($implicit->branch !== $desired->branch) {
+                            return $this->implicitEnvironmentFailure(
+                                $outcomes,
+                                $environmentAction,
+                                sprintf(
+                                    'Implicitly created environment "%s" uses a different branch.',
+                                    $desired->name,
+                                ),
+                            );
+                        }
+
+                        // This is not general import: adoption is limited to a
+                        // verified side effect of this LCB-managed application CREATE.
+                        $implicitEnvironments[$desired->name] = $implicit;
+                    }
+                }
             }
 
             foreach ($variableGroups as $environmentName => $group) {
@@ -189,6 +263,33 @@ final readonly class CreateOnlyApply
         } finally {
             $transaction->release();
         }
+    }
+
+    /** @return list<PlanAction> */
+    private function environmentCreateActions(ExecutionPlan $plan): array
+    {
+        return array_values(array_filter(
+            iterator_to_array($plan, false),
+            static fn (PlanAction $action): bool => $action->resourceType === ResourceType::ENVIRONMENT
+                && $action->operation === PlanOperation::CREATE,
+        ));
+    }
+
+    /** @param list<ApplyResourceOutcome> $outcomes */
+    private function implicitEnvironmentFailure(
+        array $outcomes,
+        PlanAction $action,
+        string $message,
+        ?CloudValidationException $validation = null,
+    ): ApplyResult {
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::FAILED,
+            $message,
+            $validation,
+        );
+
+        return new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes);
     }
 
     private function verifyState(Blueprint $blueprint, ExecutionPlan $plan, StateDocument $state): void
