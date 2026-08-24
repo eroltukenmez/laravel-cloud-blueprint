@@ -52,6 +52,17 @@ final class CloudBlueprintExporterTest extends TestCase
             new BlueprintNormalizer(),
         ))->load($yaml);
         self::assertTrue($result->isValid());
+        $roundTrip = $result->blueprint();
+        self::assertSame($blueprint->schemaVersion, $roundTrip->schemaVersion);
+        self::assertSame($blueprint->organization, $roundTrip->organization);
+        self::assertSame($blueprint->application->name, $roundTrip->application->name);
+        self::assertSame($blueprint->application->region, $roundTrip->application->region);
+        self::assertSame($blueprint->application->source->provider, $roundTrip->application->source->provider);
+        self::assertSame($blueprint->application->source->repository, $roundTrip->application->source->repository);
+        self::assertSame(
+            $blueprint->environments->get('production')->branch,
+            $roundTrip->environments->get('production')->branch,
+        );
     }
 
     public function testExplicitProviderIsUsedOnlyWhenRemoteProviderIsUnavailable(): void

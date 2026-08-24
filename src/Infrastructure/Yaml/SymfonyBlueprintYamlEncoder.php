@@ -17,18 +17,23 @@ final readonly class SymfonyBlueprintYamlEncoder implements BlueprintEncoder
             $environments[$environment->name] = ['branch' => $environment->branch];
         }
 
-        return Yaml::dump([
-            'version' => $blueprint->schemaVersion->value,
-            'organization' => $blueprint->organization,
-            'application' => [
+        $sections = [
+            ['version' => $blueprint->schemaVersion->value],
+            ['organization' => $blueprint->organization],
+            ['application' => [
                 'name' => $blueprint->application->name,
                 'region' => $blueprint->application->region,
                 'source' => [
                     'provider' => $blueprint->application->source->provider->value,
                     'repository' => $blueprint->application->source->repository,
                 ],
-            ],
-            'environments' => $environments,
-        ], 4, 2);
+            ]],
+            ['environments' => $environments],
+        ];
+
+        return implode("\n\n", array_map(
+            static fn (array $section): string => rtrim(Yaml::dump($section, 4, 2), "\n"),
+            $sections,
+        )) . "\n";
     }
 }

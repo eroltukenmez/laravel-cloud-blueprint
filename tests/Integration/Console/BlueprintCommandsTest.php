@@ -44,7 +44,17 @@ final class BlueprintCommandsTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $init->execute([]));
         self::assertFileExists('cloud.blueprint.yaml');
         self::assertStringContainsString('Created blueprint file', $init->getDisplay());
-        self::assertStringContainsString('region: eu-central-1', (string) file_get_contents('cloud.blueprint.yaml'));
+        $contents = (string) file_get_contents('cloud.blueprint.yaml');
+        self::assertStringContainsString('region: eu-central-1', $contents);
+        self::assertStringContainsString(
+            "version: 1\n\norganization: my-organization\n\napplication:",
+            $contents,
+        );
+        self::assertStringContainsString("\n\nenvironments:\n", $contents);
+        self::assertDoesNotMatchRegularExpression('/[ \t]+$/m', $contents);
+        self::assertStringContainsString("branch: main\n\n    variables:", $contents);
+        self::assertStringEndsWith("\n", $contents);
+        self::assertFalse(str_ends_with($contents, "\n\n"));
 
         $validate = $this->command('validate');
         self::assertSame(ExitCode::SUCCESS->value, $validate->execute([]));

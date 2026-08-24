@@ -75,6 +75,14 @@ final class InitFromCloudCommandTest extends TestCase
         self::assertStringContainsString('repository: acme/api', $yaml);
         self::assertStringContainsString('production:', $yaml);
         self::assertStringContainsString('branch: main', $yaml);
+        self::assertStringContainsString(
+            "version: 1\n\norganization: acme\n\napplication:",
+            $yaml,
+        );
+        self::assertStringContainsString("repository: acme/api\n\nenvironments:\n", $yaml);
+        self::assertDoesNotMatchRegularExpression('/[ \t]+$/m', $yaml);
+        self::assertStringEndsWith("branch: main\n", $yaml);
+        self::assertFalse(str_ends_with($yaml, "\n\n"));
         self::assertStringNotContainsString('variables', $yaml);
         self::assertStringNotContainsString('secret', $yaml);
         self::assertFileDoesNotExist($this->directory . '/.lcb/state.json');
