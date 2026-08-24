@@ -8,6 +8,8 @@ use InvalidArgumentException;
 
 final readonly class SetEnvironmentVariablesRequest
 {
+    public EnvironmentVariableMutationMethod $method;
+
     /** @var list<EnvironmentVariableInput> */
     private array $variables;
 
@@ -25,6 +27,7 @@ final readonly class SetEnvironmentVariablesRequest
             $seen[$variable->key] = true;
         }
 
+        $this->method = EnvironmentVariableMutationMethod::SET;
         $this->variables = array_values($variables);
     }
 

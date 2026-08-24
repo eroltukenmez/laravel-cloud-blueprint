@@ -9,6 +9,7 @@ use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableMutationMethod;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
@@ -211,17 +212,20 @@ JSON);
     {
         $response = new MockResponse('{"data":{}}', ['http_code' => 200]);
 
-        $this->client([$response])->setEnvironmentVariables('env-123', new SetEnvironmentVariablesRequest(
+        $request = new SetEnvironmentVariablesRequest(
             new EnvironmentVariableInput('APP_ENV', 'production'),
             new EnvironmentVariableInput('APP_KEY', 'sensitive-value'),
-        ));
+        );
+        self::assertSame(EnvironmentVariableMutationMethod::SET, $request->method);
+
+        $this->client([$response])->setEnvironmentVariables('env-123', $request);
 
         self::assertSame('POST', $response->getRequestMethod());
         self::assertSame('https://cloud.laravel.com/api/environments/env-123/variables', $response->getRequestUrl());
         $body = $response->getRequestOptions()['body'];
         self::assertIsString($body);
         self::assertJsonStringEqualsJsonString(
-            '{"variables":[{"key":"APP_ENV","value":"production"},{"key":"APP_KEY","value":"sensitive-value"}]}',
+            '{"method":"set","variables":[{"key":"APP_ENV","value":"production"},{"key":"APP_KEY","value":"sensitive-value"}]}',
             $body,
         );
     }

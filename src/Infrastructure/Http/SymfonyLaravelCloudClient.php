@@ -176,7 +176,10 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
                     'Content-Type' => 'application/json',
                     'User-Agent' => self::USER_AGENT,
                 ],
-                'json' => ['variables' => $variables],
+                'json' => [
+                    'method' => $request->method->value,
+                    'variables' => $variables,
+                ],
             ]);
             $status = $response->getStatusCode();
             $requestId = $this->requestId($response);
