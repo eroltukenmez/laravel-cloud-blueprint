@@ -9,12 +9,14 @@ use LaravelCloudBlueprint\Blueprint\Normalization\BlueprintNormalizer;
 use LaravelCloudBlueprint\Blueprint\Validation\BlueprintValidator;
 use LaravelCloudBlueprint\Console\Command\InitCommand;
 use LaravelCloudBlueprint\Console\Command\CloudInspectCommand;
+use LaravelCloudBlueprint\Console\Command\PlanCommand;
 use LaravelCloudBlueprint\Console\Command\ValidateCommand;
 use LaravelCloudBlueprint\Console\Template\StarterBlueprintTemplate;
 use LaravelCloudBlueprint\Infrastructure\File\NativeFileSystem;
 use LaravelCloudBlueprint\Infrastructure\Environment\LcbTokenProvider;
 use LaravelCloudBlueprint\Infrastructure\Http\SymfonyLaravelCloudClientFactory;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
+use LaravelCloudBlueprint\Planning\CreatePlan;
 use Symfony\Component\Console\Application;
 
 final class LcbApplication extends Application
@@ -36,5 +38,12 @@ final class LcbApplication extends Application
         $this->add(new InitCommand($files, $files, new StarterBlueprintTemplate()));
         $this->add(new ValidateCommand($files, $loader));
         $this->add(new CloudInspectCommand(new LcbTokenProvider(), new SymfonyLaravelCloudClientFactory()));
+        $this->add(new PlanCommand(
+            $files,
+            $loader,
+            new LcbTokenProvider(),
+            new SymfonyLaravelCloudClientFactory(),
+            new CreatePlan(),
+        ));
     }
 }
