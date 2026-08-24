@@ -85,6 +85,10 @@ final readonly class BlueprintNormalizer
         $variablesPath = $environmentPath . '.variables';
         $normalized = [];
 
+        if (!array_key_exists('variables', $environment)) {
+            return new VariableDefinitionCollection();
+        }
+
         foreach ($this->mapping($environment, 'variables', $variablesPath) as $name => $variable) {
             $path = sprintf('%s.%s', $variablesPath, $name);
             $variable = $this->valueAsMapping($variable, $path);
