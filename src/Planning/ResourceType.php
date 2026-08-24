@@ -8,4 +8,5 @@ enum ResourceType: string
 {
     case APPLICATION = 'application';
     case ENVIRONMENT = 'environment';
+    case VARIABLE = 'variable';
 }

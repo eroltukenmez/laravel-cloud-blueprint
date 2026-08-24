@@ -6,14 +6,20 @@ namespace LaravelCloudBlueprint\Planning;
 
 use LaravelCloudBlueprint\Blueprint\Blueprint;
 use LaravelCloudBlueprint\Blueprint\EnvironmentDefinition;
+use LaravelCloudBlueprint\Blueprint\VariableDefinition;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 
 final readonly class CreatePlan
 {
+    public function __construct(private VariableValueResolver $values)
+    {
+    }
+
     public function create(Blueprint $blueprint, LaravelCloudClient $cloud): ExecutionPlan
     {
         $organization = $cloud->organization();
@@ -46,6 +52,18 @@ final readonly class CreatePlan
                 );
             }
 
+            foreach ($blueprint->environments as $environment) {
+                foreach ($environment->variables as $variable) {
+                    $address = $this->variableAddress($environment->name, $variable->name);
+                    $this->values->resolve($variable, $address);
+                    $actions[] = $this->variableAction(
+                        $address,
+                        PlanOperation::CREATE,
+                        'Environment variable does not exist because the environment will be created.',
+                    );
+                }
+            }
+
             return new ExecutionPlan(...$actions);
         }
 
@@ -53,8 +71,37 @@ final readonly class CreatePlan
         $actions = [$this->compareApplication($blueprint, $application)];
         $remoteEnvironments = $cloud->environments($application->id);
 
+        /** @var array<string, CloudEnvironment|null> $matchedEnvironments */
+        $matchedEnvironments = [];
         foreach ($blueprint->environments as $environment) {
-            $actions[] = $this->compareEnvironment($environment, $remoteEnvironments);
+            [$action, $matched] = $this->compareEnvironment($environment, $remoteEnvironments);
+            $actions[] = $action;
+            $matchedEnvironments[$environment->name] = $matched;
+        }
+
+        foreach ($blueprint->environments as $environment) {
+            $remote = $matchedEnvironments[$environment->name];
+            if ($remote === null) {
+                foreach ($environment->variables as $variable) {
+                    $address = $this->variableAddress($environment->name, $variable->name);
+                    $this->values->resolve($variable, $address);
+                    $actions[] = $this->variableAction(
+                        $address,
+                        PlanOperation::CREATE,
+                        'Environment variable does not exist because the environment will be created.',
+                    );
+                }
+                continue;
+            }
+
+            if (count($environment->variables) === 0) {
+                continue;
+            }
+
+            $details = $cloud->environment($remote->id);
+            foreach ($environment->variables as $variable) {
+                $actions[] = $this->compareVariable($environment->name, $variable, $details->variables);
+            }
         }
 
         return new ExecutionPlan(...$actions);
@@ -94,11 +141,14 @@ final readonly class CreatePlan
         );
     }
 
-    /** @param list<CloudEnvironment> $remoteEnvironments */
+    /**
+     * @param list<CloudEnvironment> $remoteEnvironments
+     * @return array{PlanAction, CloudEnvironment|null}
+     */
     private function compareEnvironment(
         EnvironmentDefinition $desired,
         array $remoteEnvironments,
-    ): PlanAction {
+    ): array {
         $matches = array_values(array_filter(
             $remoteEnvironments,
             static fn (CloudEnvironment $environment): bool => $environment->name === $desired->name,
@@ -109,38 +159,78 @@ final readonly class CreatePlan
         }
 
         if ($matches === []) {
-            return $this->environmentAction(
+            return [$this->environmentAction(
                 $desired->name,
                 PlanOperation::CREATE,
                 'Environment does not exist.',
-            );
+            ), null];
         }
 
         $remote = $matches[0];
 
         if ($remote->branch === null) {
-            return $this->environmentAction(
+            return [$this->environmentAction(
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote branch information is unavailable.',
                 $remote->id,
-            );
+            ), $remote];
         }
 
         if ($remote->branch !== $desired->branch) {
-            return $this->environmentAction(
+            return [$this->environmentAction(
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote branch differs from desired branch.',
                 $remote->id,
-            );
+            ), $remote];
         }
 
-        return $this->environmentAction(
+        return [$this->environmentAction(
             $desired->name,
             PlanOperation::NO_CHANGE,
             'Remote environment matches desired state.',
             $remote->id,
+        ), $remote];
+    }
+
+    private function compareVariable(
+        string $environmentName,
+        VariableDefinition $desired,
+        ?CloudEnvironmentVariableCollection $remoteVariables,
+    ): PlanAction {
+        $address = $this->variableAddress($environmentName, $desired->name);
+        $desiredValue = $this->values->resolve($desired, $address);
+
+        if ($remoteVariables === null) {
+            return $this->variableAction(
+                $address,
+                PlanOperation::UNSUPPORTED,
+                'Remote environment variable information is unavailable.',
+            );
+        }
+
+        $remote = $remoteVariables->find($desired->name);
+        if ($remote === null) {
+            return $this->variableAction(
+                $address,
+                PlanOperation::CREATE,
+                'Environment variable does not exist.',
+            );
+        }
+
+        if ($remote->value !== $desiredValue) {
+            return $this->variableAction(
+                $address,
+                PlanOperation::UNSUPPORTED,
+                'Environment variable value differs from desired state.',
+            );
+        }
+
+        return $this->variableAction(
+            $address,
+            PlanOperation::NO_CHANGE,
+            'Environment variable matches desired state.',
         );
     }
 
@@ -174,5 +264,18 @@ final readonly class CreatePlan
             $reason,
             $remoteId,
         );
+    }
+
+    private function variableAddress(string $environmentName, string $variableName): ResourceAddress
+    {
+        return new ResourceAddress(ResourceType::VARIABLE, $environmentName . '.' . $variableName);
+    }
+
+    private function variableAction(
+        ResourceAddress $address,
+        PlanOperation $operation,
+        string $reason,
+    ): PlanAction {
+        return new PlanAction($address, ResourceType::VARIABLE, $operation, $reason);
     }
 }

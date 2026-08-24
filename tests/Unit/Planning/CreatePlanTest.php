@@ -12,6 +12,7 @@ use LaravelCloudBlueprint\Blueprint\EnvironmentDefinitionCollection;
 use LaravelCloudBlueprint\Blueprint\SourceDefinition;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Blueprint\VariableDefinitionCollection;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
@@ -20,11 +21,13 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LogicException;
 use LaravelCloudBlueprint\Planning\CreatePlan;
+use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use PHPUnit\Framework\TestCase;
 
 final class CreatePlanTest extends TestCase
@@ -35,14 +38,14 @@ final class CreatePlanTest extends TestCase
 
         $this->expectException(OrganizationMismatchException::class);
 
-        (new CreatePlan())->create(self::blueprint(), $cloud);
+        self::planner()->create(self::blueprint(), $cloud);
     }
 
     public function testMissingApplicationCreatesApplicationAndEveryEnvironmentWithoutEnvironmentLookup(): void
     {
         $cloud = new PlanningCloudClient();
 
-        $plan = (new CreatePlan())->create(self::blueprint(), $cloud);
+        $plan = self::planner()->create(self::blueprint(), $cloud);
 
         self::assertSame(
             ['application.my-api', 'environment.production', 'environment.staging'],
@@ -67,7 +70,7 @@ final class CreatePlanTest extends TestCase
             ],
         );
 
-        $plan = (new CreatePlan())->create(self::blueprint(), $cloud);
+        $plan = self::planner()->create(self::blueprint(), $cloud);
 
         self::assertSame(3, $plan->countByOperation(PlanOperation::NO_CHANGE));
         self::assertSame(0, $plan->countByOperation(PlanOperation::CREATE));
@@ -104,7 +107,7 @@ final class CreatePlanTest extends TestCase
 
         $this->expectException(AmbiguousResourceMatchException::class);
 
-        (new CreatePlan())->create(self::blueprint(), $cloud);
+        self::planner()->create(self::blueprint(), $cloud);
     }
 
     public function testEnvironmentMatchingProducesCreateNoChangeAndUnsupportedInBlueprintOrder(): void
@@ -114,7 +117,7 @@ final class CreatePlanTest extends TestCase
             environments: [new CloudEnvironment('env-prod', 'app-1', 'production', 'other')],
         );
 
-        $actions = self::actions((new CreatePlan())->create(self::blueprint(), $cloud));
+        $actions = self::actions(self::planner()->create(self::blueprint(), $cloud));
 
         self::assertSame(PlanOperation::NO_CHANGE, $actions[0]->operation);
         self::assertSame(PlanOperation::UNSUPPORTED, $actions[1]->operation);
@@ -134,7 +137,7 @@ final class CreatePlanTest extends TestCase
 
         self::assertSame(
             PlanOperation::UNSUPPORTED,
-            self::actions((new CreatePlan())->create(self::blueprint(), $cloud))[1]->operation,
+            self::actions(self::planner()->create(self::blueprint(), $cloud))[1]->operation,
         );
     }
 
@@ -150,15 +153,20 @@ final class CreatePlanTest extends TestCase
 
         $this->expectException(AmbiguousResourceMatchException::class);
 
-        (new CreatePlan())->create(self::blueprint(), $cloud);
+        self::planner()->create(self::blueprint(), $cloud);
     }
 
     private function planWithApplication(CloudApplication $application): ExecutionPlan
     {
-        return (new CreatePlan())->create(
+        return self::planner()->create(
             self::blueprint(),
             new PlanningCloudClient(applications: [$application]),
         );
+    }
+
+    private static function planner(): CreatePlan
+    {
+        return new CreatePlan(new VariableValueResolver(new PlanningEnvironmentValueProvider()));
     }
 
     private static function blueprint(): Blueprint
@@ -236,6 +244,12 @@ final class PlanningCloudClient implements LaravelCloudClient
         return $this->environments;
     }
 
+    public function environment(string $environmentId): CloudEnvironmentDetails
+    {
+        $this->calls[] = 'environment:' . $environmentId;
+        return new CloudEnvironmentDetails($environmentId, 'production', null);
+    }
+
     public function createApplication(CreateApplicationRequest $request): CloudApplication
     {
         throw new LogicException('Planner fake must remain read-only.');
@@ -244,5 +258,13 @@ final class PlanningCloudClient implements LaravelCloudClient
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
     {
         throw new LogicException('Planner fake must remain read-only.');
+    }
+}
+
+final readonly class PlanningEnvironmentValueProvider implements EnvironmentValueProvider
+{
+    public function value(string $name): ?string
+    {
+        return null;
     }
 }

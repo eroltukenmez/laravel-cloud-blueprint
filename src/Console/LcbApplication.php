@@ -15,9 +15,11 @@ use LaravelCloudBlueprint\Console\Command\ValidateCommand;
 use LaravelCloudBlueprint\Console\Template\StarterBlueprintTemplate;
 use LaravelCloudBlueprint\Infrastructure\File\NativeFileSystem;
 use LaravelCloudBlueprint\Infrastructure\Environment\LcbTokenProvider;
+use LaravelCloudBlueprint\Infrastructure\Environment\NativeEnvironmentValueProvider;
 use LaravelCloudBlueprint\Infrastructure\Http\SymfonyLaravelCloudClientFactory;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
+use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
 use LaravelCloudBlueprint\Infrastructure\State\LocalFileStateStore;
 use Symfony\Component\Console\Application;
@@ -37,6 +39,7 @@ final class LcbApplication extends Application
             new BlueprintValidator(),
             new BlueprintNormalizer(),
         );
+        $planner = new CreatePlan(new VariableValueResolver(new NativeEnvironmentValueProvider()));
 
         $this->add(new InitCommand($files, $files, new StarterBlueprintTemplate()));
         $this->add(new ValidateCommand($files, $loader));
@@ -46,14 +49,14 @@ final class LcbApplication extends Application
             $loader,
             new LcbTokenProvider(),
             new SymfonyLaravelCloudClientFactory(),
-            new CreatePlan(),
+            $planner,
         ));
         $this->add(new ApplyCommand(
             $files,
             $loader,
             new LcbTokenProvider(),
             new SymfonyLaravelCloudClientFactory(),
-            new CreatePlan(),
+            $planner,
             new CreateOnlyApply(),
             new LocalFileStateStore(),
         ));

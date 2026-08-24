@@ -84,6 +84,49 @@ final class SymfonyLaravelCloudClientTest extends TestCase
         self::assertNull($environments[1]->branch);
     }
 
+    public function testEnvironmentDetailsMapTypedVariablesFromTheOfficialResponseShape(): void
+    {
+        $response = new MockResponse(<<<'JSON'
+{"data":{"id":"env-1","type":"environments","attributes":{"name":"production","environment_variables":[{"key":"APP_ENV","value":"production"},{"key":"APP_KEY","value":"remote-secret"}]}}}
+JSON);
+
+        $details = $this->client([$response])->environment('env-1');
+
+        self::assertSame('env-1', $details->id);
+        self::assertSame('production', $details->name);
+        self::assertNotNull($details->variables);
+        self::assertCount(2, $details->variables);
+        self::assertSame('production', $details->variables->find('APP_ENV')?->value);
+        self::assertSame('remote-secret', $details->variables->find('APP_KEY')?->value);
+        self::assertSame('GET', $response->getRequestMethod());
+        self::assertSame('https://cloud.laravel.com/api/environments/env-1', $response->getRequestUrl());
+    }
+
+    public function testMissingEnvironmentVariableDataRemainsUnavailable(): void
+    {
+        $details = $this->client([new MockResponse(
+            '{"data":{"id":"env-1","type":"environments","attributes":{"name":"production"}}}',
+        )])->environment('env-1');
+
+        self::assertNull($details->variables);
+    }
+
+    public function testMalformedEnvironmentVariableShapeFailsWithoutExposingRemoteValues(): void
+    {
+        $secret = 'must-not-appear-in-error';
+
+        try {
+            $this->client([new MockResponse(sprintf(
+                '{"data":{"id":"env-1","attributes":{"name":"production","environment_variables":[{"key":123,"value":"%s"}]}}}',
+                $secret,
+            ))])->environment('env-1');
+            self::fail('Expected malformed variable response failure.');
+        } catch (CloudResponseException $exception) {
+            self::assertStringNotContainsString($secret, $exception->getMessage());
+            self::assertSame('/environments/env-1', $exception->path);
+        }
+    }
+
     public function testMalformedRequiredFieldsThrowAControlledResponseException(): void
     {
         $this->expectException(CloudResponseException::class);

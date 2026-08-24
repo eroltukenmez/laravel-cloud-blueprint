@@ -34,6 +34,12 @@ final readonly class CreateOnlyApply
             throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
         }
 
+        foreach ($plan as $action) {
+            if ($action->resourceType === ResourceType::VARIABLE) {
+                throw new ApplyRefusedException('Environment variable mutation is not supported. No resources were modified.');
+            }
+        }
+
         $transaction = $states->begin();
 
         try {

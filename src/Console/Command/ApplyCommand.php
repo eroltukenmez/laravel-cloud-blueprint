@@ -22,6 +22,7 @@ use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
+use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
@@ -97,7 +98,7 @@ final class ApplyCommand extends Command
         try {
             $cloud = $this->clients->create($token);
             $plan = $this->planner->create($loaded->blueprint(), $cloud);
-        } catch (OrganizationMismatchException|AmbiguousResourceMatchException|CloudException $exception) {
+        } catch (OrganizationMismatchException|AmbiguousResourceMatchException|MissingEnvironmentValueException|CloudException $exception) {
             return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
         }
 

@@ -8,6 +8,9 @@ use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariable;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
@@ -91,6 +94,24 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
         }
 
         return $environments;
+    }
+
+    public function environment(string $environmentId): CloudEnvironmentDetails
+    {
+        $path = sprintf('/environments/%s', rawurlencode($environmentId));
+        $document = $this->get($path);
+        $resource = $this->mappingAt($document, 'data', $path);
+        $id = $this->requiredString($resource, 'id', $path);
+        if ($id !== $environmentId) {
+            throw $this->malformed($path, 'Environment response identity does not match the requested environment.');
+        }
+        $attributes = $this->mappingAt($resource, 'attributes', $path);
+
+        return new CloudEnvironmentDetails(
+            $id,
+            $this->requiredString($attributes, 'name', $path),
+            $this->environmentVariables($attributes, $path),
+        );
     }
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication
@@ -319,6 +340,45 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
         }
 
         return null;
+    }
+
+    /**
+     * The generated Laravel Cloud documentation currently displays
+     * environment_variables both as an environment attribute and beneath an
+     * empty schema grouping key. Supporting both forms keeps that API-specific
+     * ambiguity confined to this adapter. Absence remains distinct from [].
+     *
+     * @param array<string, mixed> $attributes
+     */
+    private function environmentVariables(
+        array $attributes,
+        string $path,
+    ): ?CloudEnvironmentVariableCollection {
+        $container = $attributes;
+        if (!array_key_exists('environment_variables', $container)) {
+            $documentedGroup = $this->optionalMapping($attributes, '', $path);
+            if ($documentedGroup === null || !array_key_exists('environment_variables', $documentedGroup)) {
+                return null;
+            }
+            $container = $documentedGroup;
+        }
+
+        $variables = [];
+        $seen = [];
+        foreach ($this->listAt($container, 'environment_variables', $path) as $value) {
+            $variable = $this->valueAsMapping($value, $path);
+            $key = $this->requiredString($variable, 'key', $path);
+            if (array_key_exists($key, $seen)) {
+                throw $this->malformed($path, 'Environment response contains duplicate variable keys.');
+            }
+            $seen[$key] = true;
+            $variables[] = new CloudEnvironmentVariable(
+                $key,
+                $this->requiredString($variable, 'value', $path),
+            );
+        }
+
+        return new CloudEnvironmentVariableCollection(...$variables);
     }
 
     /**

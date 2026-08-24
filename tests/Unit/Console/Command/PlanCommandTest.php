@@ -14,6 +14,7 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
@@ -22,6 +23,8 @@ use LaravelCloudBlueprint\Console\Command\PlanCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
+use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
+use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Tester\CommandTester;
 use LogicException;
@@ -86,6 +89,25 @@ final class PlanCommandTest extends TestCase
         self::assertStringNotContainsString($token->value(), $tester->getDisplay());
     }
 
+    public function testTextAndJsonPlansExposeVariableKeysButNeverVariableValues(): void
+    {
+        $text = $this->tester(self::blueprintWithSecrets());
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('variable.production.APP_LITERAL', $text->getDisplay());
+        self::assertStringContainsString('variable.production.APP_KEY', $text->getDisplay());
+
+        $json = $this->tester(self::blueprintWithSecrets());
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
+            self::assertStringNotContainsString('literal-super-secret', $output);
+            self::assertStringNotContainsString('resolved-super-secret', $output);
+            self::assertStringNotContainsString('LOCAL_APP_KEY', $output);
+        }
+    }
+
     private function tester(
         string $blueprint,
         ?CloudApiToken $token = new CloudApiToken('super-secret-token'),
@@ -96,7 +118,7 @@ final class PlanCommandTest extends TestCase
             new BlueprintLoader(new SymfonyYamlDecoder(), new BlueprintValidator(), new BlueprintNormalizer()),
             new PlanTokenProvider($token),
             new PlanClientFactory($cloud),
-            new CreatePlan(),
+            new CreatePlan(new VariableValueResolver(new PlanEnvironmentValueProvider())),
         ));
     }
 
@@ -114,6 +136,30 @@ application:
 environments:
   production:
     branch: main
+YAML;
+    }
+
+    private static function blueprintWithSecrets(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: new-api
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/api
+environments:
+  production:
+    branch: main
+    variables:
+      APP_LITERAL:
+        value: literal-super-secret
+        sensitive: true
+      APP_KEY:
+        from_env: LOCAL_APP_KEY
+        sensitive: true
 YAML;
     }
 }
@@ -176,6 +222,11 @@ class PlanCommandCloudClient implements LaravelCloudClient
         return [new CloudEnvironment('env-1', $applicationId, 'production', 'main')];
     }
 
+    public function environment(string $environmentId): CloudEnvironmentDetails
+    {
+        return new CloudEnvironmentDetails($environmentId, 'production', null);
+    }
+
     public function createApplication(CreateApplicationRequest $request): CloudApplication
     {
         throw new LogicException('Plan fake must remain read-only.');
@@ -184,6 +235,14 @@ class PlanCommandCloudClient implements LaravelCloudClient
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
     {
         throw new LogicException('Plan fake must remain read-only.');
+    }
+}
+
+final readonly class PlanEnvironmentValueProvider implements EnvironmentValueProvider
+{
+    public function value(string $name): string
+    {
+        return 'resolved-super-secret';
     }
 }
 

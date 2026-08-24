@@ -10,6 +10,7 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
@@ -118,6 +119,11 @@ final class FakeLaravelCloudClient implements LaravelCloudClient
             new CloudEnvironment('env-1', $applicationId, 'production', 'main'),
             new CloudEnvironment('env-2', $applicationId, 'staging', null),
         ];
+    }
+
+    public function environment(string $environmentId): CloudEnvironmentDetails
+    {
+        return new CloudEnvironmentDetails($environmentId, 'production', null);
     }
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication

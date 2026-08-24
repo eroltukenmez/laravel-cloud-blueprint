@@ -19,6 +19,7 @@ use LaravelCloudBlueprint\Blueprint\VariableDefinitionCollection;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
@@ -103,6 +104,26 @@ final class CreateOnlyApplyTest extends TestCase
         } finally {
             self::assertSame([], $events->values);
         }
+    }
+
+    public function testVariableCreatePlanIsRefusedBeforeLockMutationOrStatePersistence(): void
+    {
+        $events = new ApplyEvents();
+        $cloud = new ApplyCloudClient($events);
+        $states = new ApplyStateStore($events);
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::VARIABLE, 'production.APP_KEY', PlanOperation::CREATE),
+        );
+
+        try {
+            (new CreateOnlyApply())->execute(self::blueprint(), $plan, $cloud, $states);
+            self::fail('Expected variable mutation refusal.');
+        } catch (ApplyRefusedException $exception) {
+            self::assertStringContainsString('not supported', $exception->getMessage());
+        }
+
+        self::assertSame([], $events->values);
+        self::assertSame([], $states->state->resources());
     }
 
     public function testStateOrganizationMismatchAbortsBeforeMutationAndReleasesLock(): void
@@ -248,6 +269,10 @@ final class ApplyCloudClient implements LaravelCloudClient
     public function organization(): CloudOrganization { return new CloudOrganization('org', 'Acme', 'acme'); }
     public function applications(): array { return []; }
     public function environments(string $applicationId): array { return []; }
+    public function environment(string $environmentId): CloudEnvironmentDetails
+    {
+        return new CloudEnvironmentDetails($environmentId, 'production', null);
+    }
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication
     {

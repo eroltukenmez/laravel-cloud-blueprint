@@ -15,6 +15,7 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
@@ -22,6 +23,8 @@ use LaravelCloudBlueprint\Console\Command\ApplyCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
+use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
+use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\StateDocument;
@@ -126,7 +129,7 @@ final class ApplyCommandTest extends TestCase
             new BlueprintLoader(new SymfonyYamlDecoder(), new BlueprintValidator(), new BlueprintNormalizer()),
             new ApplyCommandTokenProvider(new CloudApiToken('super-secret-token')),
             new ApplyCommandClientFactory($cloud),
-            new CreatePlan(),
+            new CreatePlan(new VariableValueResolver(new ApplyCommandEnvironmentValueProvider())),
             new CreateOnlyApply(),
             $state,
         );
@@ -238,6 +241,11 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         return $this->environments;
     }
 
+    public function environment(string $environmentId): CloudEnvironmentDetails
+    {
+        return new CloudEnvironmentDetails($environmentId, 'production', null);
+    }
+
     public function createApplication(CreateApplicationRequest $request): CloudApplication
     {
         ++$this->mutationCount;
@@ -248,6 +256,14 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
     {
         ++$this->mutationCount;
         return new CloudEnvironment('env-created', $applicationId, $request->name, $request->branch);
+    }
+}
+
+final readonly class ApplyCommandEnvironmentValueProvider implements EnvironmentValueProvider
+{
+    public function value(string $name): ?string
+    {
+        return null;
     }
 }
 

@@ -6,6 +6,7 @@ namespace LaravelCloudBlueprint\Cloud\Contract;
 
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
@@ -19,6 +20,8 @@ interface LaravelCloudClient
 
     /** @return list<CloudEnvironment> */
     public function environments(string $applicationId): array;
+
+    public function environment(string $environmentId): CloudEnvironmentDetails;
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication;
 
