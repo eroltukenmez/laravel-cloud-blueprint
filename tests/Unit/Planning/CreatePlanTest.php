@@ -19,6 +19,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LogicException;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
@@ -256,6 +257,11 @@ final class PlanningCloudClient implements LaravelCloudClient
     }
 
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
+    {
+        throw new LogicException('Planner fake must remain read-only.');
+    }
+
+    public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
     {
         throw new LogicException('Planner fake must remain read-only.');
     }

@@ -14,6 +14,8 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
+use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
@@ -153,6 +155,51 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
         );
     }
 
+    public function setEnvironmentVariables(
+        string $environmentId,
+        SetEnvironmentVariablesRequest $request,
+    ): void {
+        $path = sprintf('/environments/%s/variables', rawurlencode($environmentId));
+        $variables = array_map(
+            static fn (EnvironmentVariableInput $variable): array => [
+                'key' => $variable->key,
+                'value' => $variable->value,
+            ],
+            $request->variables(),
+        );
+
+        try {
+            $response = $this->http->request('POST', self::BASE_URL . $path, [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $this->token->value(),
+                    'Accept' => 'application/json',
+                    'Content-Type' => 'application/json',
+                    'User-Agent' => self::USER_AGENT,
+                ],
+                'json' => ['variables' => $variables],
+            ]);
+            $status = $response->getStatusCode();
+            $requestId = $this->requestId($response);
+        } catch (TransportExceptionInterface) {
+            throw new CloudTransportException(
+                'Laravel Cloud variable request failed with an uncertain remote outcome. Run plan before retrying.',
+                'POST',
+                $path,
+            );
+        }
+
+        $this->guardStatus($status, $path, $requestId, 'POST');
+        if ($status !== 200) {
+            throw new CloudResponseException(
+                'Laravel Cloud variable response did not return HTTP 200.',
+                'POST',
+                $path,
+                $status,
+                $requestId,
+            );
+        }
+    }
+
     /**
      * @return iterable<array{array<string, mixed>, string}>
      */
@@ -282,7 +329,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             $status === 401 || $status === 403 => new CloudAuthenticationException('Laravel Cloud authentication or authorization failed.', ...$context),
             $status === 404 => new CloudResourceNotFoundException('The requested Laravel Cloud resource was not found.', ...$context),
             $status === 429 => new CloudRateLimitException('Laravel Cloud API rate limit exceeded.', ...$context),
-            $status === 422 => new CloudValidationException('Laravel Cloud rejected the create request.', ...$context),
+            $status === 422 => new CloudValidationException('Laravel Cloud rejected the request.', ...$context),
             $status >= 500 => new CloudApiException('Laravel Cloud API is unavailable.', ...$context),
             default => new CloudApiException('Laravel Cloud API request failed.', ...$context),
         };

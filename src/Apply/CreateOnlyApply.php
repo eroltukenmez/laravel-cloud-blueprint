@@ -10,6 +10,8 @@ use LaravelCloudBlueprint\Blueprint\Blueprint;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
+use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
@@ -17,6 +19,8 @@ use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
+use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
+use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
@@ -24,6 +28,10 @@ use LaravelCloudBlueprint\State\StateResource;
 
 final readonly class CreateOnlyApply
 {
+    public function __construct(private VariableValueResolver $values)
+    {
+    }
+
     public function execute(
         Blueprint $blueprint,
         ExecutionPlan $plan,
@@ -34,11 +42,7 @@ final readonly class CreateOnlyApply
             throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
         }
 
-        foreach ($plan as $action) {
-            if ($action->resourceType === ResourceType::VARIABLE) {
-                throw new ApplyRefusedException('Environment variable mutation is not supported. No resources were modified.');
-            }
-        }
+        $variableGroups = $this->variableGroups($blueprint, $plan);
 
         $transaction = $states->begin();
 
@@ -47,12 +51,19 @@ final readonly class CreateOnlyApply
             $this->verifyState($blueprint, $plan, $state);
             $outcomes = [];
             $applicationId = null;
+            $environmentIds = [];
 
             foreach ($plan as $action) {
+                if ($action->resourceType === ResourceType::VARIABLE) {
+                    continue;
+                }
+
                 if ($action->operation === PlanOperation::NO_CHANGE) {
                     $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UNCHANGED);
                     if ($action->resourceType === ResourceType::APPLICATION) {
                         $applicationId = $action->remoteId;
+                    } elseif ($action->remoteId !== null) {
+                        $environmentIds[$action->address->name] = $action->remoteId;
                     }
                     continue;
                 }
@@ -76,6 +87,7 @@ final readonly class CreateOnlyApply
                             $applicationId,
                             new CreateEnvironmentRequest($desired->name, $desired->branch),
                         );
+                        $environmentIds[$desired->name] = $created->id;
                         $resource = new StateResource(
                             $action->address,
                             ResourceType::ENVIRONMENT,
@@ -108,6 +120,64 @@ final readonly class CreateOnlyApply
                 $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
             }
 
+            foreach ($variableGroups as $environmentName => $group) {
+                $createActions = array_values(array_filter(
+                    $group,
+                    static fn (VariableApplyAction $item): bool => $item->action->operation === PlanOperation::CREATE,
+                ));
+
+                if ($createActions === []) {
+                    foreach ($group as $item) {
+                        $outcomes[] = new ApplyResourceOutcome($item->action->address, ApplyOutcomeOperation::UNCHANGED);
+                    }
+                    continue;
+                }
+
+                $environmentId = $environmentIds[$environmentName] ?? null;
+                if ($environmentId === null) {
+                    return $this->variableFailure(
+                        $outcomes,
+                        $group,
+                        sprintf('Unable to resolve the remote identity for environment "%s".', $environmentName),
+                    );
+                }
+
+                try {
+                    $inputs = [];
+                    foreach ($createActions as $item) {
+                        $inputs[] = new EnvironmentVariableInput(
+                            $item->definition->name,
+                            $this->values->resolve($item->definition, $item->action->address),
+                        );
+                    }
+                    $request = new SetEnvironmentVariablesRequest(...$inputs);
+                } catch (MissingEnvironmentValueException $exception) {
+                    return $this->variableFailure($outcomes, $group, $exception->getMessage());
+                }
+
+                try {
+                    $cloud->setEnvironmentVariables($environmentId, $request);
+                } catch (CloudException $exception) {
+                    unset($request, $inputs);
+                    return $this->variableFailure(
+                        $outcomes,
+                        $group,
+                        $exception->getMessage(),
+                        $exception instanceof CloudTransportException,
+                    );
+                }
+                unset($request, $inputs);
+
+                foreach ($group as $item) {
+                    $outcomes[] = new ApplyResourceOutcome(
+                        $item->action->address,
+                        $item->action->operation === PlanOperation::CREATE
+                            ? ApplyOutcomeOperation::CREATED
+                            : ApplyOutcomeOperation::UNCHANGED,
+                    );
+                }
+            }
+
             return new ApplyResult(ApplyStatus::SUCCESS, ...$outcomes);
         } finally {
             $transaction->release();
@@ -121,6 +191,9 @@ final readonly class CreateOnlyApply
         }
 
         foreach ($plan as $action) {
+            if ($action->resourceType === ResourceType::VARIABLE) {
+                continue;
+            }
             $managed = $state->find($action->address);
             if ($managed === null) {
                 continue;
@@ -133,6 +206,64 @@ final readonly class CreateOnlyApply
                 ));
             }
         }
+    }
+
+    /** @return array<string, list<VariableApplyAction>> */
+    private function variableGroups(Blueprint $blueprint, ExecutionPlan $plan): array
+    {
+        $groups = [];
+        foreach ($plan as $action) {
+            if ($action->resourceType !== ResourceType::VARIABLE) {
+                continue;
+            }
+
+            $matched = null;
+            foreach ($blueprint->environments as $environment) {
+                foreach ($environment->variables as $variable) {
+                    if ($action->address->name === $environment->name . '.' . $variable->name) {
+                        $matched = new VariableApplyAction($environment->name, $variable, $action);
+                        break 2;
+                    }
+                }
+            }
+
+            if ($matched === null) {
+                throw new ApplyRefusedException(sprintf(
+                    'Variable plan address "%s" does not exist in the blueprint. No resources were modified.',
+                    (string) $action->address,
+                ));
+            }
+            $groups[$matched->environmentName][] = $matched;
+        }
+
+        return $groups;
+    }
+
+    /**
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @param list<VariableApplyAction> $group
+     */
+    private function variableFailure(
+        array $outcomes,
+        array $group,
+        string $message,
+        bool $uncertain = false,
+    ): ApplyResult {
+        foreach ($group as $item) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $item->action->address,
+                $item->action->operation === PlanOperation::CREATE
+                    ? ApplyOutcomeOperation::FAILED
+                    : ApplyOutcomeOperation::UNCHANGED,
+                $item->action->operation === PlanOperation::CREATE ? $message : null,
+            );
+        }
+
+        $status = $this->createdCount($outcomes) === 0 && !$uncertain
+            ? ApplyStatus::FAILED
+            : ApplyStatus::PARTIAL_FAILURE;
+
+        return new ApplyResult($status, ...$outcomes);
     }
 
     /** @param list<ApplyResourceOutcome> $outcomes */

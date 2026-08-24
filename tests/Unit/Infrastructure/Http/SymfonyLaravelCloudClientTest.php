@@ -8,6 +8,8 @@ use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
+use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
@@ -202,6 +204,75 @@ JSON);
             self::assertSame(1, $attempts);
             self::assertStringContainsString('uncertain', $exception->getMessage());
             self::assertStringNotContainsString('secret-token', $exception->getMessage());
+        }
+    }
+
+    public function testEnvironmentVariablesUseOneOfficialBatchPayloadAndAccept200(): void
+    {
+        $response = new MockResponse('{"data":{}}', ['http_code' => 200]);
+
+        $this->client([$response])->setEnvironmentVariables('env-123', new SetEnvironmentVariablesRequest(
+            new EnvironmentVariableInput('APP_ENV', 'production'),
+            new EnvironmentVariableInput('APP_KEY', 'sensitive-value'),
+        ));
+
+        self::assertSame('POST', $response->getRequestMethod());
+        self::assertSame('https://cloud.laravel.com/api/environments/env-123/variables', $response->getRequestUrl());
+        $body = $response->getRequestOptions()['body'];
+        self::assertIsString($body);
+        self::assertJsonStringEqualsJsonString(
+            '{"variables":[{"key":"APP_ENV","value":"production"},{"key":"APP_KEY","value":"sensitive-value"}]}',
+            $body,
+        );
+    }
+
+    /** @return iterable<string, array{int, class-string<CloudApiException>}> */
+    public static function variableMutationErrorProvider(): iterable
+    {
+        yield 'forbidden' => [403, CloudAuthenticationException::class];
+        yield 'not found' => [404, CloudResourceNotFoundException::class];
+        yield 'validation' => [422, CloudValidationException::class];
+    }
+
+    /** @param class-string<CloudApiException> $expected */
+    #[DataProvider('variableMutationErrorProvider')]
+    public function testEnvironmentVariableMutationErrorsMapSafely(int $status, string $expected): void
+    {
+        $secret = 'never-expose-this-variable-value';
+
+        try {
+            $this->client([new MockResponse('{"message":"failed"}', ['http_code' => $status])])
+                ->setEnvironmentVariables('env-1', new SetEnvironmentVariablesRequest(
+                    new EnvironmentVariableInput('APP_KEY', $secret),
+                ));
+            self::fail('Expected variable mutation failure.');
+        } catch (CloudApiException $exception) {
+            self::assertInstanceOf($expected, $exception);
+            self::assertSame('POST', $exception->method);
+            self::assertSame('/environments/env-1/variables', $exception->path);
+            self::assertStringNotContainsString($secret, $exception->getMessage());
+        }
+    }
+
+    public function testEnvironmentVariablePostTransportFailureIsNotRetriedAndIsRedacted(): void
+    {
+        $attempts = 0;
+        $secret = 'transport-variable-secret';
+        $http = new MockHttpClient(static function () use (&$attempts): never {
+            ++$attempts;
+            throw new TransportException('timeout after send');
+        });
+
+        try {
+            (new SymfonyLaravelCloudClient($http, new CloudApiToken('token')))->setEnvironmentVariables(
+                'env-1',
+                new SetEnvironmentVariablesRequest(new EnvironmentVariableInput('APP_KEY', $secret)),
+            );
+            self::fail('Expected uncertain variable mutation failure.');
+        } catch (CloudTransportException $exception) {
+            self::assertSame(1, $attempts);
+            self::assertStringContainsString('uncertain', $exception->getMessage());
+            self::assertStringNotContainsString($secret, $exception->getMessage());
         }
     }
 

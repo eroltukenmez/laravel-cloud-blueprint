@@ -39,7 +39,8 @@ final class LcbApplication extends Application
             new BlueprintValidator(),
             new BlueprintNormalizer(),
         );
-        $planner = new CreatePlan(new VariableValueResolver(new NativeEnvironmentValueProvider()));
+        $variableValues = new VariableValueResolver(new NativeEnvironmentValueProvider());
+        $planner = new CreatePlan($variableValues);
 
         $this->add(new InitCommand($files, $files, new StarterBlueprintTemplate()));
         $this->add(new ValidateCommand($files, $loader));
@@ -57,7 +58,7 @@ final class LcbApplication extends Application
             new LcbTokenProvider(),
             new SymfonyLaravelCloudClientFactory(),
             $planner,
-            new CreateOnlyApply(),
+            new CreateOnlyApply($variableValues),
             new LocalFileStateStore(),
         ));
     }

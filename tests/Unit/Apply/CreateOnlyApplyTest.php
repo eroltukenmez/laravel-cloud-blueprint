@@ -23,12 +23,15 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
+use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
+use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateLockedException;
@@ -45,7 +48,7 @@ final class CreateOnlyApplyTest extends TestCase
         $cloud = new ApplyCloudClient($events);
         $states = new ApplyStateStore($events);
 
-        $result = (new CreateOnlyApply())->execute(self::blueprint(), self::createPlan(), $cloud, $states);
+        $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(3, $result->createdCount());
@@ -71,7 +74,7 @@ final class CreateOnlyApplyTest extends TestCase
             self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
         );
 
-        $result = (new CreateOnlyApply())->execute(self::blueprint(), $plan, $cloud, $states);
+        $result = self::apply()->execute(self::blueprint(), $plan, $cloud, $states);
 
         self::assertSame(1, $result->createdCount());
         self::assertSame(1, $result->unchangedCount());
@@ -85,7 +88,7 @@ final class CreateOnlyApplyTest extends TestCase
         $states = new ApplyStateStore($events);
         $plan = new ExecutionPlan(self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::NO_CHANGE, 'app-existing'));
 
-        $result = (new CreateOnlyApply())->execute(self::blueprint(), $plan, new ApplyCloudClient($events), $states);
+        $result = self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), $states);
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(1, $result->unchangedCount());
@@ -100,13 +103,13 @@ final class CreateOnlyApplyTest extends TestCase
 
         $this->expectException(ApplyRefusedException::class);
         try {
-            (new CreateOnlyApply())->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
         } finally {
             self::assertSame([], $events->values);
         }
     }
 
-    public function testVariableCreatePlanIsRefusedBeforeLockMutationOrStatePersistence(): void
+    public function testVariableAddressMissingFromBlueprintIsRefusedBeforeLockOrMutation(): void
     {
         $events = new ApplyEvents();
         $cloud = new ApplyCloudClient($events);
@@ -116,10 +119,10 @@ final class CreateOnlyApplyTest extends TestCase
         );
 
         try {
-            (new CreateOnlyApply())->execute(self::blueprint(), $plan, $cloud, $states);
+            self::apply()->execute(self::blueprint(), $plan, $cloud, $states);
             self::fail('Expected variable mutation refusal.');
         } catch (ApplyRefusedException $exception) {
-            self::assertStringContainsString('not supported', $exception->getMessage());
+            self::assertStringContainsString('does not exist in the blueprint', $exception->getMessage());
         }
 
         self::assertSame([], $events->values);
@@ -133,7 +136,7 @@ final class CreateOnlyApplyTest extends TestCase
 
         $this->expectException(StateIdentityConflictException::class);
         try {
-            (new CreateOnlyApply())->execute(self::blueprint(), self::createPlan(), new ApplyCloudClient($events), $states);
+            self::apply()->execute(self::blueprint(), self::createPlan(), new ApplyCloudClient($events), $states);
         } finally {
             self::assertSame(['lock', 'release'], $events->values);
         }
@@ -148,7 +151,7 @@ final class CreateOnlyApplyTest extends TestCase
         $plan = new ExecutionPlan(self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::NO_CHANGE, 'app-new'));
 
         $this->expectException(StateIdentityConflictException::class);
-        (new CreateOnlyApply())->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events, $state));
+        self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events, $state));
     }
 
     public function testApplicationCreateFailureWritesNoStateAndReleasesLock(): void
@@ -157,7 +160,7 @@ final class CreateOnlyApplyTest extends TestCase
         $cloud = new ApplyCloudClient($events, failApplication: true);
         $states = new ApplyStateStore($events);
 
-        $result = (new CreateOnlyApply())->execute(self::blueprint(), self::createPlan(), $cloud, $states);
+        $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
         self::assertSame([], $states->state->resources());
@@ -169,7 +172,7 @@ final class CreateOnlyApplyTest extends TestCase
         $events = new ApplyEvents();
         $states = new ApplyStateStore($events, failSaveNumber: 1);
 
-        $result = (new CreateOnlyApply())->execute(self::blueprint(), self::createPlan(), new ApplyCloudClient($events), $states);
+        $result = self::apply()->execute(self::blueprint(), self::createPlan(), new ApplyCloudClient($events), $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertSame(['lock', 'create:application', 'save:application.my-api', 'release'], $events->values);
@@ -181,7 +184,7 @@ final class CreateOnlyApplyTest extends TestCase
         $states = new ApplyStateStore($events);
         $cloud = new ApplyCloudClient($events, failEnvironmentNumber: 1);
 
-        $result = (new CreateOnlyApply())->execute(self::blueprint(), self::createPlan(), $cloud, $states);
+        $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertNotNull($states->state->find(self::address(ResourceType::APPLICATION, 'my-api')));
@@ -194,7 +197,7 @@ final class CreateOnlyApplyTest extends TestCase
         $states = new ApplyStateStore($events);
         $cloud = new ApplyCloudClient($events, failEnvironmentNumber: 2);
 
-        $result = (new CreateOnlyApply())->execute(self::blueprint(), self::createPlan(), $cloud, $states);
+        $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertNotNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
@@ -208,7 +211,7 @@ final class CreateOnlyApplyTest extends TestCase
 
         $this->expectException(StateLockedException::class);
         try {
-            (new CreateOnlyApply())->execute(self::blueprint(), self::createPlan(), new ApplyCloudClient($events), $states);
+            self::apply()->execute(self::blueprint(), self::createPlan(), new ApplyCloudClient($events), $states);
         } finally {
             self::assertSame(['lock'], $events->values);
         }
@@ -221,6 +224,11 @@ final class CreateOnlyApplyTest extends TestCase
             self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
             self::action(ResourceType::ENVIRONMENT, 'staging', PlanOperation::CREATE),
         );
+    }
+
+    private static function apply(): CreateOnlyApply
+    {
+        return new CreateOnlyApply(new VariableValueResolver(new ApplyEnvironmentValueProvider()));
     }
 
     private static function action(ResourceType $type, string $name, PlanOperation $operation, ?string $remoteId = null): PlanAction
@@ -292,6 +300,19 @@ final class ApplyCloudClient implements LaravelCloudClient
             throw new CloudApiException('Environment creation failed.', 'POST', '/environments', 422);
         }
         return new CloudEnvironment('env-' . $request->name, $applicationId, $request->name, $request->branch);
+    }
+
+    public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
+    {
+        $this->events->values[] = 'set:variables.' . $environmentId;
+    }
+}
+
+final readonly class ApplyEnvironmentValueProvider implements EnvironmentValueProvider
+{
+    public function value(string $name): ?string
+    {
+        return null;
     }
 }
 

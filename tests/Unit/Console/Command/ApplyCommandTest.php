@@ -19,6 +19,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
@@ -119,18 +120,47 @@ final class ApplyCommandTest extends TestCase
         self::assertStringContainsString("No changes.\n\nLaravel Cloud infrastructure matches the blueprint.", $tester->getDisplay());
     }
 
+    public function testVariableApplyTextAndJsonExposeOutcomesButNeverValuesOrReferences(): void
+    {
+        [$text, $textCloud] = $this->tester(blueprint: self::blueprintWithVariables());
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute(['--auto-approve' => true]));
+        self::assertSame(3, $textCloud->mutationCount);
+        self::assertStringContainsString('variable.production.APP_KEY: created', $text->getDisplay());
+
+        [$json, $jsonCloud] = $this->tester(blueprint: self::blueprintWithVariables());
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute([
+            '--auto-approve' => true,
+            '--json' => true,
+        ]));
+        self::assertSame(3, $jsonCloud->mutationCount);
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['summary']);
+        self::assertSame(4, $decoded['summary']['created']);
+
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
+            self::assertStringNotContainsString('literal-secret-value', $output);
+            self::assertStringNotContainsString('resolved-apply-secret', $output);
+            self::assertStringNotContainsString('LOCAL_APP_KEY', $output);
+        }
+    }
+
     /** @return array{CommandTester, ApplyCommandCloudClient, ApplyCommandStateStore} */
-    private function tester(?ApplyCommandCloudClient $cloud = null): array
+    private function tester(
+        ?ApplyCommandCloudClient $cloud = null,
+        ?string $blueprint = null,
+    ): array
     {
         $cloud ??= ApplyCommandCloudClient::empty();
         $state = new ApplyCommandStateStore();
+        $values = new VariableValueResolver(new ApplyCommandEnvironmentValueProvider());
         $command = new ApplyCommand(
-            new ApplyCommandFileReader(self::blueprint()),
+            new ApplyCommandFileReader($blueprint ?? self::blueprint()),
             new BlueprintLoader(new SymfonyYamlDecoder(), new BlueprintValidator(), new BlueprintNormalizer()),
             new ApplyCommandTokenProvider(new CloudApiToken('super-secret-token')),
             new ApplyCommandClientFactory($cloud),
-            new CreatePlan(new VariableValueResolver(new ApplyCommandEnvironmentValueProvider())),
-            new CreateOnlyApply(),
+            new CreatePlan($values),
+            new CreateOnlyApply($values),
             $state,
         );
 
@@ -154,6 +184,30 @@ application:
 environments:
   production:
     branch: main
+YAML;
+    }
+
+    private static function blueprintWithVariables(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: my-api
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/my-api
+environments:
+  production:
+    branch: main
+    variables:
+      APP_LITERAL:
+        value: literal-secret-value
+        sensitive: true
+      APP_KEY:
+        from_env: LOCAL_APP_KEY
+        sensitive: true
 YAML;
     }
 }
@@ -257,13 +311,18 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         ++$this->mutationCount;
         return new CloudEnvironment('env-created', $applicationId, $request->name, $request->branch);
     }
+
+    public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
+    {
+        ++$this->mutationCount;
+    }
 }
 
 final readonly class ApplyCommandEnvironmentValueProvider implements EnvironmentValueProvider
 {
-    public function value(string $name): ?string
+    public function value(string $name): string
     {
-        return null;
+        return 'resolved-apply-secret';
     }
 }
 

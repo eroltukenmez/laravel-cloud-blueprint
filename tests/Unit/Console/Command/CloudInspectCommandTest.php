@@ -14,6 +14,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LogicException;
 use LaravelCloudBlueprint\Console\Command\CloudInspectCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
@@ -134,5 +135,10 @@ final class FakeLaravelCloudClient implements LaravelCloudClient
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
     {
         throw new LogicException('Read-only fake must not create environments.');
+    }
+
+    public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
+    {
+        throw new LogicException('Read-only fake must not set environment variables.');
     }
 }
