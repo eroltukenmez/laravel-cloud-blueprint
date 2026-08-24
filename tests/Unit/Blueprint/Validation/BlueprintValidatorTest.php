@@ -51,15 +51,19 @@ final class BlueprintValidatorTest extends TestCase
         yield 'unknown root property' => [self::data(unknownRootProperty: true), 'unexpected', ValidationErrorCode::UNKNOWN_PROPERTY];
         yield 'unknown application property' => [self::data(unknownApplicationProperty: true), 'application.unexpected', ValidationErrorCode::UNKNOWN_PROPERTY];
         yield 'empty organization' => [self::data(organization: ''), 'organization', ValidationErrorCode::EMPTY_VALUE];
+        yield 'whitespace organization' => [self::data(organization: '   '), 'organization', ValidationErrorCode::EMPTY_VALUE];
         yield 'empty application name' => [self::data(applicationName: ''), 'application.name', ValidationErrorCode::EMPTY_VALUE];
+        yield 'whitespace application name' => [self::data(applicationName: " \t "), 'application.name', ValidationErrorCode::EMPTY_VALUE];
         yield 'unsupported version' => [self::data(version: 2), 'version', ValidationErrorCode::UNSUPPORTED_VERSION];
         yield 'unsupported provider' => [self::data(provider: 'gitlab'), 'application.source.provider', ValidationErrorCode::UNSUPPORTED_PROVIDER];
         yield 'missing branch' => [self::data(omitBranch: true), 'environments.production.branch', ValidationErrorCode::REQUIRED];
+        yield 'whitespace branch' => [self::data(branch: '   '), 'environments.production.branch', ValidationErrorCode::EMPTY_VALUE];
         yield 'variables is not a mapping' => [self::data(variables: ['item']), 'environments.production.variables', ValidationErrorCode::INVALID_TYPE];
         yield 'both variable sources' => [self::data(variable: ['value' => 'production', 'from_env' => 'APP_ENV']), 'environments.production.variables.APP_ENV', ValidationErrorCode::INVALID_VARIABLE_SOURCE];
         yield 'neither variable source' => [self::data(variable: []), 'environments.production.variables.APP_ENV', ValidationErrorCode::INVALID_VARIABLE_SOURCE];
         yield 'non-string literal' => [self::data(variable: ['value' => false]), 'environments.production.variables.APP_ENV.value', ValidationErrorCode::INVALID_TYPE];
         yield 'empty environment reference' => [self::data(variable: ['from_env' => '']), 'environments.production.variables.APP_ENV.from_env', ValidationErrorCode::EMPTY_VALUE];
+        yield 'whitespace environment reference' => [self::data(variable: ['from_env' => " \t "]), 'environments.production.variables.APP_ENV.from_env', ValidationErrorCode::EMPTY_VALUE];
         yield 'non-boolean sensitive' => [self::data(variable: ['value' => 'production', 'sensitive' => 'yes']), 'environments.production.variables.APP_ENV.sensitive', ValidationErrorCode::INVALID_TYPE];
         yield 'unknown variable property' => [self::data(variable: ['value' => 'production', 'unexpected' => true]), 'environments.production.variables.APP_ENV.unexpected', ValidationErrorCode::UNKNOWN_PROPERTY];
     }

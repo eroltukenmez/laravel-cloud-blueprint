@@ -101,7 +101,7 @@ final readonly class BlueprintValidator
         }
 
         foreach ($environments as $name => $environment) {
-            if ($name === '') {
+            if (trim($name) === '') {
                 $errors[] = $this->error('environments', ValidationErrorCode::EMPTY_VALUE, 'Environment names must be non-empty strings.');
                 continue;
             }
@@ -137,7 +137,7 @@ final readonly class BlueprintValidator
         }
 
         foreach ($variables as $name => $variable) {
-            if ($name === '') {
+            if (trim($name) === '') {
                 $errors[] = $this->error($path, ValidationErrorCode::EMPTY_VALUE, 'Variable names must be non-empty strings.');
                 continue;
             }
@@ -182,7 +182,7 @@ final readonly class BlueprintValidator
         if ($hasReference) {
             if (!is_string($variable['from_env'])) {
                 $errors[] = $this->error($path . '.from_env', ValidationErrorCode::INVALID_TYPE, 'from_env must be a string.');
-            } elseif ($variable['from_env'] === '') {
+            } elseif (trim($variable['from_env']) === '') {
                 $errors[] = $this->error($path . '.from_env', ValidationErrorCode::EMPTY_VALUE, 'from_env must not be empty.');
             }
         }
@@ -200,7 +200,7 @@ final readonly class BlueprintValidator
 
         if (!is_string($data[$key])) {
             $errors[] = $this->error($path, ValidationErrorCode::INVALID_TYPE, 'Value must be a string.');
-        } elseif ($data[$key] === '') {
+        } elseif (trim($data[$key]) === '') {
             $errors[] = $this->error($path, ValidationErrorCode::EMPTY_VALUE, 'Value must not be empty.');
         }
     }
