@@ -1,0 +1,27 @@
+{
+  "data": [
+    {
+      "id": "env-1",
+      "type": "environments",
+      "attributes": {"name": "production", "slug": "production"},
+      "relationships": {
+        "application": {"data": {"type": "applications", "id": "app-1"}},
+        "branch": {"data": {"type": "branches", "id": "branch-1"}}
+      }
+    },
+    {
+      "id": "env-2",
+      "type": "environments",
+      "attributes": {"name": "staging", "slug": "staging"},
+      "relationships": {
+        "application": {"data": {"type": "applications", "id": "app-1"}},
+        "branch": {"data": null}
+      }
+    }
+  ],
+  "links": {"first": "https://cloud.laravel.com/api/applications/app-1/environments", "last": null, "prev": null, "next": null},
+  "meta": {"current_page": 1, "last_page": 1, "per_page": 20, "total": 2},
+  "included": [
+    {"id": "branch-1", "type": "branches", "attributes": {"name": "main"}}
+  ]
+}

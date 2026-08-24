@@ -1,0 +1,21 @@
+{
+  "data": [
+    {
+      "id": "app-2",
+      "type": "applications",
+      "attributes": {
+        "name": "Worker",
+        "slug": null,
+        "region": "us-east-2",
+        "repository": null
+      }
+    }
+  ],
+  "links": {
+    "first": "https://cloud.laravel.com/api/applications?page=1",
+    "last": "https://cloud.laravel.com/api/applications?page=2",
+    "prev": "https://cloud.laravel.com/api/applications?page=1",
+    "next": null
+  },
+  "meta": {"current_page": 2, "last_page": 2, "per_page": 1, "total": 2}
+}
