@@ -11,6 +11,9 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LogicException;
 use LaravelCloudBlueprint\Console\Command\CloudInspectCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
 use PHPUnit\Framework\TestCase;
@@ -115,5 +118,15 @@ final class FakeLaravelCloudClient implements LaravelCloudClient
             new CloudEnvironment('env-1', $applicationId, 'production', 'main'),
             new CloudEnvironment('env-2', $applicationId, 'staging', null),
         ];
+    }
+
+    public function createApplication(CreateApplicationRequest $request): CloudApplication
+    {
+        throw new LogicException('Read-only fake must not create applications.');
+    }
+
+    public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
+    {
+        throw new LogicException('Read-only fake must not create environments.');
     }
 }

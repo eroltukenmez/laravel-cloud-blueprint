@@ -1,0 +1,286 @@
+<?php
+
+declare(strict_types=1);
+
+namespace LaravelCloudBlueprint\Tests\Unit\Console\Command;
+
+use LaravelCloudBlueprint\Application\BlueprintLoader;
+use LaravelCloudBlueprint\Application\File\FileReader;
+use LaravelCloudBlueprint\Apply\CreateOnlyApply;
+use LaravelCloudBlueprint\Blueprint\Normalization\BlueprintNormalizer;
+use LaravelCloudBlueprint\Blueprint\Validation\BlueprintValidator;
+use LaravelCloudBlueprint\Cloud\CloudApiToken;
+use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
+use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Console\Command\ApplyCommand;
+use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
+use LaravelCloudBlueprint\Planning\CreatePlan;
+use LaravelCloudBlueprint\State\Contract\StateStore;
+use LaravelCloudBlueprint\State\Contract\StateTransaction;
+use LaravelCloudBlueprint\State\StateDocument;
+use PHPUnit\Framework\TestCase;
+use Symfony\Component\Console\Application;
+use Symfony\Component\Console\Tester\CommandTester;
+
+final class ApplyCommandTest extends TestCase
+{
+    public function testInteractiveDeclinePerformsNoMutation(): void
+    {
+        [$tester, $cloud, $state] = $this->tester();
+        $tester->setInputs(['no']);
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute([]));
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+        self::assertStringContainsString('Apply cancelled. No resources were modified.', $tester->getDisplay());
+    }
+
+    public function testAutoApproveExecutesWithoutPromptAndRendersDeterministically(): void
+    {
+        [$tester, $cloud, $state] = $this->tester();
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--auto-approve' => true]));
+        self::assertSame(2, $cloud->mutationCount);
+        self::assertSame(1, $state->beginCount);
+        self::assertSame(1, $state->releaseCount);
+        self::assertStringNotContainsString('Apply these changes?', $tester->getDisplay());
+        self::assertSame(
+            "Laravel Cloud Blueprint Apply\n\n"
+            . "+ application.my-api\n  Application does not exist.\n"
+            . "+ environment.production\n  Environment does not exist because the application will be created.\n\n"
+            . "application.my-api: created\n"
+            . "environment.production: created\n"
+            . "Apply success: 2 created, 0 unchanged.\n",
+            $tester->getDisplay(),
+        );
+    }
+
+    public function testNonInteractiveWithoutAutoApproveRefusesMutation(): void
+    {
+        [$tester, $cloud, $state] = $this->tester();
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--non-interactive' => true]));
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+        self::assertStringContainsString('requires --auto-approve', $tester->getDisplay());
+    }
+
+    public function testNonInteractiveWithAutoApproveExecutes(): void
+    {
+        [$tester, $cloud, $state] = $this->tester();
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute([
+            '--non-interactive' => true,
+            '--auto-approve' => true,
+        ]));
+        self::assertSame(2, $cloud->mutationCount);
+        self::assertSame(1, $state->releaseCount);
+    }
+
+    public function testJsonOutputContainsOnlyValidStructuredDataAndNoToken(): void
+    {
+        [$tester, $cloud] = $this->tester();
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute([
+            '--json' => true,
+            '--auto-approve' => true,
+        ]));
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('success', $decoded['status']);
+        self::assertSame(['created' => 2, 'unchanged' => 0], $decoded['summary']);
+        self::assertIsArray($decoded['resources']);
+        self::assertIsArray($decoded['resources'][0]);
+        self::assertSame('application.my-api', $decoded['resources'][0]['resource']);
+        self::assertSame('created', $decoded['resources'][0]['operation']);
+        self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
+        self::assertSame(2, $cloud->mutationCount);
+    }
+
+    public function testNoChangeDoesNotPromptMutateOrManageExistingResources(): void
+    {
+        $cloud = ApplyCommandCloudClient::matching();
+        [$tester, , $state] = $this->tester($cloud);
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute([]));
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+        self::assertSame([], $state->state->resources());
+        self::assertStringContainsString("No changes.\n\nLaravel Cloud infrastructure matches the blueprint.", $tester->getDisplay());
+    }
+
+    /** @return array{CommandTester, ApplyCommandCloudClient, ApplyCommandStateStore} */
+    private function tester(?ApplyCommandCloudClient $cloud = null): array
+    {
+        $cloud ??= ApplyCommandCloudClient::empty();
+        $state = new ApplyCommandStateStore();
+        $command = new ApplyCommand(
+            new ApplyCommandFileReader(self::blueprint()),
+            new BlueprintLoader(new SymfonyYamlDecoder(), new BlueprintValidator(), new BlueprintNormalizer()),
+            new ApplyCommandTokenProvider(new CloudApiToken('super-secret-token')),
+            new ApplyCommandClientFactory($cloud),
+            new CreatePlan(),
+            new CreateOnlyApply(),
+            $state,
+        );
+
+        $application = new Application();
+        $application->add($command);
+
+        return [new CommandTester($application->find('apply')), $cloud, $state];
+    }
+
+    private static function blueprint(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: my-api
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/my-api
+environments:
+  production:
+    branch: main
+YAML;
+    }
+}
+
+final readonly class ApplyCommandFileReader implements FileReader
+{
+    public function __construct(private string $contents)
+    {
+    }
+
+    public function exists(string $path): bool
+    {
+        return true;
+    }
+
+    public function read(string $path): string
+    {
+        return $this->contents;
+    }
+}
+
+final readonly class ApplyCommandTokenProvider implements CloudTokenProvider
+{
+    public function __construct(private ?CloudApiToken $token)
+    {
+    }
+
+    public function token(): ?CloudApiToken
+    {
+        return $this->token;
+    }
+}
+
+final readonly class ApplyCommandClientFactory implements LaravelCloudClientFactory
+{
+    public function __construct(private LaravelCloudClient $cloud)
+    {
+    }
+
+    public function create(CloudApiToken $token): LaravelCloudClient
+    {
+        return $this->cloud;
+    }
+}
+
+final class ApplyCommandCloudClient implements LaravelCloudClient
+{
+    public int $mutationCount = 0;
+
+    /**
+     * @param list<CloudApplication> $applications
+     * @param list<CloudEnvironment> $environments
+     */
+    private function __construct(
+        private readonly array $applications,
+        private readonly array $environments,
+    ) {
+    }
+
+    public static function empty(): self
+    {
+        return new self([], []);
+    }
+
+    public static function matching(): self
+    {
+        return new self(
+            [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
+            [new CloudEnvironment('env-existing', 'app-existing', 'production', 'main')],
+        );
+    }
+
+    public function organization(): CloudOrganization
+    {
+        return new CloudOrganization('org-1', 'Acme', 'acme');
+    }
+
+    public function applications(): array
+    {
+        return $this->applications;
+    }
+
+    public function environments(string $applicationId): array
+    {
+        return $this->environments;
+    }
+
+    public function createApplication(CreateApplicationRequest $request): CloudApplication
+    {
+        ++$this->mutationCount;
+        return new CloudApplication('app-created', $request->name, $request->name, $request->region, $request->repository);
+    }
+
+    public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
+    {
+        ++$this->mutationCount;
+        return new CloudEnvironment('env-created', $applicationId, $request->name, $request->branch);
+    }
+}
+
+final class ApplyCommandStateStore implements StateStore, StateTransaction
+{
+    public int $beginCount = 0;
+    public int $releaseCount = 0;
+    public StateDocument $state;
+
+    public function __construct()
+    {
+        $this->state = StateDocument::empty();
+    }
+
+    public function load(): StateDocument
+    {
+        return $this->state;
+    }
+
+    public function save(StateDocument $state): StateDocument
+    {
+        $this->state = $state->withSerial($this->state->serial + 1);
+        return $this->state;
+    }
+
+    public function begin(): StateTransaction
+    {
+        ++$this->beginCount;
+        return $this;
+    }
+
+    public function release(): void
+    {
+        ++$this->releaseCount;
+    }
+}

@@ -6,11 +6,11 @@ namespace LaravelCloudBlueprint\State\Contract;
 
 use LaravelCloudBlueprint\State\StateDocument;
 
-interface StateStore
+interface StateTransaction
 {
     public function load(): StateDocument;
 
     public function save(StateDocument $state): StateDocument;
 
-    public function begin(): StateTransaction;
+    public function release(): void;
 }

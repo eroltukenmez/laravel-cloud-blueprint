@@ -1,0 +1,231 @@
+<?php
+
+declare(strict_types=1);
+
+namespace LaravelCloudBlueprint\Console\Command;
+
+use JsonException;
+use LaravelCloudBlueprint\Application\BlueprintLoader;
+use LaravelCloudBlueprint\Application\File\FileOperationException;
+use LaravelCloudBlueprint\Application\File\FileReader;
+use LaravelCloudBlueprint\Apply\ApplyResourceOutcome;
+use LaravelCloudBlueprint\Apply\ApplyResult;
+use LaravelCloudBlueprint\Apply\ApplyStatus;
+use LaravelCloudBlueprint\Apply\CreateOnlyApply;
+use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
+use LaravelCloudBlueprint\Apply\Exception\StateIdentityConflictException;
+use LaravelCloudBlueprint\Blueprint\Decoder\StructuredDataDecodingException;
+use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
+use LaravelCloudBlueprint\Cloud\Exception\CloudException;
+use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Planning\CreatePlan;
+use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
+use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
+use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\State\Contract\StateStore;
+use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
+use LaravelCloudBlueprint\State\Exception\StateLockedException;
+use LaravelCloudBlueprint\State\Exception\StateStorageException;
+use Symfony\Component\Console\Attribute\AsCommand;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Helper\QuestionHelper;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Question\ConfirmationQuestion;
+
+#[AsCommand(name: 'apply', description: 'Apply CREATE-only Laravel Cloud changes.')]
+final class ApplyCommand extends Command
+{
+    public function __construct(
+        private readonly FileReader $files,
+        private readonly BlueprintLoader $blueprints,
+        private readonly CloudTokenProvider $tokens,
+        private readonly LaravelCloudClientFactory $clients,
+        private readonly CreatePlan $planner,
+        private readonly CreateOnlyApply $apply,
+        private readonly StateStore $states,
+    ) {
+        parent::__construct();
+    }
+
+    protected function configure(): void
+    {
+        $this
+            ->addOption('file', null, InputOption::VALUE_REQUIRED, 'Blueprint file path.', InitCommand::DEFAULT_FILE)
+            ->addOption('auto-approve', null, InputOption::VALUE_NONE, 'Apply without confirmation.')
+            ->addOption('non-interactive', null, InputOption::VALUE_NONE, 'Disable interactive approval.')
+            ->addOption('json', null, InputOption::VALUE_NONE, 'Output structured JSON.');
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $jsonOutput = $input->getOption('json') === true;
+        $path = $input->getOption('file');
+        if (!is_string($path)) {
+            return $this->error($output, 'The --file option must be a path.', ExitCode::GENERAL_ERROR, $jsonOutput);
+        }
+        if (!$this->files->exists($path)) {
+            return $this->error($output, sprintf('Blueprint file "%s" does not exist.', $path), ExitCode::GENERAL_ERROR, $jsonOutput);
+        }
+
+        try {
+            $loaded = $this->blueprints->load($this->files->read($path));
+        } catch (StructuredDataDecodingException) {
+            return $this->error($output, 'Blueprint YAML could not be decoded.', ExitCode::BLUEPRINT_ERROR, $jsonOutput);
+        } catch (FileOperationException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
+        }
+
+        if (!$loaded->isValid()) {
+            if ($jsonOutput) {
+                return $this->validationJson($loaded->validation, $output);
+            }
+            foreach ($loaded->validation as $error) {
+                $output->writeln(sprintf('[%s] %s: %s', $error->code->value, $error->path, $error->message));
+            }
+            $output->writeln(sprintf('Blueprint has %d validation error(s).', count($loaded->validation)));
+            return ExitCode::BLUEPRINT_ERROR->value;
+        }
+
+        $token = $this->tokens->token();
+        if ($token === null) {
+            return $this->error($output, 'LCB_TOKEN is not set.', ExitCode::GENERAL_ERROR, $jsonOutput);
+        }
+
+        try {
+            $cloud = $this->clients->create($token);
+            $plan = $this->planner->create($loaded->blueprint(), $cloud);
+        } catch (OrganizationMismatchException|AmbiguousResourceMatchException|CloudException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
+        }
+
+        if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
+            return $this->error($output, 'Apply refused. The plan contains unsupported changes. No resources were modified.', ExitCode::GENERAL_ERROR, $jsonOutput);
+        }
+
+        if ($plan->countByOperation(PlanOperation::CREATE) === 0) {
+            if ($jsonOutput) {
+                return $this->json(['status' => 'success', 'summary' => ['created' => 0, 'unchanged' => count($plan)], 'resources' => []], $output);
+            }
+            $output->writeln('No changes.');
+            $output->writeln('');
+            $output->writeln('Laravel Cloud infrastructure matches the blueprint.');
+            return ExitCode::SUCCESS->value;
+        }
+
+        $autoApprove = $input->getOption('auto-approve') === true;
+        $nonInteractive = $input->getOption('non-interactive') === true || !$input->isInteractive();
+
+        if (!$autoApprove && ($nonInteractive || $jsonOutput)) {
+            return $this->error($output, 'Apply requires --auto-approve when running non-interactively.', ExitCode::GENERAL_ERROR, $jsonOutput);
+        }
+
+        if (!$jsonOutput) {
+            $this->renderPlan($plan, $output);
+        }
+
+        if (!$autoApprove) {
+            $helper = $this->getHelper('question');
+            if (!$helper instanceof QuestionHelper
+                || !$helper->ask($input, $output, new ConfirmationQuestion('Apply these changes? [y/N] ', false))) {
+                $output->writeln('Apply cancelled. No resources were modified.');
+                return ExitCode::SUCCESS->value;
+            }
+        }
+
+        try {
+            $result = $this->apply->execute($loaded->blueprint(), $plan, $cloud, $this->states);
+        } catch (ApplyRefusedException|StateIdentityConflictException|StateCorruptedException|StateLockedException|StateStorageException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
+        }
+
+        if ($jsonOutput) {
+            $exit = $this->renderResultJson($result, $output);
+        } else {
+            $this->renderResultText($result, $output);
+            $exit = ExitCode::SUCCESS->value;
+        }
+
+        return $result->status === ApplyStatus::SUCCESS ? $exit : ExitCode::GENERAL_ERROR->value;
+    }
+
+    private function renderPlan(\LaravelCloudBlueprint\Planning\ExecutionPlan $plan, OutputInterface $output): void
+    {
+        $output->writeln('Laravel Cloud Blueprint Apply');
+        $output->writeln('');
+        foreach ($plan as $action) {
+            $symbol = $action->operation === PlanOperation::CREATE ? '+' : '=';
+            $output->writeln(sprintf('%s %s', $symbol, (string) $action->address));
+            $output->writeln('  ' . $action->reason);
+        }
+        $output->writeln('');
+    }
+
+    private function renderResultText(ApplyResult $result, OutputInterface $output): void
+    {
+        foreach ($result as $outcome) {
+            $output->writeln(sprintf('%s: %s', (string) $outcome->address, $outcome->operation->value));
+            if ($outcome->message !== null) {
+                $output->writeln('  ' . $outcome->message);
+            }
+        }
+        $output->writeln(sprintf(
+            'Apply %s: %d created, %d unchanged.',
+            str_replace('_', ' ', $result->status->value),
+            $result->createdCount(),
+            $result->unchangedCount(),
+        ));
+    }
+
+    private function renderResultJson(ApplyResult $result, OutputInterface $output): int
+    {
+        return $this->json([
+            'status' => $result->status->value,
+            'summary' => ['created' => $result->createdCount(), 'unchanged' => $result->unchangedCount()],
+            'resources' => array_map(
+                static fn (ApplyResourceOutcome $outcome): array => [
+                    'resource' => (string) $outcome->address,
+                    'operation' => $outcome->operation->value,
+                    ...($outcome->message === null ? [] : ['message' => $outcome->message]),
+                ],
+                iterator_to_array($result, false),
+            ),
+        ], $output);
+    }
+
+    private function error(OutputInterface $output, string $message, ExitCode $code, bool $json = false): int
+    {
+        if ($json) {
+            $this->json(['status' => 'error', 'message' => $message], $output);
+            return $code->value;
+        }
+
+        $output->writeln(sprintf('<error>%s</error>', $message));
+        return $code->value;
+    }
+
+    /** @param array<string, mixed> $data */
+    private function json(array $data, OutputInterface $output): int
+    {
+        try {
+            $output->writeln(json_encode($data, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+            return ExitCode::SUCCESS->value;
+        } catch (JsonException) {
+            return $this->error($output, 'Unable to encode apply output.', ExitCode::GENERAL_ERROR);
+        }
+    }
+
+    private function validationJson(\LaravelCloudBlueprint\Blueprint\Validation\ValidationResult $validation, OutputInterface $output): int
+    {
+        $this->json([
+            'status' => 'validation_failed',
+            'errors' => array_map(
+                static fn ($error): array => ['path' => $error->path, 'code' => $error->code->value, 'message' => $error->message],
+                iterator_to_array($validation, false),
+            ),
+        ], $output);
+        return ExitCode::BLUEPRINT_ERROR->value;
+    }
+}

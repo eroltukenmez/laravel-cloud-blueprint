@@ -15,6 +15,8 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Console\Command\PlanCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
@@ -22,6 +24,7 @@ use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Tester\CommandTester;
+use LogicException;
 
 final class PlanCommandTest extends TestCase
 {
@@ -171,6 +174,16 @@ class PlanCommandCloudClient implements LaravelCloudClient
     public function environments(string $applicationId): array
     {
         return [new CloudEnvironment('env-1', $applicationId, 'production', 'main')];
+    }
+
+    public function createApplication(CreateApplicationRequest $request): CloudApplication
+    {
+        throw new LogicException('Plan fake must remain read-only.');
+    }
+
+    public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
+    {
+        throw new LogicException('Plan fake must remain read-only.');
     }
 }
 

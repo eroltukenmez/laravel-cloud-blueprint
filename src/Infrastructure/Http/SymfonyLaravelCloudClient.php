@@ -9,12 +9,15 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use Symfony\Contracts\HttpClient\Exception\DecodingExceptionInterface;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -90,6 +93,45 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
         return $environments;
     }
 
+    public function createApplication(CreateApplicationRequest $request): CloudApplication
+    {
+        $path = '/applications';
+        $document = $this->post($path, [
+            'repository' => $request->repository,
+            'name' => $request->name,
+            'region' => $request->region,
+            'source_control_provider_type' => $request->sourceProvider->value,
+        ]);
+        $resource = $this->mappingAt($document, 'data', $path);
+        $attributes = $this->mappingAt($resource, 'attributes', $path);
+        $repository = $this->optionalMapping($attributes, 'repository', $path);
+
+        return new CloudApplication(
+            $this->requiredString($resource, 'id', $path),
+            $this->requiredString($attributes, 'name', $path),
+            $this->optionalString($attributes, 'slug', $path),
+            $this->requiredString($attributes, 'region', $path),
+            $repository === null ? null : $this->requiredString($repository, 'full_name', $path),
+        );
+    }
+
+    public function createEnvironment(
+        string $applicationId,
+        CreateEnvironmentRequest $request,
+    ): CloudEnvironment {
+        $path = sprintf('/applications/%s/environments', rawurlencode($applicationId));
+        $document = $this->post($path, ['branch' => $request->branch, 'name' => $request->name]);
+        $resource = $this->mappingAt($document, 'data', $path);
+        $attributes = $this->mappingAt($resource, 'attributes', $path);
+
+        return new CloudEnvironment(
+            $this->requiredString($resource, 'id', $path),
+            $applicationId,
+            $this->requiredString($attributes, 'name', $path),
+            $request->branch,
+        );
+    }
+
     /**
      * @return iterable<array{array<string, mixed>, string}>
      */
@@ -160,18 +202,66 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
         return $this->valueAsMapping($data, $path);
     }
 
-    private function guardStatus(int $status, string $path, ?string $requestId): void
+    /**
+     * @param array<string, string> $payload
+     * @return array<string, mixed>
+     */
+    private function post(string $path, array $payload): array
+    {
+        try {
+            $response = $this->http->request('POST', self::BASE_URL . $path, [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $this->token->value(),
+                    'Accept' => 'application/json',
+                    'Content-Type' => 'application/json',
+                    'User-Agent' => self::USER_AGENT,
+                ],
+                'json' => $payload,
+            ]);
+            $status = $response->getStatusCode();
+            $requestId = $this->requestId($response);
+        } catch (TransportExceptionInterface) {
+            throw new CloudTransportException(
+                'Laravel Cloud create request failed with an uncertain remote outcome. Run plan before retrying.',
+                'POST',
+                $path,
+            );
+        }
+
+        $this->guardStatus($status, $path, $requestId, 'POST');
+
+        if ($status !== 201) {
+            throw new CloudResponseException('Laravel Cloud create response did not return HTTP 201.', 'POST', $path, $status, $requestId);
+        }
+
+        try {
+            return $this->valueAsMapping($response->toArray(false), $path);
+        } catch (DecodingExceptionInterface) {
+            throw new CloudResponseException('Laravel Cloud returned an invalid JSON response.', 'POST', $path, $status, $requestId);
+        } catch (TransportExceptionInterface) {
+            throw new CloudTransportException(
+                'Laravel Cloud create response could not be read; the remote outcome is uncertain. Run plan before retrying.',
+                'POST',
+                $path,
+                $status,
+                $requestId,
+            );
+        }
+    }
+
+    private function guardStatus(int $status, string $path, ?string $requestId, string $method = 'GET'): void
     {
         if ($status >= 200 && $status < 300) {
             return;
         }
 
-        $context = ['GET', $this->safePath($path), $status, $requestId];
+        $context = [$method, $this->safePath($path), $status, $requestId];
 
         throw match (true) {
             $status === 401 || $status === 403 => new CloudAuthenticationException('Laravel Cloud authentication or authorization failed.', ...$context),
             $status === 404 => new CloudResourceNotFoundException('The requested Laravel Cloud resource was not found.', ...$context),
             $status === 429 => new CloudRateLimitException('Laravel Cloud API rate limit exceeded.', ...$context),
+            $status === 422 => new CloudValidationException('Laravel Cloud rejected the create request.', ...$context),
             $status >= 500 => new CloudApiException('Laravel Cloud API is unavailable.', ...$context),
             default => new CloudApiException('Laravel Cloud API request failed.', ...$context),
         };

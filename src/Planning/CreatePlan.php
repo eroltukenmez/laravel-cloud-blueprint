@@ -90,6 +90,7 @@ final readonly class CreatePlan
             $blueprint->application->name,
             PlanOperation::NO_CHANGE,
             'Remote application matches desired state.',
+            $remote->id,
         );
     }
 
@@ -122,6 +123,7 @@ final readonly class CreatePlan
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote branch information is unavailable.',
+                $remote->id,
             );
         }
 
@@ -130,6 +132,7 @@ final readonly class CreatePlan
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote branch differs from desired branch.',
+                $remote->id,
             );
         }
 
@@ -137,26 +140,39 @@ final readonly class CreatePlan
             $desired->name,
             PlanOperation::NO_CHANGE,
             'Remote environment matches desired state.',
+            $remote->id,
         );
     }
 
-    private function applicationAction(string $name, PlanOperation $operation, string $reason): PlanAction
+    private function applicationAction(
+        string $name,
+        PlanOperation $operation,
+        string $reason,
+        ?string $remoteId = null,
+    ): PlanAction
     {
         return new PlanAction(
             new ResourceAddress(ResourceType::APPLICATION, $name),
             ResourceType::APPLICATION,
             $operation,
             $reason,
+            $remoteId,
         );
     }
 
-    private function environmentAction(string $name, PlanOperation $operation, string $reason): PlanAction
+    private function environmentAction(
+        string $name,
+        PlanOperation $operation,
+        string $reason,
+        ?string $remoteId = null,
+    ): PlanAction
     {
         return new PlanAction(
             new ResourceAddress(ResourceType::ENVIRONMENT, $name),
             ResourceType::ENVIRONMENT,
             $operation,
             $reason,
+            $remoteId,
         );
     }
 }

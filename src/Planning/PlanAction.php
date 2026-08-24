@@ -11,6 +11,7 @@ final readonly class PlanAction
         public ResourceType $resourceType,
         public PlanOperation $operation,
         public string $reason,
+        public ?string $remoteId = null,
     ) {
     }
 }

@@ -5,12 +5,16 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\Tests\Unit\Infrastructure\Http;
 
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
+use LaravelCloudBlueprint\Blueprint\SourceProvider;
+use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Infrastructure\Http\SymfonyLaravelCloudClient;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -95,6 +99,69 @@ final class SymfonyLaravelCloudClientTest extends TestCase
         $this->client([new MockResponse('{invalid-json')])->organization();
     }
 
+    public function testApplicationCreateUsesOfficialPayloadAndMaps201Response(): void
+    {
+        $response = new MockResponse(self::applicationCreateResponse(), ['http_code' => 201]);
+        $client = $this->client([$response]);
+
+        $application = $client->createApplication(new CreateApplicationRequest(
+            'my-api', 'acme/my-api', 'eu-central-1', SourceProvider::GITHUB,
+        ));
+
+        self::assertSame('app-created', $application->id);
+        self::assertSame('my-api', $application->name);
+        $options = $response->getRequestOptions();
+        self::assertIsString($options['body']);
+        self::assertJsonStringEqualsJsonString(
+            '{"repository":"acme/my-api","name":"my-api","region":"eu-central-1","source_control_provider_type":"github"}',
+            $options['body'],
+        );
+        self::assertIsArray($options['normalized_headers']);
+        self::assertArrayHasKey('content-type', $options['normalized_headers']);
+    }
+
+    public function testEnvironmentCreateUsesOfficialPayloadAndMaps201Response(): void
+    {
+        $response = new MockResponse('{"data":{"id":"env-created","type":"environments","attributes":{"name":"production"}}}', ['http_code' => 201]);
+
+        $environment = $this->client([$response])->createEnvironment(
+            'app-created',
+            new CreateEnvironmentRequest('production', 'main'),
+        );
+
+        self::assertSame('env-created', $environment->id);
+        self::assertSame('app-created', $environment->applicationId);
+        self::assertSame('main', $environment->branch);
+        self::assertSame('{"branch":"main","name":"production"}', $response->getRequestOptions()['body']);
+    }
+
+    public function testCreateValidationFailureIsControlled(): void
+    {
+        $this->expectException(CloudValidationException::class);
+
+        $this->client([new MockResponse('{"message":"invalid","errors":{}}', ['http_code' => 422])])
+            ->createApplication(new CreateApplicationRequest('api', 'acme/api', 'eu-central-1', SourceProvider::GITHUB));
+    }
+
+    public function testPostTransportFailureIsNeverAutomaticallyRetried(): void
+    {
+        $attempts = 0;
+        $http = new MockHttpClient(static function () use (&$attempts): never {
+            ++$attempts;
+            throw new TransportException('timeout after send');
+        });
+        $client = new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token'));
+
+        try {
+            $client->createApplication(new CreateApplicationRequest('api', 'acme/api', 'eu-central-1', SourceProvider::GITHUB));
+            self::fail('Expected uncertain transport failure.');
+        } catch (CloudTransportException $exception) {
+            self::assertSame(1, $attempts);
+            self::assertStringContainsString('uncertain', $exception->getMessage());
+            self::assertStringNotContainsString('secret-token', $exception->getMessage());
+        }
+    }
+
     /** @return iterable<string, array{int, class-string<CloudApiException>}> */
     public static function errorStatusProvider(): iterable
     {
@@ -155,6 +222,11 @@ final class SymfonyLaravelCloudClientTest extends TestCase
         self::assertNotFalse($contents);
 
         return $contents;
+    }
+
+    private static function applicationCreateResponse(): string
+    {
+        return '{"data":{"id":"app-created","type":"applications","attributes":{"name":"my-api","slug":"my-api","region":"eu-central-1","repository":{"full_name":"acme/my-api","default_branch":"main"}}}}';
     }
 }
 

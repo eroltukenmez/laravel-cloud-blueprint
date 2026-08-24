@@ -16,6 +16,9 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LogicException;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
@@ -231,5 +234,15 @@ final class PlanningCloudClient implements LaravelCloudClient
     {
         $this->calls[] = 'environments:' . $applicationId;
         return $this->environments;
+    }
+
+    public function createApplication(CreateApplicationRequest $request): CloudApplication
+    {
+        throw new LogicException('Planner fake must remain read-only.');
+    }
+
+    public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
+    {
+        throw new LogicException('Planner fake must remain read-only.');
     }
 }

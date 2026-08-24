@@ -9,6 +9,7 @@ use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Contract\StateLock;
 use LaravelCloudBlueprint\State\Contract\StateStore;
+use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
@@ -54,27 +55,37 @@ final readonly class LocalFileStateStore implements StateStore
         $handle = $this->lock->acquire();
 
         try {
-            $current = $this->load();
-            if ($current->materiallyEquals($state)) {
-                return $current;
-            }
-
-            if ($state->organization === null) {
-                throw new StateStorageException('Cannot save state without an organization.');
-            }
-
-            $saved = new StateDocument(
-                StateVersion::V1,
-                $current->serial + 1,
-                $state->organization,
-                ...$state->resources(),
-            );
-            $this->writeAtomically($this->encodeDocument($saved));
-
-            return $saved;
+            return $this->saveWhileLocked($state);
         } finally {
             $handle->release();
         }
+    }
+
+    public function begin(): StateTransaction
+    {
+        return new LocalFileStateTransaction($this, $this->lock->acquire());
+    }
+
+    public function saveWhileLocked(StateDocument $state): StateDocument
+    {
+        $current = $this->load();
+        if ($current->materiallyEquals($state)) {
+            return $current;
+        }
+
+        if ($state->organization === null) {
+            throw new StateStorageException('Cannot save state without an organization.');
+        }
+
+        $saved = new StateDocument(
+            StateVersion::V1,
+            $current->serial + 1,
+            $state->organization,
+            ...$state->resources(),
+        );
+        $this->writeAtomically($this->encodeDocument($saved));
+
+        return $saved;
     }
 
     /** @return array<string, mixed> */
