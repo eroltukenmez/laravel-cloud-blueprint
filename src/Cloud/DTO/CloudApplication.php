@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Cloud\DTO;
 
+use LaravelCloudBlueprint\Blueprint\SourceProvider;
+
 final readonly class CloudApplication
 {
     public function __construct(
@@ -12,6 +14,7 @@ final readonly class CloudApplication
         public ?string $slug,
         public string $region,
         public ?string $repository,
+        public ?SourceProvider $sourceProvider = null,
     ) {
     }
 }

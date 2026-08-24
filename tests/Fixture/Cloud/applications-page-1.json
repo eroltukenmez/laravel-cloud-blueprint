@@ -7,6 +7,7 @@
         "name": "API",
         "slug": "api",
         "region": "eu-central-1",
+        "source_control_provider_type": "github",
         "repository": {
           "full_name": "acme/api",
           "default_branch": "main"

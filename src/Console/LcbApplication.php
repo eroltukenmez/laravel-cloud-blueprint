@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\Console;
 
 use LaravelCloudBlueprint\Application\BlueprintLoader;
+use LaravelCloudBlueprint\Application\CloudBlueprintExporter;
 use LaravelCloudBlueprint\Blueprint\Normalization\BlueprintNormalizer;
 use LaravelCloudBlueprint\Blueprint\Validation\BlueprintValidator;
 use LaravelCloudBlueprint\Console\Command\InitCommand;
@@ -18,6 +19,7 @@ use LaravelCloudBlueprint\Infrastructure\Environment\LcbTokenProvider;
 use LaravelCloudBlueprint\Infrastructure\Environment\NativeEnvironmentValueProvider;
 use LaravelCloudBlueprint\Infrastructure\Http\SymfonyLaravelCloudClientFactory;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
+use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyBlueprintYamlEncoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
@@ -42,7 +44,15 @@ final class LcbApplication extends Application
         $variableValues = new VariableValueResolver(new NativeEnvironmentValueProvider());
         $planner = new CreatePlan($variableValues);
 
-        $this->add(new InitCommand($files, $files, new StarterBlueprintTemplate()));
+        $this->add(new InitCommand(
+            $files,
+            $files,
+            new StarterBlueprintTemplate(),
+            new LcbTokenProvider(),
+            new SymfonyLaravelCloudClientFactory(),
+            new CloudBlueprintExporter(),
+            new SymfonyBlueprintYamlEncoder(),
+        ));
         $this->add(new ValidateCommand($files, $loader));
         $this->add(new CloudInspectCommand(new LcbTokenProvider(), new SymfonyLaravelCloudClientFactory()));
         $this->add(new PlanCommand(

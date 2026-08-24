@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\Infrastructure\Http;
 
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
+use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
@@ -69,6 +70,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
                     $this->optionalString($attributes, 'slug', $path),
                     $this->requiredString($attributes, 'region', $path),
                     $repository === null ? null : $this->requiredString($repository, 'full_name', $path),
+                    $this->sourceProvider($attributes, $path),
                 );
             }
         }
@@ -135,7 +137,16 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             $this->optionalString($attributes, 'slug', $path),
             $this->requiredString($attributes, 'region', $path),
             $repository === null ? null : $this->requiredString($repository, 'full_name', $path),
+            $this->sourceProvider($attributes, $path),
         );
+    }
+
+    /** @param array<string, mixed> $attributes */
+    private function sourceProvider(array $attributes, string $path): ?SourceProvider
+    {
+        $value = $this->optionalString($attributes, 'source_control_provider_type', $path);
+
+        return $value === null ? null : SourceProvider::tryFrom($value);
     }
 
     public function createEnvironment(

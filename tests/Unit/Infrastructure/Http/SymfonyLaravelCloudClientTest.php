@@ -70,6 +70,7 @@ final class SymfonyLaravelCloudClientTest extends TestCase
         self::assertSame('api', $applications[0]->slug);
         self::assertSame('eu-central-1', $applications[0]->region);
         self::assertSame('acme/api', $applications[0]->repository);
+        self::assertSame(SourceProvider::GITHUB, $applications[0]->sourceProvider);
         self::assertNull($applications[1]->slug);
         self::assertNull($applications[1]->repository);
     }
