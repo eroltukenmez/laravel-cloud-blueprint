@@ -20,6 +20,7 @@ version: 1
 organization: acme
 application:
   name: example
+  region: eu-central-1
   source:
     provider: github
     repository: acme/example

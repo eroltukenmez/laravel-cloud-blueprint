@@ -15,6 +15,7 @@ organization: my-organization
 
 application:
   name: my-api
+  region: eu-central-1
   source:
     provider: github
     repository: acme/my-api

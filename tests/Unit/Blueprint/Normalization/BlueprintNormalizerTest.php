@@ -23,6 +23,7 @@ version: 1
 organization: my-organization
 application:
   name: my-api
+  region: eu-central-1
   source:
     provider: github
     repository: acme/my-api
@@ -47,6 +48,7 @@ YAML;
         self::assertSame(BlueprintSchemaVersion::V1, $blueprint->schemaVersion);
         self::assertSame('my-organization', $blueprint->organization);
         self::assertSame('my-api', $blueprint->application->name);
+        self::assertSame('eu-central-1', $blueprint->application->region);
         self::assertSame(SourceProvider::GITHUB, $blueprint->application->source->provider);
         self::assertSame('acme/my-api', $blueprint->application->source->repository);
         self::assertCount(2, $blueprint->environments);
@@ -72,7 +74,7 @@ YAML;
     public static function invalidBlueprintProvider(): iterable
     {
         yield 'unknown provider' => [
-            self::validData(provider: 'gitlab'),
+            self::validData(provider: 'azure-devops'),
             'application.source.provider',
         ];
         yield 'unsupported version' => [
@@ -87,6 +89,22 @@ YAML;
             self::validData(variable: ['sensitive' => true]),
             'environments.production.variables.EXAMPLE',
         ];
+    }
+
+    /** @return iterable<string, array{string, SourceProvider}> */
+    public static function supportedProviderProvider(): iterable
+    {
+        yield 'github' => ['github', SourceProvider::GITHUB];
+        yield 'gitlab' => ['gitlab', SourceProvider::GITLAB];
+        yield 'bitbucket' => ['bitbucket', SourceProvider::BITBUCKET];
+    }
+
+    #[DataProvider('supportedProviderProvider')]
+    public function testItNormalizesSupportedSourceProviders(string $value, SourceProvider $expected): void
+    {
+        $blueprint = (new BlueprintNormalizer())->normalize(self::validData(provider: $value));
+
+        self::assertSame($expected, $blueprint->application->source->provider);
     }
 
     /** @param array<string, mixed> $data */
@@ -117,6 +135,7 @@ YAML;
             'organization' => 'acme',
             'application' => [
                 'name' => 'example',
+                'region' => 'eu-central-1',
                 'source' => [
                     'provider' => $provider,
                     'repository' => 'acme/example',

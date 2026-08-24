@@ -32,7 +32,7 @@ final class BlueprintTest extends TestCase
             new EnvironmentDefinition('staging', 'develop', new VariableDefinitionCollection()),
         );
         $source = new SourceDefinition(SourceProvider::GITHUB, 'acme/example');
-        $application = new ApplicationDefinition('Example', $source);
+        $application = new ApplicationDefinition('Example', 'eu-central-1', $source);
 
         $blueprint = new Blueprint(
             BlueprintSchemaVersion::V1,
@@ -44,6 +44,7 @@ final class BlueprintTest extends TestCase
         self::assertSame(BlueprintSchemaVersion::V1, $blueprint->schemaVersion);
         self::assertSame('acme', $blueprint->organization);
         self::assertSame('Example', $blueprint->application->name);
+        self::assertSame('eu-central-1', $blueprint->application->region);
         self::assertSame(SourceProvider::GITHUB, $blueprint->application->source->provider);
         self::assertSame('acme/example', $blueprint->application->source->repository);
         self::assertCount(2, $blueprint->environments);

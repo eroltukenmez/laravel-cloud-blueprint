@@ -30,6 +30,7 @@ final readonly class BlueprintNormalizer
             $this->string($data, 'organization'),
             new ApplicationDefinition(
                 $this->string($application, 'name', 'application.name'),
+                $this->string($application, 'region', 'application.region'),
                 new SourceDefinition(
                     $this->sourceProvider($source),
                     $this->string($source, 'repository', 'application.source.repository'),

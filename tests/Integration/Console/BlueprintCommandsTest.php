@@ -44,6 +44,7 @@ final class BlueprintCommandsTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $init->execute([]));
         self::assertFileExists('cloud.blueprint.yaml');
         self::assertStringContainsString('Created blueprint file', $init->getDisplay());
+        self::assertStringContainsString('region: eu-central-1', (string) file_get_contents('cloud.blueprint.yaml'));
 
         $validate = $this->command('validate');
         self::assertSame(ExitCode::SUCCESS->value, $validate->execute([]));
@@ -94,8 +95,9 @@ version: 2
 organization: ''
 application:
   name: ''
+  region: eu-central-1
   source:
-    provider: gitlab
+    provider: azure-devops
     repository: ''
 environments:
   production: {}

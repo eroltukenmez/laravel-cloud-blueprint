@@ -52,8 +52,9 @@ final readonly class BlueprintValidator
             return;
         }
 
-        $this->unknownProperties($application, ['name', 'source'], 'application', $errors);
+        $this->unknownProperties($application, ['name', 'region', 'source'], 'application', $errors);
         $this->requiredNonEmptyString($application, 'name', 'application.name', $errors);
+        $this->requiredNonEmptyString($application, 'region', 'application.region', $errors);
 
         $source = $this->requiredMapping($application, 'source', 'application.source', $errors);
 
@@ -83,7 +84,7 @@ final readonly class BlueprintValidator
             return;
         }
 
-        if ($source['provider'] !== 'github') {
+        if (!in_array($source['provider'], ['github', 'gitlab', 'bitbucket'], true)) {
             $errors[] = $this->error($path, ValidationErrorCode::UNSUPPORTED_PROVIDER, 'Provider is not supported.');
         }
     }

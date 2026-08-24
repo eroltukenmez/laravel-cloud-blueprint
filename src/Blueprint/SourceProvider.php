@@ -7,4 +7,6 @@ namespace LaravelCloudBlueprint\Blueprint;
 enum SourceProvider: string
 {
     case GITHUB = 'github';
+    case GITLAB = 'gitlab';
+    case BITBUCKET = 'bitbucket';
 }

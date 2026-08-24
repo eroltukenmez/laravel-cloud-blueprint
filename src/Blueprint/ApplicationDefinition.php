@@ -8,6 +8,7 @@ final readonly class ApplicationDefinition
 {
     public function __construct(
         public string $name,
+        public string $region,
         public SourceDefinition $source,
     ) {
     }
