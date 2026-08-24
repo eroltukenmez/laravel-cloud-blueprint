@@ -1,0 +1,25 @@
+version: 1
+
+organization: example-organization
+
+application:
+  name: example-api
+  region: eu-central-1
+  source:
+    provider: github
+    repository: example-organization/example-api
+
+environments:
+  production:
+    branch: main
+
+    variables:
+      APP_ENV:
+        value: production
+
+      APP_DEBUG:
+        value: "false"
+
+      APP_KEY:
+        from_env: APP_KEY
+        sensitive: true
