@@ -98,6 +98,10 @@ final readonly class FakeLaravelCloudClientFactory implements LaravelCloudClient
 
 final class FakeLaravelCloudClient implements LaravelCloudClient
 {
+    public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
+    {
+        throw new LogicException('Inspect fake must remain read-only.');
+    }
     /** @var list<string> */
     public array $calls = [];
 

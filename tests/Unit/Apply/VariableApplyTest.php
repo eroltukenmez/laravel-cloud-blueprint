@@ -34,6 +34,7 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
+use LaravelCloudBlueprint\Planning\PlanChange;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
@@ -250,6 +251,65 @@ final class VariableApplyTest extends TestCase
         self::assertStringNotContainsString('MISSING_REFERENCE', serialize($result));
     }
 
+    public function testEnvironmentUpdateCompletesBeforeVariableUpdate(): void
+    {
+        $events = new VariableApplyEvents();
+        $cloud = new VariableApplyCloud($events);
+        $blueprint = self::blueprint(
+            production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('updated-value'), false)],
+        );
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::NO_CHANGE, 'app-1'),
+            self::environmentUpdateAction(),
+            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
+        );
+
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(2, $result->updatedCount());
+        self::assertSame(['lock', 'update:environment.env-production', 'set:variables.env-production', 'release'], $events->values);
+    }
+
+    public function testEnvironmentUpdateFailurePreventsVariablesAndIsFailed(): void
+    {
+        $events = new VariableApplyEvents();
+        $cloud = new VariableApplyCloud($events, failUpdate: true);
+        $blueprint = self::blueprint(
+            production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('never-sent'), true)],
+        );
+        $plan = new ExecutionPlan(
+            self::environmentUpdateAction(),
+            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
+        );
+
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+
+        self::assertSame(ApplyStatus::FAILED, $result->status);
+        self::assertSame([], $cloud->variableRequests);
+        self::assertSame(['lock', 'update:environment.env-production', 'release'], $events->values);
+        self::assertStringNotContainsString('never-sent', serialize($result));
+    }
+
+    public function testSuccessfulEnvironmentUpdateThenVariableFailureIsPartial(): void
+    {
+        $events = new VariableApplyEvents();
+        $cloud = new VariableApplyCloud($events, failEnvironmentId: 'env-production');
+        $blueprint = self::blueprint(
+            production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('rejected-value'), true)],
+        );
+        $plan = new ExecutionPlan(
+            self::environmentUpdateAction(),
+            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
+        );
+
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(1, $result->updatedCount());
+        self::assertStringNotContainsString('rejected-value', serialize($result));
+    }
+
     public function testUnsupportedVariableRefusesBeforeLockOrAnyMutation(): void
     {
         $events = new VariableApplyEvents();
@@ -354,6 +414,18 @@ final class VariableApplyTest extends TestCase
         return new PlanAction(self::address($type, $name), $type, $operation, 'safe reason', $remoteId);
     }
 
+    private static function environmentUpdateAction(): PlanAction
+    {
+        return new PlanAction(
+            self::address(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            PlanOperation::UPDATE,
+            'test',
+            'env-production',
+            new PlanChange('branch', 'develop', 'main'),
+        );
+    }
+
     private static function address(ResourceType $type, string $name): ResourceAddress
     {
         return new ResourceAddress($type, $name);
@@ -381,6 +453,14 @@ final readonly class VariableApplyEnvironment implements EnvironmentValueProvide
 
 final class VariableApplyCloud implements LaravelCloudClient
 {
+    public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
+    {
+        $this->events->values[] = 'update:environment.' . $environmentId;
+        if ($this->failUpdate) {
+            throw new CloudApiException('Environment update failed.', 'PATCH', '/environments/' . $environmentId, 422);
+        }
+        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId, 'production', $request->branch);
+    }
     /** @var array<string, SetEnvironmentVariablesRequest> */
     public array $variableRequests = [];
 
@@ -388,6 +468,7 @@ final class VariableApplyCloud implements LaravelCloudClient
         private readonly VariableApplyEvents $events,
         private readonly ?string $failEnvironmentId = null,
         private readonly bool $transportFailure = false,
+        private readonly bool $failUpdate = false,
     ) {
     }
 

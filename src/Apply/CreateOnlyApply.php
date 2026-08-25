@@ -13,6 +13,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
@@ -67,6 +68,37 @@ final readonly class CreateOnlyApply
                     } elseif ($action->remoteId !== null) {
                         $environmentIds[$action->address->name] = $action->remoteId;
                     }
+                    continue;
+                }
+
+                if ($action->operation === PlanOperation::UPDATE) {
+                    $environmentId = $action->remoteId;
+                    if ($environmentId === null) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Environment update "%s" has no remote identity. No resources were modified.',
+                            (string) $action->address,
+                        ));
+                    }
+                    $environmentIds[$action->address->name] = $environmentId;
+                    $desired = $blueprint->environments->get($action->address->name);
+
+                    try {
+                        $cloud->updateEnvironment($environmentId, new UpdateEnvironmentRequest($desired->branch));
+                    } catch (CloudException $exception) {
+                        $outcomes[] = new ApplyResourceOutcome(
+                            $action->address,
+                            ApplyOutcomeOperation::FAILED,
+                            $exception->getMessage(),
+                            $exception instanceof CloudValidationException ? $exception : null,
+                        );
+                        $status = $this->confirmedMutationCount($outcomes) === 0
+                            && !$exception instanceof CloudTransportException
+                            ? ApplyStatus::FAILED
+                            : ApplyStatus::PARTIAL_FAILURE;
+                        return new ApplyResult($status, ...$outcomes);
+                    }
+
+                    $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UPDATED);
                     continue;
                 }
 
@@ -273,12 +305,50 @@ final readonly class CreateOnlyApply
         }
 
         foreach ($plan as $action) {
-            if ($action->operation === PlanOperation::UPDATE && $action->resourceType !== ResourceType::VARIABLE) {
+            if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::APPLICATION) {
                 throw new ApplyRefusedException(sprintf(
                     '%s UPDATE apply is not yet supported. No resources were modified.',
                     ucfirst($action->resourceType->value),
                 ));
             }
+
+            if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::ENVIRONMENT) {
+                if (count($action->changes) !== 1 || $action->changes[0]->field !== 'branch') {
+                    throw new ApplyRefusedException(sprintf(
+                        'Environment update "%s" contains unsupported field changes. No resources were modified.',
+                        (string) $action->address,
+                    ));
+                }
+                if ($action->remoteId === null) {
+                    throw new ApplyRefusedException(sprintf(
+                        'Environment update "%s" has no remote identity. No resources were modified.',
+                        (string) $action->address,
+                    ));
+                }
+            }
+        }
+
+        $this->assertNoCreateAndUpdateForSameEnvironment($plan);
+    }
+
+    private function assertNoCreateAndUpdateForSameEnvironment(ExecutionPlan $plan): void
+    {
+        /** @var array<string, PlanOperation> $operations */
+        $operations = [];
+        foreach ($plan as $action) {
+            if ($action->resourceType !== ResourceType::ENVIRONMENT
+                || ($action->operation !== PlanOperation::CREATE && $action->operation !== PlanOperation::UPDATE)) {
+                continue;
+            }
+            $address = (string) $action->address;
+            $previous = $operations[$address] ?? null;
+            if ($previous !== null && $previous !== $action->operation) {
+                throw new ApplyRefusedException(sprintf(
+                    'Environment "%s" cannot be created and updated in the same plan. No resources were modified.',
+                    $address,
+                ));
+            }
+            $operations[$address] = $action->operation;
         }
     }
 

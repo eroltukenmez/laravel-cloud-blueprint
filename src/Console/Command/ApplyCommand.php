@@ -169,7 +169,13 @@ final class ApplyCommand extends Command
                 PlanOperation::UNSUPPORTED => '!',
             };
             $output->writeln(sprintf('%s %s', $symbol, (string) $action->address));
-            $output->writeln('  ' . $action->reason);
+            if ($action->changes === []) {
+                $output->writeln('  ' . $action->reason);
+            } else {
+                foreach ($action->changes as $change) {
+                    $output->writeln(sprintf('  %s: %s → %s', $change->field, $change->before, $change->after));
+                }
+            }
         }
         $output->writeln('');
     }

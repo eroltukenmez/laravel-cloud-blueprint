@@ -179,6 +179,27 @@ final class ApplyCommandTest extends TestCase
         }
     }
 
+    public function testEnvironmentBranchUpdateRendersSafeDiffAndUpdatedOutcome(): void
+    {
+        [$text, $textCloud, $state] = $this->tester(ApplyCommandCloudClient::withEnvironmentUpdate());
+
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute(['--auto-approve' => true]));
+        self::assertSame(1, $textCloud->mutationCount);
+        self::assertSame(0, $state->state->serial);
+        self::assertStringContainsString('~ environment.production', $text->getDisplay());
+        self::assertStringContainsString('branch: develop → main', $text->getDisplay());
+        self::assertStringContainsString('environment.production: updated', $text->getDisplay());
+
+        [$json] = $this->tester(ApplyCommandCloudClient::withEnvironmentUpdate());
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true, '--auto-approve' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['resources']);
+        self::assertIsArray($decoded['resources'][1]);
+        self::assertSame('environment.production', $decoded['resources'][1]['resource']);
+        self::assertSame('updated', $decoded['resources'][1]['operation']);
+    }
+
     public function testCloudValidationErrorsRenderSafelyInTextAndJson(): void
     {
         $validation = new CloudValidationException(
@@ -404,6 +425,14 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         );
     }
 
+    public static function withEnvironmentUpdate(): self
+    {
+        return new self(
+            [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
+            [new CloudEnvironment('env-existing', 'app-existing', 'production', 'develop')],
+        );
+    }
+
     public function organization(): CloudOrganization
     {
         return new CloudOrganization('org-1', 'Acme', 'acme');
@@ -434,6 +463,12 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
     {
         ++$this->mutationCount;
         return new CloudEnvironment('env-created', $applicationId, $request->name, $request->branch);
+    }
+
+    public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
+    {
+        ++$this->mutationCount;
+        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId, 'production', $request->branch);
     }
 
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void

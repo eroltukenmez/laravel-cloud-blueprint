@@ -17,6 +17,8 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
@@ -163,6 +165,30 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             $applicationId,
             $this->requiredString($attributes, 'name', $path),
             $request->branch,
+        );
+    }
+
+    public function updateEnvironment(
+        string $environmentId,
+        UpdateEnvironmentRequest $request,
+    ): UpdatedCloudEnvironment {
+        $path = sprintf('/environments/%s', rawurlencode($environmentId));
+        $document = $this->patch($path, ['branch' => $request->branch]);
+        $resource = $this->mappingAt($document, 'data', $path);
+        $id = $this->requiredString($resource, 'id', $path);
+        if ($id !== $environmentId) {
+            throw new CloudResponseException(
+                'Environment update response identity does not match the requested environment.',
+                'PATCH',
+                $path,
+            );
+        }
+        $attributes = $this->mappingAt($resource, 'attributes', $path);
+
+        return new UpdatedCloudEnvironment(
+            $id,
+            $this->requiredString($attributes, 'name', $path),
+            $this->requiredString($attributes, 'branch', $path),
         );
     }
 
@@ -331,6 +357,64 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             throw new CloudTransportException(
                 'Laravel Cloud create response could not be read; the remote outcome is uncertain. Run plan before retrying.',
                 'POST',
+                $path,
+                $status,
+                $requestId,
+            );
+        }
+    }
+
+    /**
+     * @param array<string, string> $payload
+     * @return array<string, mixed>
+     */
+    private function patch(string $path, array $payload): array
+    {
+        try {
+            $response = $this->http->request('PATCH', self::BASE_URL . $path, [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $this->token->value(),
+                    'Accept' => 'application/json',
+                    'Content-Type' => 'application/json',
+                    'User-Agent' => self::USER_AGENT,
+                ],
+                'json' => $payload,
+            ]);
+            $status = $response->getStatusCode();
+            $requestId = $this->requestId($response);
+        } catch (TransportExceptionInterface) {
+            throw new CloudTransportException(
+                'Laravel Cloud update request failed with an uncertain remote outcome. Run plan before retrying.',
+                'PATCH',
+                $path,
+            );
+        }
+
+        $this->guardStatus($status, $path, $requestId, 'PATCH', $response);
+        if ($status !== 200) {
+            throw new CloudResponseException(
+                'Laravel Cloud update response did not return HTTP 200.',
+                'PATCH',
+                $path,
+                $status,
+                $requestId,
+            );
+        }
+
+        try {
+            return $this->valueAsMapping($response->toArray(false), $path);
+        } catch (DecodingExceptionInterface) {
+            throw new CloudResponseException(
+                'Laravel Cloud returned an invalid JSON response.',
+                'PATCH',
+                $path,
+                $status,
+                $requestId,
+            );
+        } catch (TransportExceptionInterface) {
+            throw new CloudTransportException(
+                'Laravel Cloud update response could not be read; the remote outcome is uncertain. Run plan before retrying.',
+                'PATCH',
                 $path,
                 $status,
                 $requestId,
