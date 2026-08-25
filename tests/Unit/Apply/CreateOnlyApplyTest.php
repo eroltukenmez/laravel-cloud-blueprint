@@ -110,19 +110,143 @@ final class CreateOnlyApplyTest extends TestCase
         }
     }
 
-    public function testUpdatePlanRefusesBeforeLockOrMutation(): void
+    public function testApplicationRepositoryUpdateUsesBlueprintValuesWithoutSavingState(): void
     {
         $events = new ApplyEvents();
-        $plan = new ExecutionPlan(self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::UPDATE));
+        $managed = new StateResource(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            'app-existing',
+        );
+        $states = new ApplyStateStore(
+            $events,
+            StateDocument::empty()->withOrganization('acme')->withResource($managed)->withSerial(6),
+        );
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            PlanOperation::UPDATE,
+            'test',
+            'app-existing',
+            new PlanChange('repository', 'diagnostic/old', 'diagnostic/not-trusted'),
+        ));
 
+        $result = self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), $states);
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(1, $result->updatedCount());
+        self::assertSame(['lock', 'update:application.app-existing:acme/my-api:github', 'release'], $events->values);
+        self::assertSame(6, $states->state->serial);
+        self::assertSame('app-existing', $states->state->get(self::address(ResourceType::APPLICATION, 'my-api'))->remoteId);
+    }
+
+    public function testUnsupportedApplicationUpdateFieldsRefuseBeforeLock(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            PlanOperation::UPDATE,
+            'test',
+            'app-existing',
+            new PlanChange('repository', 'old', 'new'),
+            new PlanChange('region', 'eu-central-1', 'us-east-1'),
+        ));
+
+        $this->expectException(ApplyRefusedException::class);
         try {
             self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
-            self::fail('Expected UPDATE apply refusal.');
-        } catch (ApplyRefusedException $exception) {
-            self::assertStringContainsString('UPDATE apply is not yet supported', $exception->getMessage());
+        } finally {
+            self::assertSame([], $events->values);
         }
+    }
 
-        self::assertSame([], $events->values);
+    public function testApplicationUpdateWithoutRemoteIdRefusesBeforeLock(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            PlanOperation::UPDATE,
+            'test',
+            null,
+            new PlanChange('repository', 'old', 'new'),
+        ));
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+        } finally {
+            self::assertSame([], $events->values);
+        }
+    }
+
+    public function testSingleUnknownApplicationUpdateFieldRefusesBeforeLock(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            PlanOperation::UPDATE,
+            'test',
+            'app-existing',
+            new PlanChange('name', 'my-api', 'renamed'),
+        ));
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+        } finally {
+            self::assertSame([], $events->values);
+        }
+    }
+
+    public function testApplicationCreateAndUpdateCollisionRefusesBeforeLock(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::CREATE),
+            new PlanAction(
+                self::address(ResourceType::APPLICATION, 'my-api'),
+                ResourceType::APPLICATION,
+                PlanOperation::UPDATE,
+                'test',
+                'app-existing',
+                new PlanChange('repository', 'old', 'new'),
+            ),
+        );
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+        } finally {
+            self::assertSame([], $events->values);
+        }
+    }
+
+    public function testApplicationUpdateStateIdentityConflictAbortsBeforePatch(): void
+    {
+        $events = new ApplyEvents();
+        $state = StateDocument::empty()->withOrganization('acme')->withResource(new StateResource(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            'app-managed',
+        ));
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            PlanOperation::UPDATE,
+            'test',
+            'app-other',
+            new PlanChange('repository', 'old', 'new'),
+        ));
+
+        $this->expectException(StateIdentityConflictException::class);
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events, $state));
+        } finally {
+            self::assertSame(['lock', 'release'], $events->values);
+        }
     }
 
     public function testEnvironmentBranchUpdateIsAcceptedWithoutSavingState(): void
@@ -424,6 +548,11 @@ final class ApplyEvents
 
 final class ApplyCloudClient implements LaravelCloudClient
 {
+    public function updateApplication(string $applicationId, \LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest $request): CloudApplication
+    {
+        $this->events->values[] = 'update:application.' . $applicationId . ':' . $request->repository . ':' . $request->sourceProvider->value;
+        return new CloudApplication($applicationId, 'my-api', 'my-api', 'eu-central-1', $request->repository, $request->sourceProvider);
+    }
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         $this->events->values[] = 'update:environment.' . $environmentId . ':' . $request->branch;

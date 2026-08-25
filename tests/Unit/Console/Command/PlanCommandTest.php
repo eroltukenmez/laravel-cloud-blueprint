@@ -273,6 +273,10 @@ final readonly class PlanClientFactory implements LaravelCloudClientFactory
 
 class PlanCommandCloudClient implements LaravelCloudClient
 {
+    public function updateApplication(string $applicationId, \LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest $request): CloudApplication
+    {
+        throw new LogicException('Plan fake must remain read-only.');
+    }
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         throw new LogicException('Plan fake must remain read-only.');

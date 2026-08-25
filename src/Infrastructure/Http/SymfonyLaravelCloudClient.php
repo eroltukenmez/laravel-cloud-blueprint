@@ -19,6 +19,7 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
@@ -140,6 +141,37 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             $this->requiredString($attributes, 'region', $path),
             $repository === null ? null : $this->requiredString($repository, 'full_name', $path),
             $this->sourceProvider($attributes, $path),
+        );
+    }
+
+    public function updateApplication(
+        string $applicationId,
+        UpdateApplicationRequest $request,
+    ): CloudApplication {
+        $path = sprintf('/applications/%s', rawurlencode($applicationId));
+        $document = $this->patch($path, [
+            'repository' => $request->repository,
+            'source_control_provider_type' => $request->sourceProvider->value,
+        ]);
+        $resource = $this->mappingAt($document, 'data', $path);
+        $id = $this->requiredString($resource, 'id', $path);
+        if ($id !== $applicationId) {
+            throw new CloudResponseException(
+                'Application update response identity does not match the requested application.',
+                'PATCH',
+                $path,
+            );
+        }
+        $attributes = $this->mappingAt($resource, 'attributes', $path);
+        $repository = $this->optionalMapping($attributes, 'repository', $path);
+
+        return new CloudApplication(
+            $id,
+            $this->requiredString($attributes, 'name', $path),
+            $this->optionalString($attributes, 'slug', $path),
+            $this->requiredString($attributes, 'region', $path),
+            $repository === null ? null : $this->requiredString($repository, 'full_name', $path),
+            $request->sourceProvider,
         );
     }
 

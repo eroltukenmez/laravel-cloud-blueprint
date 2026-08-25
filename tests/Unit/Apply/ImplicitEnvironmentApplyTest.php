@@ -286,6 +286,10 @@ final readonly class ImplicitApplyEnvironmentValues implements EnvironmentValueP
 
 final class ImplicitApplyCloud implements LaravelCloudClient
 {
+    public function updateApplication(string $applicationId, \LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest $request): CloudApplication
+    {
+        throw new \LogicException('Unexpected application update.');
+    }
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         throw new \LogicException('Unexpected environment update.');

@@ -14,6 +14,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
@@ -72,6 +73,28 @@ final readonly class CreateOnlyApply
                 }
 
                 if ($action->operation === PlanOperation::UPDATE) {
+                    if ($action->resourceType === ResourceType::APPLICATION) {
+                        $applicationId = $action->remoteId;
+                        if ($applicationId === null) {
+                            throw new ApplyRefusedException(sprintf(
+                                'Application update "%s" has no remote identity. No resources were modified.',
+                                (string) $action->address,
+                            ));
+                        }
+
+                        try {
+                            $cloud->updateApplication($applicationId, new UpdateApplicationRequest(
+                                $blueprint->application->source->repository,
+                                $blueprint->application->source->provider,
+                            ));
+                        } catch (CloudException $exception) {
+                            return $this->updateFailure($outcomes, $action, $exception);
+                        }
+
+                        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UPDATED);
+                        continue;
+                    }
+
                     $environmentId = $action->remoteId;
                     if ($environmentId === null) {
                         throw new ApplyRefusedException(sprintf(
@@ -85,17 +108,7 @@ final readonly class CreateOnlyApply
                     try {
                         $cloud->updateEnvironment($environmentId, new UpdateEnvironmentRequest($desired->branch));
                     } catch (CloudException $exception) {
-                        $outcomes[] = new ApplyResourceOutcome(
-                            $action->address,
-                            ApplyOutcomeOperation::FAILED,
-                            $exception->getMessage(),
-                            $exception instanceof CloudValidationException ? $exception : null,
-                        );
-                        $status = $this->confirmedMutationCount($outcomes) === 0
-                            && !$exception instanceof CloudTransportException
-                            ? ApplyStatus::FAILED
-                            : ApplyStatus::PARTIAL_FAILURE;
-                        return new ApplyResult($status, ...$outcomes);
+                        return $this->updateFailure($outcomes, $action, $exception);
                     }
 
                     $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UPDATED);
@@ -306,10 +319,18 @@ final readonly class CreateOnlyApply
 
         foreach ($plan as $action) {
             if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::APPLICATION) {
-                throw new ApplyRefusedException(sprintf(
-                    '%s UPDATE apply is not yet supported. No resources were modified.',
-                    ucfirst($action->resourceType->value),
-                ));
+                if (count($action->changes) !== 1 || $action->changes[0]->field !== 'repository') {
+                    throw new ApplyRefusedException(sprintf(
+                        'Application update "%s" contains unsupported field changes. No resources were modified.',
+                        (string) $action->address,
+                    ));
+                }
+                if ($action->remoteId === null) {
+                    throw new ApplyRefusedException(sprintf(
+                        'Application update "%s" has no remote identity. No resources were modified.',
+                        (string) $action->address,
+                    ));
+                }
             }
 
             if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::ENVIRONMENT) {
@@ -329,6 +350,25 @@ final readonly class CreateOnlyApply
         }
 
         $this->assertNoCreateAndUpdateForSameEnvironment($plan);
+        $this->assertNoCreateAndUpdateForSameApplication($plan);
+    }
+
+    private function assertNoCreateAndUpdateForSameApplication(ExecutionPlan $plan): void
+    {
+        $operation = null;
+        foreach ($plan as $action) {
+            if ($action->resourceType !== ResourceType::APPLICATION
+                || ($action->operation !== PlanOperation::CREATE && $action->operation !== PlanOperation::UPDATE)) {
+                continue;
+            }
+            if ($operation !== null && $operation !== $action->operation) {
+                throw new ApplyRefusedException(sprintf(
+                    'Application "%s" cannot be created and updated in the same plan. No resources were modified.',
+                    (string) $action->address,
+                ));
+            }
+            $operation = $action->operation;
+        }
     }
 
     private function assertNoCreateAndUpdateForSameEnvironment(ExecutionPlan $plan): void
@@ -469,6 +509,26 @@ final readonly class CreateOnlyApply
         }
 
         $status = $this->confirmedMutationCount($outcomes) === 0 && !$uncertain
+            ? ApplyStatus::FAILED
+            : ApplyStatus::PARTIAL_FAILURE;
+
+        return new ApplyResult($status, ...$outcomes);
+    }
+
+    /** @param list<ApplyResourceOutcome> $outcomes */
+    private function updateFailure(
+        array $outcomes,
+        PlanAction $action,
+        CloudException $exception,
+    ): ApplyResult {
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::FAILED,
+            $exception->getMessage(),
+            $exception instanceof CloudValidationException ? $exception : null,
+        );
+        $status = $this->confirmedMutationCount($outcomes) === 0
+            && !$exception instanceof CloudTransportException
             ? ApplyStatus::FAILED
             : ApplyStatus::PARTIAL_FAILURE;
 

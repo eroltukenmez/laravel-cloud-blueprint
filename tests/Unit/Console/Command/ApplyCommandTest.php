@@ -200,6 +200,28 @@ final class ApplyCommandTest extends TestCase
         self::assertSame('updated', $decoded['resources'][1]['operation']);
     }
 
+    public function testApplicationRepositoryUpdateRendersSafeDiffAndUpdatedOutcome(): void
+    {
+        [$text, $cloud, $state] = $this->tester(ApplyCommandCloudClient::withApplicationUpdate());
+
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute(['--auto-approve' => true]));
+        self::assertSame(1, $cloud->mutationCount);
+        self::assertSame(0, $state->state->serial);
+        self::assertSame([], $state->state->resources());
+        self::assertStringContainsString('~ application.my-api', $text->getDisplay());
+        self::assertStringContainsString('repository: acme/old-api → acme/my-api', $text->getDisplay());
+        self::assertStringContainsString('application.my-api: updated', $text->getDisplay());
+
+        [$json] = $this->tester(ApplyCommandCloudClient::withApplicationUpdate());
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true, '--auto-approve' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['resources']);
+        self::assertIsArray($decoded['resources'][0]);
+        self::assertSame('application.my-api', $decoded['resources'][0]['resource']);
+        self::assertSame('updated', $decoded['resources'][0]['operation']);
+    }
+
     public function testCloudValidationErrorsRenderSafelyInTextAndJson(): void
     {
         $validation = new CloudValidationException(
@@ -433,6 +455,14 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         );
     }
 
+    public static function withApplicationUpdate(): self
+    {
+        return new self(
+            [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/old-api')],
+            [new CloudEnvironment('env-existing', 'app-existing', 'production', 'main')],
+        );
+    }
+
     public function organization(): CloudOrganization
     {
         return new CloudOrganization('org-1', 'Acme', 'acme');
@@ -457,6 +487,12 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
     {
         ++$this->mutationCount;
         return new CloudApplication('app-created', $request->name, $request->name, $request->region, $request->repository);
+    }
+
+    public function updateApplication(string $applicationId, \LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest $request): CloudApplication
+    {
+        ++$this->mutationCount;
+        return new CloudApplication($applicationId, 'my-api', 'my-api', 'eu-central-1', $request->repository, $request->sourceProvider);
     }
 
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment

@@ -12,6 +12,7 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableMutationMethod;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
@@ -201,6 +202,109 @@ JSON);
         self::assertSame('PATCH', $response->getRequestMethod());
         self::assertSame('https://cloud.laravel.com/api/environments/env-123', $response->getRequestUrl());
         self::assertSame('{"branch":"develop"}', $response->getRequestOptions()['body']);
+    }
+
+    public function testApplicationUpdateUsesOfficialRepositoryAndProviderOnlyPatchAndMapsResponse(): void
+    {
+        $response = new MockResponse(
+            '{"data":{"id":"app-123","type":"applications","attributes":{"name":"my-api","slug":"my-api","region":"eu-central-1","repository":{"full_name":"acme/new-api","default_branch":"main"}}}}',
+            ['http_code' => 200],
+        );
+
+        $application = $this->client([$response])->updateApplication(
+            'app-123',
+            new UpdateApplicationRequest('acme/new-api', SourceProvider::GITLAB),
+        );
+
+        self::assertSame('app-123', $application->id);
+        self::assertSame('acme/new-api', $application->repository);
+        self::assertSame(SourceProvider::GITLAB, $application->sourceProvider);
+        self::assertSame('PATCH', $response->getRequestMethod());
+        self::assertSame('https://cloud.laravel.com/api/applications/app-123', $response->getRequestUrl());
+        $body = $response->getRequestOptions()['body'];
+        self::assertIsString($body);
+        self::assertJsonStringEqualsJsonString(
+            '{"repository":"acme/new-api","source_control_provider_type":"gitlab"}',
+            $body,
+        );
+        foreach (['name', 'slug', 'region', 'default_environment_id', 'slack_channel'] as $excluded) {
+            self::assertStringNotContainsString($excluded, $body);
+        }
+    }
+
+    /** @return iterable<string, array{int, class-string<CloudApiException>}> */
+    public static function applicationUpdateErrorProvider(): iterable
+    {
+        yield 'forbidden' => [403, CloudAuthenticationException::class];
+        yield 'not found' => [404, CloudResourceNotFoundException::class];
+        yield 'validation' => [422, CloudValidationException::class];
+        yield 'server error' => [500, CloudApiException::class];
+    }
+
+    /** @param class-string<CloudApiException> $expected */
+    #[DataProvider('applicationUpdateErrorProvider')]
+    public function testApplicationUpdateErrorsMapSafely(int $status, string $expected): void
+    {
+        try {
+            $this->client([new MockResponse('{"message":"failed","errors":{}}', ['http_code' => $status])])
+                ->updateApplication('app-1', new UpdateApplicationRequest('acme/new-api', SourceProvider::GITHUB));
+            self::fail('Expected application update failure.');
+        } catch (CloudApiException $exception) {
+            self::assertInstanceOf($expected, $exception);
+            self::assertSame('PATCH', $exception->method);
+            self::assertSame('/applications/app-1', $exception->path);
+        }
+    }
+
+    public function testMalformedApplicationUpdateResponseFailsSafely(): void
+    {
+        $this->expectException(CloudResponseException::class);
+
+        $this->client([new MockResponse('{"data":{"id":"wrong","attributes":{}}}', ['http_code' => 200])])
+            ->updateApplication('app-1', new UpdateApplicationRequest('acme/new-api', SourceProvider::GITHUB));
+    }
+
+    public function testApplicationUpdateValidationPreservesSafeDetails(): void
+    {
+        $response = new MockResponse(json_encode([
+            'message' => 'The given data was invalid.',
+            'errors' => ['repository' => ['The repository could not be found.']],
+        ], JSON_THROW_ON_ERROR), [
+            'http_code' => 422,
+            'response_headers' => ['X-Request-Id: app-update-422'],
+        ]);
+
+        try {
+            $this->client([$response])->updateApplication(
+                'app-1',
+                new UpdateApplicationRequest('acme/missing', SourceProvider::GITHUB),
+            );
+            self::fail('Expected validation failure.');
+        } catch (CloudValidationException $exception) {
+            self::assertSame('The given data was invalid.', $exception->apiMessage);
+            self::assertSame(['repository' => ['The repository could not be found.']], $exception->fieldErrors);
+            self::assertSame('app-update-422', $exception->requestId);
+        }
+    }
+
+    public function testApplicationPatchTransportFailureIsNotRetried(): void
+    {
+        $attempts = 0;
+        $http = new MockHttpClient(static function () use (&$attempts): never {
+            ++$attempts;
+            throw new TransportException('timeout after send');
+        });
+
+        try {
+            (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))
+                ->updateApplication('app-1', new UpdateApplicationRequest('acme/new-api', SourceProvider::GITHUB));
+            self::fail('Expected uncertain application update failure.');
+        } catch (CloudTransportException $exception) {
+            self::assertSame(1, $attempts);
+            self::assertSame('PATCH', $exception->method);
+            self::assertStringContainsString('uncertain', $exception->getMessage());
+            self::assertStringNotContainsString('secret-token', $exception->getMessage());
+        }
     }
 
     /** @return iterable<string, array{int, class-string<CloudApiException>}> */
