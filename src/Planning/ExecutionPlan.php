@@ -34,7 +34,8 @@ final readonly class ExecutionPlan implements Countable, IteratorAggregate
 
     public function hasActionableChanges(): bool
     {
-        return $this->countByOperation(PlanOperation::CREATE) > 0;
+        return $this->countByOperation(PlanOperation::CREATE) > 0
+            || $this->countByOperation(PlanOperation::UPDATE) > 0;
     }
 
     public function getIterator(): Traversable

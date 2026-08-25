@@ -87,12 +87,27 @@ final class CreatePlanTest extends TestCase
         self::assertStringContainsString('region differs', self::actions($plan)[0]->reason);
     }
 
-    public function testApplicationRepositoryDifferenceIsUnsupported(): void
+    public function testApplicationRepositoryDifferenceIsUpdateWithSafeChange(): void
     {
         $plan = $this->planWithApplication(self::remoteApplication(repository: 'other/repository'));
 
-        self::assertSame(PlanOperation::UNSUPPORTED, self::actions($plan)[0]->operation);
-        self::assertStringContainsString('repository differs', self::actions($plan)[0]->reason);
+        $action = self::actions($plan)[0];
+        self::assertSame(PlanOperation::UPDATE, $action->operation);
+        self::assertSame('repository', $action->changes[0]->field);
+        self::assertSame('other/repository', $action->changes[0]->before);
+        self::assertSame('acme/my-api', $action->changes[0]->after);
+        self::assertTrue($plan->hasActionableChanges());
+        self::assertSame(1, $plan->countByOperation(PlanOperation::UPDATE));
+    }
+
+    public function testApplicationRegionAndRepositoryDifferenceRemainsUnsupportedWithoutChanges(): void
+    {
+        $action = self::actions($this->planWithApplication(
+            self::remoteApplication(region: 'us-east-1', repository: 'other/repository'),
+        ))[0];
+
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertSame([], $action->changes);
     }
 
     public function testUnavailableApplicationRepositoryIsUnsupported(): void
@@ -111,7 +126,7 @@ final class CreatePlanTest extends TestCase
         self::planner()->create(self::blueprint(), $cloud);
     }
 
-    public function testEnvironmentMatchingProducesCreateNoChangeAndUnsupportedInBlueprintOrder(): void
+    public function testEnvironmentMatchingProducesCreateNoChangeAndUpdateInBlueprintOrder(): void
     {
         $cloud = new PlanningCloudClient(
             applications: [self::remoteApplication()],
@@ -121,7 +136,10 @@ final class CreatePlanTest extends TestCase
         $actions = self::actions(self::planner()->create(self::blueprint(), $cloud));
 
         self::assertSame(PlanOperation::NO_CHANGE, $actions[0]->operation);
-        self::assertSame(PlanOperation::UNSUPPORTED, $actions[1]->operation);
+        self::assertSame(PlanOperation::UPDATE, $actions[1]->operation);
+        self::assertSame('branch', $actions[1]->changes[0]->field);
+        self::assertSame('other', $actions[1]->changes[0]->before);
+        self::assertSame('main', $actions[1]->changes[0]->after);
         self::assertSame(PlanOperation::CREATE, $actions[2]->operation);
         self::assertSame(
             ['application.my-api', 'environment.production', 'environment.staging'],

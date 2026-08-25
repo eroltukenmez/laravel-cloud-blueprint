@@ -40,6 +40,10 @@ final readonly class CreateOnlyApply
         LaravelCloudClient $cloud,
         StateStore $states,
     ): ApplyResult {
+        if ($plan->countByOperation(PlanOperation::UPDATE) > 0) {
+            throw new ApplyRefusedException('The plan contains UPDATE actions, but UPDATE apply is not yet supported. No resources were modified.');
+        }
+
         if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
             throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
         }

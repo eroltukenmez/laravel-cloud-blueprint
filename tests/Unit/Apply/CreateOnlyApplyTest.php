@@ -109,6 +109,21 @@ final class CreateOnlyApplyTest extends TestCase
         }
     }
 
+    public function testUpdatePlanRefusesBeforeLockOrMutation(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::UPDATE));
+
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+            self::fail('Expected UPDATE apply refusal.');
+        } catch (ApplyRefusedException $exception) {
+            self::assertStringContainsString('UPDATE apply is not yet supported', $exception->getMessage());
+        }
+
+        self::assertSame([], $events->values);
+    }
+
     public function testVariableAddressMissingFromBlueprintIsRefusedBeforeLockOrMutation(): void
     {
         $events = new ApplyEvents();
