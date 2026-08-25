@@ -588,7 +588,7 @@ final class VariableApplyCloud implements LaravelCloudClient
         if ($this->failUpdate) {
             throw new CloudApiException('Environment update failed.', 'PATCH', '/environments/' . $environmentId, 422);
         }
-        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId, 'production', $request->branch);
+        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId);
     }
     /** @var array<string, SetEnvironmentVariablesRequest> */
     public array $variableRequests = [];

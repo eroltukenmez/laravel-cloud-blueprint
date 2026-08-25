@@ -175,7 +175,7 @@ final class ReconciliationCloud implements LaravelCloudClient
     public function updateEnvironment(string $environmentId, UpdateEnvironmentRequest $request): UpdatedCloudEnvironment
     {
         $this->branch = $request->branch;
-        return new UpdatedCloudEnvironment($environmentId, 'production', $this->branch);
+        return new UpdatedCloudEnvironment($environmentId);
     }
 
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void

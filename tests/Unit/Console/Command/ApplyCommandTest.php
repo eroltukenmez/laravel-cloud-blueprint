@@ -504,7 +504,7 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         ++$this->mutationCount;
-        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId, 'production', $request->branch);
+        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId);
     }
 
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void

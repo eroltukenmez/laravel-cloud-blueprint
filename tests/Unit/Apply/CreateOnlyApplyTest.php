@@ -556,7 +556,7 @@ final class ApplyCloudClient implements LaravelCloudClient
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         $this->events->values[] = 'update:environment.' . $environmentId . ':' . $request->branch;
-        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId, 'production', $request->branch);
+        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId);
     }
     /** @var list<string> */
     public array $environmentApplicationIds = [];

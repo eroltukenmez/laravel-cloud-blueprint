@@ -184,10 +184,10 @@ JSON);
         self::assertSame('{"branch":"main","name":"production"}', $response->getRequestOptions()['body']);
     }
 
-    public function testEnvironmentUpdateUsesOfficialBranchOnlyPatchAndMapsResponse(): void
+    public function testEnvironmentUpdateAcceptsRealRelationshipBranchResponseAndSendsBranchOnlyPatch(): void
     {
         $response = new MockResponse(
-            '{"data":{"id":"env-123","type":"environments","attributes":{"name":"production","branch":"develop"}}}',
+            '{"data":{"id":"env-123","type":"environments","attributes":{"name":"production"},"relationships":{"branch":{"data":{"type":"branches","id":"branch-relationship-id-not-a-name"}}}}}',
             ['http_code' => 200],
         );
 
@@ -197,11 +197,35 @@ JSON);
         );
 
         self::assertSame('env-123', $environment->id);
-        self::assertSame('production', $environment->name);
-        self::assertSame('develop', $environment->branch);
         self::assertSame('PATCH', $response->getRequestMethod());
         self::assertSame('https://cloud.laravel.com/api/environments/env-123', $response->getRequestUrl());
         self::assertSame('{"branch":"develop"}', $response->getRequestOptions()['body']);
+    }
+
+    public function testEnvironmentUpdateRequiresOnlyAValidResponseIdentity(): void
+    {
+        $environment = $this->client([new MockResponse(
+            '{"data":{"id":"env-123","type":"environments"}}',
+            ['http_code' => 200],
+        )])->updateEnvironment('env-123', new UpdateEnvironmentRequest('develop'));
+
+        self::assertSame('env-123', $environment->id);
+    }
+
+    public function testEnvironmentUpdateMissingResponseIdentityFailsSafely(): void
+    {
+        $this->expectException(CloudResponseException::class);
+
+        $this->client([new MockResponse('{"data":{"type":"environments"}}', ['http_code' => 200])])
+            ->updateEnvironment('env-123', new UpdateEnvironmentRequest('develop'));
+    }
+
+    public function testEnvironmentUpdateInvalidJsonFailsSafely(): void
+    {
+        $this->expectException(CloudResponseException::class);
+
+        $this->client([new MockResponse('{invalid-json', ['http_code' => 200])])
+            ->updateEnvironment('env-123', new UpdateEnvironmentRequest('develop'));
     }
 
     public function testApplicationUpdateUsesOfficialRepositoryAndProviderOnlyPatchAndMapsResponse(): void

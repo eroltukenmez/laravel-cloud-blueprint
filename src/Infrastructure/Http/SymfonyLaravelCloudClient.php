@@ -215,13 +215,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
                 $path,
             );
         }
-        $attributes = $this->mappingAt($resource, 'attributes', $path);
-
-        return new UpdatedCloudEnvironment(
-            $id,
-            $this->requiredString($attributes, 'name', $path),
-            $this->requiredString($attributes, 'branch', $path),
-        );
+        return new UpdatedCloudEnvironment($id);
     }
 
     public function setEnvironmentVariables(
