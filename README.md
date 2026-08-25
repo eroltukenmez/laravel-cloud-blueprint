@@ -27,7 +27,7 @@ This release can discover and compare applications, environments, and environmen
 The package is not yet published on Packagist. For development usage, clone this repository and install its dependencies:
 
 ```shell
-git clone <repository-url>
+git clone https://github.com/eroltukenmez/laravel-cloud-blueprint.git
 cd laravel-cloud-blueprint
 composer install
 php bin/lcb --version
