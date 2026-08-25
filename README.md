@@ -3,7 +3,7 @@
 Laravel Cloud Blueprint is a framework-agnostic CLI for describing and reconciling Laravel Cloud infrastructure using version-controlled YAML blueprints.
 
 > [!WARNING]
-> Version `0.1.0-alpha.2` is early alpha software with a CREATE-only mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
+> Version `0.1.0-alpha.3` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
 
 ## Why
 
@@ -11,9 +11,9 @@ Laravel Cloud exposes an API. Laravel Cloud Blueprint provides an experimental d
 
 ## Status
 
-Current version: `0.1.0-alpha.2`.
+Current version: `0.1.0-alpha.3`.
 
-This release can discover and compare applications, environments, and environment variables, then create supported missing resources. Mutations are CREATE-only; differences requiring updates are reported as unsupported.
+This release can discover and compare applications, environments, and environment variables. It can create missing applications, environments, and variables; update an environment's branch; and update an existing variable's value. Application repository and region changes remain unsupported.
 
 ## Requirements
 
@@ -34,7 +34,7 @@ lcb --version
 Expected output:
 
 ```text
-Laravel Cloud Blueprint 0.1.0-alpha.2
+Laravel Cloud Blueprint 0.1.0-alpha.3
 ```
 
 Composer's global bin directory must be available in `PATH` for the `lcb` command to be found.
@@ -72,7 +72,7 @@ If Laravel Cloud does not return source-provider metadata, provide it explicitly
 lcb init --from-cloud --provider=github
 ```
 
-This exports supported application and environment structure only. It does not import state ownership, export environment variables or secrets, or write remote IDs into YAML.
+This performs read-only Cloud discovery and exports supported application and environment structure only. It does not create `.lcb/state.json`, import or adopt state ownership, export environment-variable values or secrets, or persist remote IDs. Existing resources remain unmanaged. Later supported reconciliation against a matched remote resource does not implicitly adopt it into state. The command refuses to overwrite an existing file unless `--force` is supplied; review generated output before applying it.
 
 ## Blueprint Example
 
@@ -100,7 +100,7 @@ environments:
         sensitive: true
 ```
 
-`value` supplies a literal string. `from_env` resolves a value from the local process environment during plan and apply. `sensitive: true` controls LCB redaction; it does not create or use a Laravel Cloud Secrets Manager secret.
+`value` supplies a literal string. `from_env` resolves a value from the local process environment when needed for reconciliation, including the fresh plan performed by apply. `sensitive: true` marks intent but does not weaken or strengthen output redaction; it does not create or use a Laravel Cloud Secrets Manager secret.
 
 See [examples/cloud.blueprint.yaml](examples/cloud.blueprint.yaml) for a complete safe example.
 
@@ -126,23 +126,28 @@ Creates a read-only comparison against Laravel Cloud. Supports `--file=<path>` a
 
 ### `apply`
 
-Creates supported missing resources after producing a fresh plan. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
+Creates and updates supported resources after producing a fresh plan. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
 
 Run `lcb <command> --help` for exact usage.
 
 ## Plan Semantics
 
 - `CREATE`: a supported desired resource is missing remotely.
+- `UPDATE`: a supported mutable field differs remotely (environment branch or variable value).
 - `NO_CHANGE`: the remote resource matches the blueprint.
-- `UNSUPPORTED`: satisfying the difference would require behavior unavailable in this release, such as update.
+- `UNSUPPORTED`: satisfying the difference would require behavior unavailable in this release.
 
-Planning is read-only. Extra remote resources are not deleted.
+Text plans use `+` for create, `~` for update, `=` for no change, and `!` for unsupported. The summary reports counts to create, update, leave unchanged, and treat as unsupported; JSON output exposes the same four counts.
+
+Planning is read-only and deterministic. Extra remote resources are not deleted. Application repository and region differences are reported as unsupported, so they cannot be accidentally applied.
 
 ## Apply Semantics
 
-Apply always creates a fresh plan. It is CREATE-only and refuses plans containing unsupported changes. Interactive approval defaults to no. Potentially duplicate-creating POST requests are never automatically retried.
+Apply always creates a fresh plan, refuses the entire plan before Cloud mutation when any unsupported action is present, and requests approval unless auto-approved. Interactive approval defaults to no. After approval and preflight checks it acquires the state lock for managed mutation and state work. Potentially duplicate-creating POST requests are never automatically retried.
 
-Successful resources are checkpointed as work progresses. A later failure is reported as partial, with completed checkpoints retained. There is no automatic rollback.
+Supported work is processed in dependency order: application, environments, then environment-variable groups. Environment branch updates use Laravel Cloud's environment PATCH endpoint and accept a confirmed success response without requiring an `attributes.branch` string. Variables are sent per environment with Laravel Cloud's `method=set` mode for both create and update.
+
+Successful application and environment creations are checkpointed as work progresses. Environment branch updates retain their remote identity and do not cause a state save or serial increment solely because of the update. Variables remain outside state, so variable updates likewise do not save or increment state. A pure supported UPDATE apply leaves `.lcb/state.json` unchanged; a mixed CREATE + UPDATE apply can change it when a successful CREATE identity is checkpointed. A later failure is reported as partial, with completed checkpoints retained, and confirmed remote mutations are not rolled back.
 
 ## State
 
@@ -162,13 +167,17 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 
 ## Known Limitations
 
-- This is early alpha software with a CREATE-only mutation model.
-- UPDATE, DELETE, destroy, import, drift repair, and remote state are not supported.
+- This is early alpha software with a limited mutation model.
+- Environment branch and variable value updates are supported; other updates and renames are not. A variable-key change is not an in-place rename and cannot remove the old remote key.
+- Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
+- Application region changes are unsupported.
+- DELETE, destroy, import/state adoption, drift repair, and remote state are not supported.
 - Databases, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.
 - Source-provider metadata may be absent from API responses and require `--provider`.
-- Environment-variable mutation uses Laravel Cloud's `method=set` request mode.
+- Environment-variable mutation uses Laravel Cloud's `method=set` request mode for both creates and updates.
 - A variable missing during plan could be created externally before apply; because Cloud provides `set` rather than conditional create, apply could then update that key.
+- Variable values are omitted or redacted from text and JSON plan/apply output, state, and safe exceptions regardless of whether `sensitive: true` is set; Cloud validation and transport errors are sanitized before display.
 - Laravel Cloud API behavior may evolve during the alpha lifecycle.
 
 ## Roadmap

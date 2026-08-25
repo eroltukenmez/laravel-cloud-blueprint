@@ -120,11 +120,13 @@ Both commands must pass.
 
 ## Scope
 
-v0.1.0-alpha.2 supports only:
+v0.1.0-alpha.3 supports only:
 
 - Application
 - Environment
 - Environment Variables
+
+Supported mutations are CREATE for all three resource types, UPDATE for environment branches and environment-variable values, and no DELETE. Application repository and region changes are UNSUPPORTED.
 
 Commands:
 
