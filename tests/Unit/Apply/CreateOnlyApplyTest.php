@@ -124,6 +124,24 @@ final class CreateOnlyApplyTest extends TestCase
         self::assertSame([], $events->values);
     }
 
+    public function testEnvironmentUpdateAndVariableUpdateRefuseTogetherBeforeLockOrMutation(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::UPDATE, 'env-existing'),
+            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
+        );
+
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+            self::fail('Expected environment UPDATE refusal.');
+        } catch (ApplyRefusedException $exception) {
+            self::assertStringContainsString('Environment UPDATE apply is not yet supported', $exception->getMessage());
+        }
+
+        self::assertSame([], $events->values);
+    }
+
     public function testVariableAddressMissingFromBlueprintIsRefusedBeforeLockOrMutation(): void
     {
         $events = new ApplyEvents();

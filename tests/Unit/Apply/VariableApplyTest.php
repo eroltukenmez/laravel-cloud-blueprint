@@ -28,6 +28,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableMutationMethod;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
@@ -147,6 +148,106 @@ final class VariableApplyTest extends TestCase
         self::assertSame(0, $result->createdCount());
         self::assertSame(3, $result->unchangedCount());
         self::assertSame([], $cloud->variableRequests);
+    }
+
+    public function testVariableUpdateUsesSetExistingEnvironmentIdAndDoesNotChangeState(): void
+    {
+        $events = new VariableApplyEvents();
+        $cloud = new VariableApplyCloud($events);
+        $initial = StateDocument::empty()->withOrganization('acme')->withSerial(9);
+        $state = new VariableApplyState($events, $initial);
+        $blueprint = self::blueprint(
+            production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('apply-time-value'), true)],
+        );
+
+        $result = self::apply()->execute(
+            $blueprint,
+            self::existingVariablePlan('production.APP_ENV', PlanOperation::UPDATE),
+            $cloud,
+            $state,
+        );
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(1, $result->updatedCount());
+        self::assertSame(0, $result->createdCount());
+        self::assertSame(EnvironmentVariableMutationMethod::SET, $cloud->variableRequests['env-production']->method);
+        self::assertSame(['APP_ENV' => 'apply-time-value'], $cloud->requestValues('env-production'));
+        self::assertSame(9, $state->state->serial);
+        self::assertSame([], $state->state->resources());
+        self::assertStringNotContainsString('apply-time-value', serialize($result));
+    }
+
+    public function testCreateAndUpdateBatchInBlueprintOrderAndExcludeNoChange(): void
+    {
+        $events = new VariableApplyEvents();
+        $cloud = new VariableApplyCloud($events);
+        $blueprint = self::blueprint(production: [
+            new VariableDefinition('NEW_KEY', new LiteralVariableValue('new-value'), false),
+            new VariableDefinition('APP_ENV', new EnvironmentVariableReference('LOCAL_APP_ENV'), true),
+            new VariableDefinition('UNCHANGED', new LiteralVariableValue('same'), false),
+        ]);
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::NO_CHANGE, 'app-1'),
+            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::NO_CHANGE, 'env-production'),
+            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
+            self::action(ResourceType::VARIABLE, 'production.NEW_KEY', PlanOperation::CREATE),
+            self::action(ResourceType::VARIABLE, 'production.UNCHANGED', PlanOperation::NO_CHANGE),
+        );
+
+        $result = self::apply(['LOCAL_APP_ENV' => 'updated-value'])->execute(
+            $blueprint,
+            $plan,
+            $cloud,
+            new VariableApplyState($events),
+        );
+
+        self::assertSame(['NEW_KEY' => 'new-value', 'APP_ENV' => 'updated-value'], $cloud->requestValues('env-production'));
+        self::assertCount(1, $cloud->variableRequests);
+        self::assertSame(1, $result->createdCount());
+        self::assertSame(1, $result->updatedCount());
+        self::assertSame(3, $result->unchangedCount());
+    }
+
+    public function testVariableUpdateUnderCreatedEnvironmentUsesCreatedId(): void
+    {
+        $events = new VariableApplyEvents();
+        $cloud = new VariableApplyCloud($events);
+        $blueprint = self::blueprint(
+            production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('updated'), false)],
+        );
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::NO_CHANGE, 'app-1'),
+            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
+            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
+        );
+
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+
+        self::assertSame(1, $result->updatedCount());
+        self::assertSame(['APP_ENV' => 'updated'], $cloud->requestValues('env-created-production'));
+    }
+
+    public function testMissingReferencedUpdateValuePreventsWholeEnvironmentBatch(): void
+    {
+        $events = new VariableApplyEvents();
+        $cloud = new VariableApplyCloud($events);
+        $blueprint = self::blueprint(production: [
+            new VariableDefinition('NEW_KEY', new LiteralVariableValue('new-secret'), true),
+            new VariableDefinition('APP_KEY', new EnvironmentVariableReference('MISSING_REFERENCE'), true),
+        ]);
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::NO_CHANGE, 'app-1'),
+            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::NO_CHANGE, 'env-production'),
+            self::action(ResourceType::VARIABLE, 'production.NEW_KEY', PlanOperation::CREATE),
+            self::action(ResourceType::VARIABLE, 'production.APP_KEY', PlanOperation::UPDATE),
+        );
+
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+
+        self::assertSame(ApplyStatus::FAILED, $result->status);
+        self::assertSame([], $cloud->variableRequests);
+        self::assertStringNotContainsString('new-secret', serialize($result));
+        self::assertStringNotContainsString('MISSING_REFERENCE', serialize($result));
     }
 
     public function testUnsupportedVariableRefusesBeforeLockOrAnyMutation(): void

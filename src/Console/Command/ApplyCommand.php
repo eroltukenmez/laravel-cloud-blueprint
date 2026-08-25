@@ -37,7 +37,7 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Question\ConfirmationQuestion;
 
-#[AsCommand(name: 'apply', description: 'Apply CREATE-only Laravel Cloud changes.')]
+#[AsCommand(name: 'apply', description: 'Apply supported Laravel Cloud changes.')]
 final class ApplyCommand extends Command
 {
     public function __construct(
@@ -105,13 +105,15 @@ final class ApplyCommand extends Command
             return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
         }
 
-        if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
-            return $this->error($output, 'Apply refused. The plan contains unsupported changes. No resources were modified.', ExitCode::GENERAL_ERROR, $jsonOutput);
+        try {
+            $this->apply->assertSupported($plan);
+        } catch (ApplyRefusedException $exception) {
+            return $this->error($output, 'Apply refused. ' . $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
         }
 
-        if ($plan->countByOperation(PlanOperation::CREATE) === 0) {
+        if (!$plan->hasActionableChanges()) {
             if ($jsonOutput) {
-                return $this->json(['status' => 'success', 'summary' => ['created' => 0, 'unchanged' => count($plan)], 'resources' => []], $output);
+                return $this->json(['status' => 'success', 'summary' => ['created' => 0, 'updated' => 0, 'unchanged' => count($plan)], 'resources' => []], $output);
             }
             $output->writeln('No changes.');
             $output->writeln('');
@@ -160,7 +162,12 @@ final class ApplyCommand extends Command
         $output->writeln('Laravel Cloud Blueprint Apply');
         $output->writeln('');
         foreach ($plan as $action) {
-            $symbol = $action->operation === PlanOperation::CREATE ? '+' : '=';
+            $symbol = match ($action->operation) {
+                PlanOperation::CREATE => '+',
+                PlanOperation::UPDATE => '~',
+                PlanOperation::NO_CHANGE => '=',
+                PlanOperation::UNSUPPORTED => '!',
+            };
             $output->writeln(sprintf('%s %s', $symbol, (string) $action->address));
             $output->writeln('  ' . $action->reason);
         }
@@ -179,9 +186,10 @@ final class ApplyCommand extends Command
             }
         }
         $output->writeln(sprintf(
-            'Apply %s: %d created, %d unchanged.',
+            'Apply %s: %d created, %d updated, %d unchanged.',
             str_replace('_', ' ', $result->status->value),
             $result->createdCount(),
+            $result->updatedCount(),
             $result->unchangedCount(),
         ));
     }
@@ -190,7 +198,11 @@ final class ApplyCommand extends Command
     {
         return $this->json([
             'status' => $result->status->value,
-            'summary' => ['created' => $result->createdCount(), 'unchanged' => $result->unchangedCount()],
+            'summary' => [
+                'created' => $result->createdCount(),
+                'updated' => $result->updatedCount(),
+                'unchanged' => $result->unchangedCount(),
+            ],
             'resources' => array_map($this->outcomeJson(...), iterator_to_array($result, false)),
         ], $output);
     }

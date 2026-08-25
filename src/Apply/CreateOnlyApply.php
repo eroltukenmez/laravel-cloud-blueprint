@@ -40,13 +40,7 @@ final readonly class CreateOnlyApply
         LaravelCloudClient $cloud,
         StateStore $states,
     ): ApplyResult {
-        if ($plan->countByOperation(PlanOperation::UPDATE) > 0) {
-            throw new ApplyRefusedException('The plan contains UPDATE actions, but UPDATE apply is not yet supported. No resources were modified.');
-        }
-
-        if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
-            throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
-        }
+        $this->assertSupported($plan);
 
         $variableGroups = $this->variableGroups($blueprint, $plan);
 
@@ -205,12 +199,13 @@ final readonly class CreateOnlyApply
             }
 
             foreach ($variableGroups as $environmentName => $group) {
-                $createActions = array_values(array_filter(
+                $mutationActions = array_values(array_filter(
                     $group,
-                    static fn (VariableApplyAction $item): bool => $item->action->operation === PlanOperation::CREATE,
+                    static fn (VariableApplyAction $item): bool => $item->action->operation === PlanOperation::CREATE
+                        || $item->action->operation === PlanOperation::UPDATE,
                 ));
 
-                if ($createActions === []) {
+                if ($mutationActions === []) {
                     foreach ($group as $item) {
                         $outcomes[] = new ApplyResourceOutcome($item->action->address, ApplyOutcomeOperation::UNCHANGED);
                     }
@@ -228,7 +223,7 @@ final readonly class CreateOnlyApply
 
                 try {
                     $inputs = [];
-                    foreach ($createActions as $item) {
+                    foreach ($mutationActions as $item) {
                         $inputs[] = new EnvironmentVariableInput(
                             $item->definition->name,
                             $this->values->resolve($item->definition, $item->action->address),
@@ -258,7 +253,9 @@ final readonly class CreateOnlyApply
                         $item->action->address,
                         $item->action->operation === PlanOperation::CREATE
                             ? ApplyOutcomeOperation::CREATED
-                            : ApplyOutcomeOperation::UNCHANGED,
+                            : ($item->action->operation === PlanOperation::UPDATE
+                                ? ApplyOutcomeOperation::UPDATED
+                                : ApplyOutcomeOperation::UNCHANGED),
                     );
                 }
             }
@@ -266,6 +263,22 @@ final readonly class CreateOnlyApply
             return new ApplyResult(ApplyStatus::SUCCESS, ...$outcomes);
         } finally {
             $transaction->release();
+        }
+    }
+
+    public function assertSupported(ExecutionPlan $plan): void
+    {
+        if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
+            throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
+        }
+
+        foreach ($plan as $action) {
+            if ($action->operation === PlanOperation::UPDATE && $action->resourceType !== ResourceType::VARIABLE) {
+                throw new ApplyRefusedException(sprintf(
+                    '%s UPDATE apply is not yet supported. No resources were modified.',
+                    ucfirst($action->resourceType->value),
+                ));
+            }
         }
     }
 
@@ -323,29 +336,41 @@ final readonly class CreateOnlyApply
     /** @return array<string, list<VariableApplyAction>> */
     private function variableGroups(Blueprint $blueprint, ExecutionPlan $plan): array
     {
-        $groups = [];
+        /** @var array<string, PlanAction> $variableActions */
+        $variableActions = [];
         foreach ($plan as $action) {
             if ($action->resourceType !== ResourceType::VARIABLE) {
                 continue;
             }
 
-            $matched = null;
-            foreach ($blueprint->environments as $environment) {
-                foreach ($environment->variables as $variable) {
-                    if ($action->address->name === $environment->name . '.' . $variable->name) {
-                        $matched = new VariableApplyAction($environment->name, $variable, $action);
-                        break 2;
-                    }
-                }
-            }
-
-            if ($matched === null) {
+            $address = (string) $action->address;
+            if (array_key_exists($address, $variableActions)) {
                 throw new ApplyRefusedException(sprintf(
-                    'Variable plan address "%s" does not exist in the blueprint. No resources were modified.',
-                    (string) $action->address,
+                    'Variable plan address "%s" appears more than once. No resources were modified.',
+                    $address,
                 ));
             }
-            $groups[$matched->environmentName][] = $matched;
+            $variableActions[$address] = $action;
+        }
+
+        $groups = [];
+        foreach ($blueprint->environments as $environment) {
+            foreach ($environment->variables as $variable) {
+                $address = 'variable.' . $environment->name . '.' . $variable->name;
+                $action = $variableActions[$address] ?? null;
+                if ($action !== null) {
+                    $groups[$environment->name][] = new VariableApplyAction($environment->name, $variable, $action);
+                    unset($variableActions[$address]);
+                }
+            }
+        }
+
+        $unmatched = reset($variableActions);
+        if ($unmatched instanceof PlanAction) {
+            throw new ApplyRefusedException(sprintf(
+                'Variable plan address "%s" does not exist in the blueprint. No resources were modified.',
+                (string) $unmatched->address,
+            ));
         }
 
         return $groups;
@@ -363,17 +388,17 @@ final readonly class CreateOnlyApply
         ?CloudValidationException $validation = null,
     ): ApplyResult {
         foreach ($group as $item) {
+            $mutation = $item->action->operation === PlanOperation::CREATE
+                || $item->action->operation === PlanOperation::UPDATE;
             $outcomes[] = new ApplyResourceOutcome(
                 $item->action->address,
-                $item->action->operation === PlanOperation::CREATE
-                    ? ApplyOutcomeOperation::FAILED
-                    : ApplyOutcomeOperation::UNCHANGED,
-                $item->action->operation === PlanOperation::CREATE ? $message : null,
-                $item->action->operation === PlanOperation::CREATE ? $validation : null,
+                $mutation ? ApplyOutcomeOperation::FAILED : ApplyOutcomeOperation::UNCHANGED,
+                $mutation ? $message : null,
+                $mutation ? $validation : null,
             );
         }
 
-        $status = $this->createdCount($outcomes) === 0 && !$uncertain
+        $status = $this->confirmedMutationCount($outcomes) === 0 && !$uncertain
             ? ApplyStatus::FAILED
             : ApplyStatus::PARTIAL_FAILURE;
 
@@ -386,6 +411,16 @@ final readonly class CreateOnlyApply
         return count(array_filter(
             $outcomes,
             static fn (ApplyResourceOutcome $outcome): bool => $outcome->operation === ApplyOutcomeOperation::CREATED,
+        ));
+    }
+
+    /** @param list<ApplyResourceOutcome> $outcomes */
+    private function confirmedMutationCount(array $outcomes): int
+    {
+        return count(array_filter(
+            $outcomes,
+            static fn (ApplyResourceOutcome $outcome): bool => $outcome->operation === ApplyOutcomeOperation::CREATED
+                || $outcome->operation === ApplyOutcomeOperation::UPDATED,
         ));
     }
 }
