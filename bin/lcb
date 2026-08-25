@@ -5,6 +5,7 @@ declare(strict_types=1);
 
 use LaravelCloudBlueprint\Console\LcbApplication;
 
-require dirname(__DIR__) . '/vendor/autoload.php';
+require $_composer_autoload_path
+    ?? dirname(__DIR__) . '/vendor/autoload.php';
 
 exit((new LcbApplication())->run());
