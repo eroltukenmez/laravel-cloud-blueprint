@@ -336,6 +336,52 @@ final class VariableApplyTest extends TestCase
         ], $events->values);
     }
 
+    public function testApplicationUpdateEnvironmentCreateAndVariableCreateExecuteInDependencyOrder(): void
+    {
+        $events = new VariableApplyEvents();
+        $cloud = new VariableApplyCloud($events);
+        $blueprint = self::blueprint(
+            production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('created-value'), false)],
+        );
+        $plan = new ExecutionPlan(
+            self::applicationUpdateAction(),
+            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
+            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::CREATE),
+        );
+
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(1, $result->updatedCount());
+        self::assertSame(2, $result->createdCount());
+        self::assertSame([
+            'lock',
+            'update:application.app-1',
+            'create:environment.production',
+            'save:environment.production',
+            'set:variables.env-created-production',
+            'release',
+        ], $events->values);
+    }
+
+    public function testUnsupportedActionBlocksAllSupportedUpdatesBeforeLock(): void
+    {
+        $events = new VariableApplyEvents();
+        $plan = new ExecutionPlan(
+            self::applicationUpdateAction(),
+            self::environmentUpdateAction(),
+            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
+            self::action(ResourceType::APPLICATION, 'blocked', PlanOperation::UNSUPPORTED),
+        );
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new VariableApplyCloud($events), new VariableApplyState($events));
+        } finally {
+            self::assertSame([], $events->values);
+        }
+    }
+
     public function testApplicationUpdateFailurePreventsDownstreamMutations(): void
     {
         $events = new VariableApplyEvents();
