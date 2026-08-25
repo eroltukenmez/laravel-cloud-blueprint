@@ -13,6 +13,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
@@ -40,9 +41,7 @@ final readonly class CreateOnlyApply
         LaravelCloudClient $cloud,
         StateStore $states,
     ): ApplyResult {
-        if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
-            throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
-        }
+        $this->assertSupported($plan);
 
         $variableGroups = $this->variableGroups($blueprint, $plan);
 
@@ -69,6 +68,31 @@ final readonly class CreateOnlyApply
                     } elseif ($action->remoteId !== null) {
                         $environmentIds[$action->address->name] = $action->remoteId;
                     }
+                    continue;
+                }
+
+                if ($action->operation === PlanOperation::UPDATE) {
+                    if ($action->resourceType === ResourceType::APPLICATION) {
+                        throw new ApplyRefusedException('Application UPDATE apply is not supported. No resources were modified.');
+                    }
+
+                    $environmentId = $action->remoteId;
+                    if ($environmentId === null) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Environment update "%s" has no remote identity. No resources were modified.',
+                            (string) $action->address,
+                        ));
+                    }
+                    $environmentIds[$action->address->name] = $environmentId;
+                    $desired = $blueprint->environments->get($action->address->name);
+
+                    try {
+                        $cloud->updateEnvironment($environmentId, new UpdateEnvironmentRequest($desired->branch));
+                    } catch (CloudException $exception) {
+                        return $this->updateFailure($outcomes, $action, $exception);
+                    }
+
+                    $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UPDATED);
                     continue;
                 }
 
@@ -201,12 +225,13 @@ final readonly class CreateOnlyApply
             }
 
             foreach ($variableGroups as $environmentName => $group) {
-                $createActions = array_values(array_filter(
+                $mutationActions = array_values(array_filter(
                     $group,
-                    static fn (VariableApplyAction $item): bool => $item->action->operation === PlanOperation::CREATE,
+                    static fn (VariableApplyAction $item): bool => $item->action->operation === PlanOperation::CREATE
+                        || $item->action->operation === PlanOperation::UPDATE,
                 ));
 
-                if ($createActions === []) {
+                if ($mutationActions === []) {
                     foreach ($group as $item) {
                         $outcomes[] = new ApplyResourceOutcome($item->action->address, ApplyOutcomeOperation::UNCHANGED);
                     }
@@ -224,7 +249,7 @@ final readonly class CreateOnlyApply
 
                 try {
                     $inputs = [];
-                    foreach ($createActions as $item) {
+                    foreach ($mutationActions as $item) {
                         $inputs[] = new EnvironmentVariableInput(
                             $item->definition->name,
                             $this->values->resolve($item->definition, $item->action->address),
@@ -254,7 +279,9 @@ final readonly class CreateOnlyApply
                         $item->action->address,
                         $item->action->operation === PlanOperation::CREATE
                             ? ApplyOutcomeOperation::CREATED
-                            : ApplyOutcomeOperation::UNCHANGED,
+                            : ($item->action->operation === PlanOperation::UPDATE
+                                ? ApplyOutcomeOperation::UPDATED
+                                : ApplyOutcomeOperation::UNCHANGED),
                     );
                 }
             }
@@ -262,6 +289,57 @@ final readonly class CreateOnlyApply
             return new ApplyResult(ApplyStatus::SUCCESS, ...$outcomes);
         } finally {
             $transaction->release();
+        }
+    }
+
+    public function assertSupported(ExecutionPlan $plan): void
+    {
+        if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
+            throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
+        }
+
+        foreach ($plan as $action) {
+            if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::APPLICATION) {
+                throw new ApplyRefusedException('Application UPDATE apply is not supported. No resources were modified.');
+            }
+
+            if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::ENVIRONMENT) {
+                if (count($action->changes) !== 1 || $action->changes[0]->field !== 'branch') {
+                    throw new ApplyRefusedException(sprintf(
+                        'Environment update "%s" contains unsupported field changes. No resources were modified.',
+                        (string) $action->address,
+                    ));
+                }
+                if ($action->remoteId === null) {
+                    throw new ApplyRefusedException(sprintf(
+                        'Environment update "%s" has no remote identity. No resources were modified.',
+                        (string) $action->address,
+                    ));
+                }
+            }
+        }
+
+        $this->assertNoCreateAndUpdateForSameEnvironment($plan);
+    }
+
+    private function assertNoCreateAndUpdateForSameEnvironment(ExecutionPlan $plan): void
+    {
+        /** @var array<string, PlanOperation> $operations */
+        $operations = [];
+        foreach ($plan as $action) {
+            if ($action->resourceType !== ResourceType::ENVIRONMENT
+                || ($action->operation !== PlanOperation::CREATE && $action->operation !== PlanOperation::UPDATE)) {
+                continue;
+            }
+            $address = (string) $action->address;
+            $previous = $operations[$address] ?? null;
+            if ($previous !== null && $previous !== $action->operation) {
+                throw new ApplyRefusedException(sprintf(
+                    'Environment "%s" cannot be created and updated in the same plan. No resources were modified.',
+                    $address,
+                ));
+            }
+            $operations[$address] = $action->operation;
         }
     }
 
@@ -319,29 +397,41 @@ final readonly class CreateOnlyApply
     /** @return array<string, list<VariableApplyAction>> */
     private function variableGroups(Blueprint $blueprint, ExecutionPlan $plan): array
     {
-        $groups = [];
+        /** @var array<string, PlanAction> $variableActions */
+        $variableActions = [];
         foreach ($plan as $action) {
             if ($action->resourceType !== ResourceType::VARIABLE) {
                 continue;
             }
 
-            $matched = null;
-            foreach ($blueprint->environments as $environment) {
-                foreach ($environment->variables as $variable) {
-                    if ($action->address->name === $environment->name . '.' . $variable->name) {
-                        $matched = new VariableApplyAction($environment->name, $variable, $action);
-                        break 2;
-                    }
-                }
-            }
-
-            if ($matched === null) {
+            $address = (string) $action->address;
+            if (array_key_exists($address, $variableActions)) {
                 throw new ApplyRefusedException(sprintf(
-                    'Variable plan address "%s" does not exist in the blueprint. No resources were modified.',
-                    (string) $action->address,
+                    'Variable plan address "%s" appears more than once. No resources were modified.',
+                    $address,
                 ));
             }
-            $groups[$matched->environmentName][] = $matched;
+            $variableActions[$address] = $action;
+        }
+
+        $groups = [];
+        foreach ($blueprint->environments as $environment) {
+            foreach ($environment->variables as $variable) {
+                $address = 'variable.' . $environment->name . '.' . $variable->name;
+                $action = $variableActions[$address] ?? null;
+                if ($action !== null) {
+                    $groups[$environment->name][] = new VariableApplyAction($environment->name, $variable, $action);
+                    unset($variableActions[$address]);
+                }
+            }
+        }
+
+        $unmatched = reset($variableActions);
+        if ($unmatched instanceof PlanAction) {
+            throw new ApplyRefusedException(sprintf(
+                'Variable plan address "%s" does not exist in the blueprint. No resources were modified.',
+                (string) $unmatched->address,
+            ));
         }
 
         return $groups;
@@ -359,17 +449,37 @@ final readonly class CreateOnlyApply
         ?CloudValidationException $validation = null,
     ): ApplyResult {
         foreach ($group as $item) {
+            $mutation = $item->action->operation === PlanOperation::CREATE
+                || $item->action->operation === PlanOperation::UPDATE;
             $outcomes[] = new ApplyResourceOutcome(
                 $item->action->address,
-                $item->action->operation === PlanOperation::CREATE
-                    ? ApplyOutcomeOperation::FAILED
-                    : ApplyOutcomeOperation::UNCHANGED,
-                $item->action->operation === PlanOperation::CREATE ? $message : null,
-                $item->action->operation === PlanOperation::CREATE ? $validation : null,
+                $mutation ? ApplyOutcomeOperation::FAILED : ApplyOutcomeOperation::UNCHANGED,
+                $mutation ? $message : null,
+                $mutation ? $validation : null,
             );
         }
 
-        $status = $this->createdCount($outcomes) === 0 && !$uncertain
+        $status = $this->confirmedMutationCount($outcomes) === 0 && !$uncertain
+            ? ApplyStatus::FAILED
+            : ApplyStatus::PARTIAL_FAILURE;
+
+        return new ApplyResult($status, ...$outcomes);
+    }
+
+    /** @param list<ApplyResourceOutcome> $outcomes */
+    private function updateFailure(
+        array $outcomes,
+        PlanAction $action,
+        CloudException $exception,
+    ): ApplyResult {
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::FAILED,
+            $exception->getMessage(),
+            $exception instanceof CloudValidationException ? $exception : null,
+        );
+        $status = $this->confirmedMutationCount($outcomes) === 0
+            && !$exception instanceof CloudTransportException
             ? ApplyStatus::FAILED
             : ApplyStatus::PARTIAL_FAILURE;
 
@@ -382,6 +492,16 @@ final readonly class CreateOnlyApply
         return count(array_filter(
             $outcomes,
             static fn (ApplyResourceOutcome $outcome): bool => $outcome->operation === ApplyOutcomeOperation::CREATED,
+        ));
+    }
+
+    /** @param list<ApplyResourceOutcome> $outcomes */
+    private function confirmedMutationCount(array $outcomes): int
+    {
+        return count(array_filter(
+            $outcomes,
+            static fn (ApplyResourceOutcome $outcome): bool => $outcome->operation === ApplyOutcomeOperation::CREATED
+                || $outcome->operation === ApplyOutcomeOperation::UPDATED,
         ));
     }
 }

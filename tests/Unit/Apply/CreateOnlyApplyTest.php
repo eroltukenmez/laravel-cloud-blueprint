@@ -28,6 +28,7 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\PlanAction;
+use LaravelCloudBlueprint\Planning\PlanChange;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
@@ -107,6 +108,171 @@ final class CreateOnlyApplyTest extends TestCase
         } finally {
             self::assertSame([], $events->values);
         }
+    }
+
+    public function testApplicationUpdateIsRefusedBeforeLockOrMutation(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            PlanOperation::UPDATE,
+            'test',
+            'app-existing',
+            new PlanChange('repository', 'old', 'new'),
+        ));
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+        } finally {
+            self::assertSame([], $events->values);
+        }
+    }
+
+    public function testEnvironmentBranchUpdateIsAcceptedWithoutSavingState(): void
+    {
+        $events = new ApplyEvents();
+        $states = new ApplyStateStore($events, StateDocument::empty()->withOrganization('acme')->withSerial(4));
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            PlanOperation::UPDATE,
+            'test',
+            'env-existing',
+            new PlanChange('branch', 'develop', 'main'),
+        ));
+
+        $result = self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), $states);
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(1, $result->updatedCount());
+        self::assertSame(['lock', 'update:environment.env-existing:main', 'release'], $events->values);
+        self::assertSame(4, $states->state->serial);
+        self::assertSame([], $states->state->resources());
+    }
+
+    public function testUnsupportedEnvironmentUpdateFieldsRefuseBeforeLockOrMutation(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            PlanOperation::UPDATE,
+            'test',
+            'env-existing',
+            new PlanChange('name', 'production', 'renamed'),
+            new PlanChange('branch', 'develop', 'main'),
+        ));
+
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+            self::fail('Expected unsupported environment field refusal.');
+        } catch (ApplyRefusedException $exception) {
+            self::assertStringContainsString('unsupported field changes', $exception->getMessage());
+        }
+
+        self::assertSame([], $events->values);
+    }
+
+    public function testSingleUnknownEnvironmentUpdateFieldRefusesBeforeLock(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            PlanOperation::UPDATE,
+            'test',
+            'env-existing',
+            new PlanChange('name', 'production', 'renamed'),
+        ));
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+        } finally {
+            self::assertSame([], $events->values);
+        }
+    }
+
+    public function testEnvironmentCreateAndUpdateCollisionRefusesBeforeLock(): void
+    {
+        $events = new ApplyEvents();
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
+            new PlanAction(
+                self::address(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                PlanOperation::UPDATE,
+                'test',
+                'env-existing',
+                new PlanChange('branch', 'develop', 'main'),
+            ),
+        );
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events));
+        } finally {
+            self::assertSame([], $events->values);
+        }
+    }
+
+    public function testMatchingManagedEnvironmentIdentityAllowsUpdateWithoutStateSave(): void
+    {
+        $events = new ApplyEvents();
+        $managed = new StateResource(
+            self::address(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            'env-managed',
+            self::address(ResourceType::APPLICATION, 'my-api'),
+        );
+        $state = StateDocument::empty()->withOrganization('acme')->withResource($managed)->withSerial(3);
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            PlanOperation::UPDATE,
+            'test',
+            'env-managed',
+            new PlanChange('branch', 'develop', 'main'),
+        ));
+
+        $result = self::apply()->execute(
+            self::blueprint(),
+            $plan,
+            new ApplyCloudClient($events),
+            new ApplyStateStore($events, $state),
+        );
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(['lock', 'update:environment.env-managed:main', 'release'], $events->values);
+    }
+
+    public function testEnvironmentUpdateStateIdentityConflictAbortsBeforePatch(): void
+    {
+        $events = new ApplyEvents();
+        $state = StateDocument::empty()->withOrganization('acme')->withResource(new StateResource(
+            self::address(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            'env-managed',
+            self::address(ResourceType::APPLICATION, 'my-api'),
+        ));
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            PlanOperation::UPDATE,
+            'test',
+            'env-other',
+            new PlanChange('branch', 'develop', 'main'),
+        ));
+
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), new ApplyStateStore($events, $state));
+            self::fail('Expected state identity conflict.');
+        } catch (StateIdentityConflictException) {
+        }
+
+        self::assertSame(['lock', 'release'], $events->values);
     }
 
     public function testVariableAddressMissingFromBlueprintIsRefusedBeforeLockOrMutation(): void
@@ -263,6 +429,11 @@ final class ApplyEvents
 
 final class ApplyCloudClient implements LaravelCloudClient
 {
+    public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
+    {
+        $this->events->values[] = 'update:environment.' . $environmentId . ':' . $request->branch;
+        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId);
+    }
     /** @var list<string> */
     public array $environmentApplicationIds = [];
     private int $environmentAttempt = 0;

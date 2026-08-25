@@ -15,6 +15,8 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariable;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
@@ -40,7 +42,7 @@ final class PlanCommandTest extends TestCase
         self::assertStringContainsString('Laravel Cloud Blueprint Plan', $tester->getDisplay());
         self::assertStringContainsString('+ application.new-api', $tester->getDisplay());
         self::assertStringContainsString('+ environment.production', $tester->getDisplay());
-        self::assertStringContainsString('Plan: 2 to create, 0 unchanged, 0 unsupported.', $tester->getDisplay());
+        self::assertStringContainsString('Plan: 2 to create, 0 to update, 0 unchanged, 0 unsupported.', $tester->getDisplay());
         self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
     }
 
@@ -54,10 +56,47 @@ final class PlanCommandTest extends TestCase
         self::assertSame('success', $decoded['status']);
         self::assertIsArray($decoded['summary']);
         self::assertSame(2, $decoded['summary']['create']);
+        self::assertSame(0, $decoded['summary']['update']);
         self::assertIsArray($decoded['actions']);
         self::assertIsArray($decoded['actions'][0]);
         self::assertSame('application.new-api', $decoded['actions'][0]['resource']);
         self::assertSame('create', $decoded['actions'][0]['operation']);
+    }
+
+    public function testUpdateTextAndJsonRenderSafeChangesAndNeverVariableValues(): void
+    {
+        $blueprint = self::blueprintWithUpdate();
+        $text = $this->tester($blueprint, cloud: new PlanUpdateCloudClient());
+
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('! application.API', $text->getDisplay());
+        self::assertStringContainsString('Application repository differs and cannot be updated safely.', $text->getDisplay());
+        self::assertStringContainsString('branch: old-branch → main', $text->getDisplay());
+        self::assertStringContainsString('Environment variable differs from desired state.', $text->getDisplay());
+        self::assertStringContainsString('Plan: 0 to create, 2 to update, 0 unchanged, 1 unsupported.', $text->getDisplay());
+
+        $json = $this->tester($blueprint, cloud: new PlanUpdateCloudClient());
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['summary']);
+        self::assertIsArray($decoded['actions']);
+        self::assertIsArray($decoded['actions'][0]);
+        self::assertIsArray($decoded['actions'][1]);
+        self::assertIsArray($decoded['actions'][1]['changes']);
+        self::assertIsArray($decoded['actions'][1]['changes'][0]);
+        self::assertIsArray($decoded['actions'][2]);
+        self::assertSame(2, $decoded['summary']['update']);
+        self::assertSame(1, $decoded['summary']['unsupported']);
+        self::assertSame('unsupported', $decoded['actions'][0]['operation']);
+        self::assertArrayNotHasKey('changes', $decoded['actions'][0]);
+        self::assertSame('branch', $decoded['actions'][1]['changes'][0]['field']);
+        self::assertArrayNotHasKey('changes', $decoded['actions'][2]);
+
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
+            self::assertStringNotContainsString('desired-variable-secret', $output);
+            self::assertStringNotContainsString('remote-variable-secret', $output);
+        }
     }
 
     public function testMissingTokenFailsSafely(): void
@@ -163,6 +202,27 @@ environments:
         sensitive: true
 YAML;
     }
+
+    private static function blueprintWithUpdate(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: API
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/api
+environments:
+  production:
+    branch: main
+    variables:
+      APP_KEY:
+        value: desired-variable-secret
+        sensitive: true
+YAML;
+    }
 }
 
 final readonly class PlanFileReader implements FileReader
@@ -208,6 +268,10 @@ final readonly class PlanClientFactory implements LaravelCloudClientFactory
 
 class PlanCommandCloudClient implements LaravelCloudClient
 {
+    public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
+    {
+        throw new LogicException('Plan fake must remain read-only.');
+    }
     public function organization(): CloudOrganization
     {
         return new CloudOrganization('org-1', 'Acme', 'acme');
@@ -257,5 +321,25 @@ final class PlanThrowingCloudClient extends PlanCommandCloudClient
     public function organization(): CloudOrganization
     {
         throw new CloudApiException('Laravel Cloud is unavailable.', 'GET', '/meta/organization', 500);
+    }
+}
+
+final class PlanUpdateCloudClient extends PlanCommandCloudClient
+{
+    public function applications(): array
+    {
+        return [new CloudApplication('app-1', 'API', 'api', 'eu-central-1', 'acme/old-api')];
+    }
+
+    public function environments(string $applicationId): array
+    {
+        return [new CloudEnvironment('env-1', $applicationId, 'production', 'old-branch')];
+    }
+
+    public function environment(string $environmentId): CloudEnvironmentDetails
+    {
+        return new CloudEnvironmentDetails($environmentId, 'production', new CloudEnvironmentVariableCollection(
+            new CloudEnvironmentVariable('APP_KEY', 'remote-variable-secret'),
+        ));
     }
 }

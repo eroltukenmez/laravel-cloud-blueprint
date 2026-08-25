@@ -31,6 +31,11 @@ final readonly class ApplyResult implements Countable, IteratorAggregate
         return $this->countOperation(ApplyOutcomeOperation::UNCHANGED);
     }
 
+    public function updatedCount(): int
+    {
+        return $this->countOperation(ApplyOutcomeOperation::UPDATED);
+    }
+
     public function count(): int
     {
         return count($this->outcomes);

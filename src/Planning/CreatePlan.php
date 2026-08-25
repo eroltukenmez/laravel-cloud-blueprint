@@ -129,7 +129,7 @@ final readonly class CreatePlan
             return $this->applicationAction(
                 $blueprint->application->name,
                 PlanOperation::UNSUPPORTED,
-                'Remote application repository differs from desired repository.',
+                'Application repository differs and cannot be updated safely.',
             );
         }
 
@@ -180,9 +180,10 @@ final readonly class CreatePlan
         if ($remote->branch !== $desired->branch) {
             return [$this->environmentAction(
                 $desired->name,
-                PlanOperation::UNSUPPORTED,
-                'Remote branch differs from desired branch.',
+                PlanOperation::UPDATE,
+                'Remote environment differs from desired state.',
                 $remote->id,
+                new PlanChange('branch', $remote->branch, $desired->branch),
             ), $remote];
         }
 
@@ -222,8 +223,8 @@ final readonly class CreatePlan
         if ($remote->value !== $desiredValue) {
             return $this->variableAction(
                 $address,
-                PlanOperation::UNSUPPORTED,
-                'Environment variable value differs from desired state.',
+                PlanOperation::UPDATE,
+                'Environment variable differs from desired state.',
             );
         }
 
@@ -239,6 +240,7 @@ final readonly class CreatePlan
         PlanOperation $operation,
         string $reason,
         ?string $remoteId = null,
+        PlanChange ...$changes,
     ): PlanAction
     {
         return new PlanAction(
@@ -247,6 +249,7 @@ final readonly class CreatePlan
             $operation,
             $reason,
             $remoteId,
+            ...$changes,
         );
     }
 
@@ -255,6 +258,7 @@ final readonly class CreatePlan
         PlanOperation $operation,
         string $reason,
         ?string $remoteId = null,
+        PlanChange ...$changes,
     ): PlanAction
     {
         return new PlanAction(
@@ -263,6 +267,7 @@ final readonly class CreatePlan
             $operation,
             $reason,
             $remoteId,
+            ...$changes,
         );
     }
 

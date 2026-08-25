@@ -11,6 +11,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableMutationMethod;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
@@ -180,6 +181,94 @@ JSON);
         self::assertSame('app-created', $environment->applicationId);
         self::assertSame('main', $environment->branch);
         self::assertSame('{"branch":"main","name":"production"}', $response->getRequestOptions()['body']);
+    }
+
+    public function testEnvironmentUpdateAcceptsRealRelationshipBranchResponseAndSendsBranchOnlyPatch(): void
+    {
+        $response = new MockResponse(
+            '{"data":{"id":"env-123","type":"environments","attributes":{"name":"production"},"relationships":{"branch":{"data":{"type":"branches","id":"branch-relationship-id-not-a-name"}}}}}',
+            ['http_code' => 200],
+        );
+
+        $environment = $this->client([$response])->updateEnvironment(
+            'env-123',
+            new UpdateEnvironmentRequest('develop'),
+        );
+
+        self::assertSame('env-123', $environment->id);
+        self::assertSame('PATCH', $response->getRequestMethod());
+        self::assertSame('https://cloud.laravel.com/api/environments/env-123', $response->getRequestUrl());
+        self::assertSame('{"branch":"develop"}', $response->getRequestOptions()['body']);
+    }
+
+    public function testEnvironmentUpdateRequiresOnlyAValidResponseIdentity(): void
+    {
+        $environment = $this->client([new MockResponse(
+            '{"data":{"id":"env-123","type":"environments"}}',
+            ['http_code' => 200],
+        )])->updateEnvironment('env-123', new UpdateEnvironmentRequest('develop'));
+
+        self::assertSame('env-123', $environment->id);
+    }
+
+    public function testEnvironmentUpdateMissingResponseIdentityFailsSafely(): void
+    {
+        $this->expectException(CloudResponseException::class);
+
+        $this->client([new MockResponse('{"data":{"type":"environments"}}', ['http_code' => 200])])
+            ->updateEnvironment('env-123', new UpdateEnvironmentRequest('develop'));
+    }
+
+    public function testEnvironmentUpdateInvalidJsonFailsSafely(): void
+    {
+        $this->expectException(CloudResponseException::class);
+
+        $this->client([new MockResponse('{invalid-json', ['http_code' => 200])])
+            ->updateEnvironment('env-123', new UpdateEnvironmentRequest('develop'));
+    }
+
+    /** @return iterable<string, array{int, class-string<CloudApiException>}> */
+    public static function environmentUpdateErrorProvider(): iterable
+    {
+        yield 'forbidden' => [403, CloudAuthenticationException::class];
+        yield 'not found' => [404, CloudResourceNotFoundException::class];
+        yield 'validation' => [422, CloudValidationException::class];
+        yield 'server error' => [500, CloudApiException::class];
+    }
+
+    /** @param class-string<CloudApiException> $expected */
+    #[DataProvider('environmentUpdateErrorProvider')]
+    public function testEnvironmentUpdateErrorsMapSafely(int $status, string $expected): void
+    {
+        try {
+            $this->client([new MockResponse('{"message":"failed"}', ['http_code' => $status])])
+                ->updateEnvironment('env-1', new UpdateEnvironmentRequest('develop'));
+            self::fail('Expected environment update failure.');
+        } catch (CloudApiException $exception) {
+            self::assertInstanceOf($expected, $exception);
+            self::assertSame('PATCH', $exception->method);
+            self::assertSame('/environments/env-1', $exception->path);
+        }
+    }
+
+    public function testEnvironmentPatchTransportFailureIsNotRetried(): void
+    {
+        $attempts = 0;
+        $http = new MockHttpClient(static function () use (&$attempts): never {
+            ++$attempts;
+            throw new TransportException('timeout after send');
+        });
+
+        try {
+            (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))
+                ->updateEnvironment('env-1', new UpdateEnvironmentRequest('develop'));
+            self::fail('Expected uncertain environment update failure.');
+        } catch (CloudTransportException $exception) {
+            self::assertSame(1, $attempts);
+            self::assertSame('PATCH', $exception->method);
+            self::assertStringContainsString('uncertain', $exception->getMessage());
+            self::assertStringNotContainsString('secret-token', $exception->getMessage());
+        }
     }
 
     public function testCreateValidationFailureIsControlled(): void

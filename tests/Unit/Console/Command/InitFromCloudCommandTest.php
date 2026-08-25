@@ -252,6 +252,10 @@ final readonly class InitExportClientFactory implements LaravelCloudClientFactor
 
 final class InitExportCloud implements LaravelCloudClient
 {
+    public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
+    {
+        throw new \LogicException('Export fake must remain read-only.');
+    }
     public int $mutationCalls = 0;
     /** @param list<CloudApplication> $applicationList */
     public function __construct(private array $applicationList, private bool $fail = false) {}

@@ -16,6 +16,8 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariable;
+use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
@@ -62,7 +64,7 @@ final class ApplyCommandTest extends TestCase
             . "+ environment.production\n  Environment does not exist because the application will be created.\n\n"
             . "application.my-api: created\n"
             . "environment.production: created\n"
-            . "Apply success: 2 created, 0 unchanged.\n",
+            . "Apply success: 2 created, 0 updated, 0 unchanged.\n",
             $tester->getDisplay(),
         );
     }
@@ -100,7 +102,7 @@ final class ApplyCommandTest extends TestCase
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
         self::assertSame('success', $decoded['status']);
-        self::assertSame(['created' => 2, 'unchanged' => 0], $decoded['summary']);
+        self::assertSame(['created' => 2, 'updated' => 0, 'unchanged' => 0], $decoded['summary']);
         self::assertIsArray($decoded['resources']);
         self::assertIsArray($decoded['resources'][0]);
         self::assertSame('application.my-api', $decoded['resources'][0]['resource']);
@@ -144,6 +146,58 @@ final class ApplyCommandTest extends TestCase
             self::assertStringNotContainsString('resolved-apply-secret', $output);
             self::assertStringNotContainsString('LOCAL_APP_KEY', $output);
         }
+    }
+
+    public function testVariableUpdateRendersUpdatedInTextAndJsonWithoutValues(): void
+    {
+        [$text, $textCloud] = $this->tester(
+            ApplyCommandCloudClient::withVariableUpdate(),
+            self::blueprintWithVariableUpdate(),
+        );
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute(['--auto-approve' => true]));
+        self::assertSame(1, $textCloud->mutationCount);
+        self::assertStringContainsString('~ variable.production.APP_ENV', $text->getDisplay());
+        self::assertStringContainsString('variable.production.APP_ENV: updated', $text->getDisplay());
+        self::assertStringContainsString('Apply success: 0 created, 1 updated, 2 unchanged.', $text->getDisplay());
+
+        [$json] = $this->tester(
+            ApplyCommandCloudClient::withVariableUpdate(),
+            self::blueprintWithVariableUpdate(),
+        );
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true, '--auto-approve' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['summary']);
+        self::assertIsArray($decoded['resources']);
+        self::assertIsArray($decoded['resources'][2]);
+        self::assertSame(1, $decoded['summary']['updated']);
+        self::assertSame('updated', $decoded['resources'][2]['operation']);
+
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
+            self::assertStringNotContainsString('desired-update-secret', $output);
+            self::assertStringNotContainsString('remote-update-secret', $output);
+        }
+    }
+
+    public function testEnvironmentBranchUpdateRendersSafeDiffAndUpdatedOutcome(): void
+    {
+        [$text, $textCloud, $state] = $this->tester(ApplyCommandCloudClient::withEnvironmentUpdate());
+
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute(['--auto-approve' => true]));
+        self::assertSame(1, $textCloud->mutationCount);
+        self::assertSame(0, $state->state->serial);
+        self::assertStringContainsString('~ environment.production', $text->getDisplay());
+        self::assertStringContainsString('branch: develop → main', $text->getDisplay());
+        self::assertStringContainsString('environment.production: updated', $text->getDisplay());
+
+        [$json] = $this->tester(ApplyCommandCloudClient::withEnvironmentUpdate());
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true, '--auto-approve' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['resources']);
+        self::assertIsArray($decoded['resources'][1]);
+        self::assertSame('environment.production', $decoded['resources'][1]['resource']);
+        self::assertSame('updated', $decoded['resources'][1]['operation']);
     }
 
     public function testCloudValidationErrorsRenderSafelyInTextAndJson(): void
@@ -262,6 +316,27 @@ environments:
         sensitive: true
 YAML;
     }
+
+    private static function blueprintWithVariableUpdate(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: my-api
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/my-api
+environments:
+  production:
+    branch: main
+    variables:
+      APP_ENV:
+        value: desired-update-secret
+        sensitive: true
+YAML;
+    }
 }
 
 final readonly class ApplyCommandFileReader implements FileReader
@@ -317,6 +392,7 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         private readonly array $applications,
         private readonly array $environments,
         private readonly ?CloudValidationException $variableValidationFailure = null,
+        private readonly ?CloudEnvironmentVariableCollection $variables = null,
     ) {
     }
 
@@ -338,6 +414,25 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         return new self([], [], $exception);
     }
 
+    public static function withVariableUpdate(): self
+    {
+        return new self(
+            [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
+            [new CloudEnvironment('env-existing', 'app-existing', 'production', 'main')],
+            variables: new CloudEnvironmentVariableCollection(
+                new CloudEnvironmentVariable('APP_ENV', 'remote-update-secret'),
+            ),
+        );
+    }
+
+    public static function withEnvironmentUpdate(): self
+    {
+        return new self(
+            [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
+            [new CloudEnvironment('env-existing', 'app-existing', 'production', 'develop')],
+        );
+    }
+
     public function organization(): CloudOrganization
     {
         return new CloudOrganization('org-1', 'Acme', 'acme');
@@ -355,7 +450,7 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
 
     public function environment(string $environmentId): CloudEnvironmentDetails
     {
-        return new CloudEnvironmentDetails($environmentId, 'production', null);
+        return new CloudEnvironmentDetails($environmentId, 'production', $this->variables);
     }
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication
@@ -364,10 +459,17 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         return new CloudApplication('app-created', $request->name, $request->name, $request->region, $request->repository);
     }
 
+
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
     {
         ++$this->mutationCount;
         return new CloudEnvironment('env-created', $applicationId, $request->name, $request->branch);
+    }
+
+    public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
+    {
+        ++$this->mutationCount;
+        return new \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment($environmentId);
     }
 
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void

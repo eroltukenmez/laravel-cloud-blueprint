@@ -19,6 +19,7 @@ use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\PlanAction;
+use LaravelCloudBlueprint\Planning\PlanChange;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -104,10 +105,11 @@ final class PlanCommand extends Command
         $output->writeln('');
 
         $create = $plan->countByOperation(PlanOperation::CREATE);
+        $update = $plan->countByOperation(PlanOperation::UPDATE);
         $unchanged = $plan->countByOperation(PlanOperation::NO_CHANGE);
         $unsupported = $plan->countByOperation(PlanOperation::UNSUPPORTED);
 
-        if ($create === 0 && $unsupported === 0) {
+        if ($create === 0 && $update === 0 && $unsupported === 0) {
             $output->writeln('No changes.');
             $output->writeln('');
             $output->writeln('Laravel Cloud infrastructure matches the blueprint.');
@@ -116,13 +118,20 @@ final class PlanCommand extends Command
 
         foreach ($plan as $action) {
             $output->writeln(sprintf('%s %s', $this->symbol($action->operation), (string) $action->address));
-            $output->writeln('  ' . $action->reason);
+            if ($action->changes === []) {
+                $output->writeln('  ' . $action->reason);
+            } else {
+                foreach ($action->changes as $change) {
+                    $output->writeln(sprintf('  %s: %s → %s', $change->field, $change->before, $change->after));
+                }
+            }
             $output->writeln('');
         }
 
         $output->writeln(sprintf(
-            'Plan: %d to create, %d unchanged, %d unsupported.',
+            'Plan: %d to create, %d to update, %d unchanged, %d unsupported.',
             $create,
+            $update,
             $unchanged,
             $unsupported,
         ));
@@ -135,16 +144,25 @@ final class PlanCommand extends Command
                 'status' => 'success',
                 'summary' => [
                     'create' => $plan->countByOperation(PlanOperation::CREATE),
+                    'update' => $plan->countByOperation(PlanOperation::UPDATE),
                     'no_change' => $plan->countByOperation(PlanOperation::NO_CHANGE),
                     'unsupported' => $plan->countByOperation(PlanOperation::UNSUPPORTED),
                 ],
                 'actions' => array_map(
-                    static fn (PlanAction $action): array => [
+                    static fn (PlanAction $action): array => array_filter([
                         'resource' => (string) $action->address,
                         'type' => $action->resourceType->value,
                         'operation' => $action->operation->value,
                         'reason' => $action->reason,
-                    ],
+                        'changes' => $action->changes === [] ? null : array_map(
+                            static fn (PlanChange $change): array => [
+                                'field' => $change->field,
+                                'before' => $change->before,
+                                'after' => $change->after,
+                            ],
+                            $action->changes,
+                        ),
+                    ], static fn (mixed $value): bool => $value !== null),
                     iterator_to_array($plan, false),
                 ),
             ], JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
@@ -160,6 +178,7 @@ final class PlanCommand extends Command
     {
         return match ($operation) {
             PlanOperation::CREATE => '+',
+            PlanOperation::UPDATE => '~',
             PlanOperation::NO_CHANGE => '=',
             PlanOperation::UNSUPPORTED => '!',
         };

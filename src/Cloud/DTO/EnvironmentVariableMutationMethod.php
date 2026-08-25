@@ -7,9 +7,8 @@ namespace LaravelCloudBlueprint\Cloud\DTO;
 enum EnvironmentVariableMutationMethod: string
 {
     /**
-     * LCB plans SET only for keys observed as missing. Laravel Cloud does not
-     * document conditional creation, so another actor creating the key between
-     * plan and apply could cause SET to update that newly created value.
+     * Laravel Cloud SET creates missing keys and updates existing keys. It is
+     * not conditional, so remote changes between plan and apply may be overwritten.
      */
     case SET = 'set';
 }

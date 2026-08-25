@@ -7,6 +7,7 @@ namespace LaravelCloudBlueprint\Planning;
 enum PlanOperation: string
 {
     case CREATE = 'create';
+    case UPDATE = 'update';
     case NO_CHANGE = 'no_change';
     case UNSUPPORTED = 'unsupported';
 }

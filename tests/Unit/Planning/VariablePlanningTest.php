@@ -70,7 +70,7 @@ final class VariablePlanningTest extends TestCase
         }
     }
 
-    public function testExistingVariablesPlanCreateNoChangeAndUnsupportedWhileIgnoringExtras(): void
+    public function testExistingVariablesPlanCreateNoChangeAndUpdateWhileIgnoringExtras(): void
     {
         $cloud = VariablePlanningCloud::existing(new CloudEnvironmentVariableCollection(
             new CloudEnvironmentVariable('EQUAL', 'same'),
@@ -90,7 +90,9 @@ final class VariablePlanningTest extends TestCase
         );
         self::assertSame(PlanOperation::CREATE, $actions[2]->operation);
         self::assertSame(PlanOperation::NO_CHANGE, $actions[3]->operation);
-        self::assertSame(PlanOperation::UNSUPPORTED, $actions[4]->operation);
+        self::assertSame(PlanOperation::UPDATE, $actions[4]->operation);
+        self::assertSame('Environment variable differs from desired state.', $actions[4]->reason);
+        self::assertSame([], $actions[4]->changes);
         self::assertSame(['organization', 'applications', 'environments:app-1', 'environment:env-1'], $cloud->calls);
 
         $serialized = serialize($actions);
@@ -203,6 +205,10 @@ final readonly class VariablePlanningEnvironment implements EnvironmentValueProv
 
 final class VariablePlanningCloud implements LaravelCloudClient
 {
+    public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
+    {
+        throw new LogicException('Planner fake must remain read-only.');
+    }
     /** @var list<string> */
     public array $calls = [];
     public int $postCount = 0;
