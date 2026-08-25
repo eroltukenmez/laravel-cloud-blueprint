@@ -310,7 +310,7 @@ final class VariableApplyTest extends TestCase
         self::assertStringNotContainsString('rejected-value', serialize($result));
     }
 
-    public function testAllSupportedUpdatesExecuteInDependencyOrder(): void
+    public function testEnvironmentAndVariableUpdatesExecuteInDependencyOrder(): void
     {
         $events = new VariableApplyEvents();
         $cloud = new VariableApplyCloud($events);
@@ -318,7 +318,6 @@ final class VariableApplyTest extends TestCase
             production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('updated-value'), false)],
         );
         $plan = new ExecutionPlan(
-            self::applicationUpdateAction(),
             self::environmentUpdateAction(),
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
         );
@@ -326,17 +325,16 @@ final class VariableApplyTest extends TestCase
         $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
-        self::assertSame(3, $result->updatedCount());
+        self::assertSame(2, $result->updatedCount());
         self::assertSame([
             'lock',
-            'update:application.app-1',
             'update:environment.env-production',
             'set:variables.env-production',
             'release',
         ], $events->values);
     }
 
-    public function testApplicationUpdateEnvironmentCreateAndVariableCreateExecuteInDependencyOrder(): void
+    public function testEnvironmentUpdateAndVariableCreateExecuteInDependencyOrder(): void
     {
         $events = new VariableApplyEvents();
         $cloud = new VariableApplyCloud($events);
@@ -344,8 +342,7 @@ final class VariableApplyTest extends TestCase
             production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('created-value'), false)],
         );
         $plan = new ExecutionPlan(
-            self::applicationUpdateAction(),
-            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
+            self::environmentUpdateAction(),
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::CREATE),
         );
 
@@ -353,13 +350,11 @@ final class VariableApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(1, $result->updatedCount());
-        self::assertSame(2, $result->createdCount());
+        self::assertSame(1, $result->createdCount());
         self::assertSame([
             'lock',
-            'update:application.app-1',
-            'create:environment.production',
-            'save:environment.production',
-            'set:variables.env-created-production',
+            'update:environment.env-production',
+            'set:variables.env-production',
             'release',
         ], $events->values);
     }
@@ -368,10 +363,9 @@ final class VariableApplyTest extends TestCase
     {
         $events = new VariableApplyEvents();
         $plan = new ExecutionPlan(
-            self::applicationUpdateAction(),
             self::environmentUpdateAction(),
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
-            self::action(ResourceType::APPLICATION, 'blocked', PlanOperation::UNSUPPORTED),
+            self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::UNSUPPORTED),
         );
 
         $this->expectException(ApplyRefusedException::class);
@@ -380,43 +374,6 @@ final class VariableApplyTest extends TestCase
         } finally {
             self::assertSame([], $events->values);
         }
-    }
-
-    public function testApplicationUpdateFailurePreventsDownstreamMutations(): void
-    {
-        $events = new VariableApplyEvents();
-        $cloud = new VariableApplyCloud($events, failApplicationUpdate: true);
-        $blueprint = self::blueprint(
-            production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('never-sent'), true)],
-        );
-        $plan = new ExecutionPlan(
-            self::applicationUpdateAction(),
-            self::environmentUpdateAction(),
-            self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
-        );
-
-        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
-
-        self::assertSame(ApplyStatus::FAILED, $result->status);
-        self::assertSame(['lock', 'update:application.app-1', 'release'], $events->values);
-        self::assertSame([], $cloud->variableRequests);
-    }
-
-    public function testApplicationSuccessThenEnvironmentFailureIsPartial(): void
-    {
-        $events = new VariableApplyEvents();
-        $cloud = new VariableApplyCloud($events, failUpdate: true);
-        $plan = new ExecutionPlan(self::applicationUpdateAction(), self::environmentUpdateAction());
-
-        $result = self::apply()->execute(
-            self::blueprint(),
-            $plan,
-            $cloud,
-            new VariableApplyState($events),
-        );
-
-        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
-        self::assertSame(1, $result->updatedCount());
     }
 
     public function testUnsupportedVariableRefusesBeforeLockOrAnyMutation(): void
@@ -535,18 +492,6 @@ final class VariableApplyTest extends TestCase
         );
     }
 
-    private static function applicationUpdateAction(): PlanAction
-    {
-        return new PlanAction(
-            self::address(ResourceType::APPLICATION, 'my-api'),
-            ResourceType::APPLICATION,
-            PlanOperation::UPDATE,
-            'test',
-            'app-1',
-            new PlanChange('repository', 'acme/old-api', 'acme/my-api'),
-        );
-    }
-
     private static function address(ResourceType $type, string $name): ResourceAddress
     {
         return new ResourceAddress($type, $name);
@@ -574,14 +519,6 @@ final readonly class VariableApplyEnvironment implements EnvironmentValueProvide
 
 final class VariableApplyCloud implements LaravelCloudClient
 {
-    public function updateApplication(string $applicationId, \LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest $request): CloudApplication
-    {
-        $this->events->values[] = 'update:application.' . $applicationId;
-        if ($this->failApplicationUpdate) {
-            throw new CloudApiException('Application update failed.', 'PATCH', '/applications/' . $applicationId, 422);
-        }
-        return new CloudApplication($applicationId, 'my-api', 'my-api', 'eu-central-1', $request->repository, $request->sourceProvider);
-    }
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         $this->events->values[] = 'update:environment.' . $environmentId;
@@ -598,7 +535,6 @@ final class VariableApplyCloud implements LaravelCloudClient
         private readonly ?string $failEnvironmentId = null,
         private readonly bool $transportFailure = false,
         private readonly bool $failUpdate = false,
-        private readonly bool $failApplicationUpdate = false,
     ) {
     }
 

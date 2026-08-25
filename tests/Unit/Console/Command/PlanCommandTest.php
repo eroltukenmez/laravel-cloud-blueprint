@@ -69,11 +69,11 @@ final class PlanCommandTest extends TestCase
         $text = $this->tester($blueprint, cloud: new PlanUpdateCloudClient());
 
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
-        self::assertStringContainsString('~ application.API', $text->getDisplay());
-        self::assertStringContainsString('repository: acme/old-api → acme/api', $text->getDisplay());
+        self::assertStringContainsString('! application.API', $text->getDisplay());
+        self::assertStringContainsString('Application repository differs and cannot be updated safely.', $text->getDisplay());
         self::assertStringContainsString('branch: old-branch → main', $text->getDisplay());
         self::assertStringContainsString('Environment variable differs from desired state.', $text->getDisplay());
-        self::assertStringContainsString('Plan: 0 to create, 3 to update, 0 unchanged, 0 unsupported.', $text->getDisplay());
+        self::assertStringContainsString('Plan: 0 to create, 2 to update, 0 unchanged, 1 unsupported.', $text->getDisplay());
 
         $json = $this->tester($blueprint, cloud: new PlanUpdateCloudClient());
         self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
@@ -82,19 +82,14 @@ final class PlanCommandTest extends TestCase
         self::assertIsArray($decoded['summary']);
         self::assertIsArray($decoded['actions']);
         self::assertIsArray($decoded['actions'][0]);
-        self::assertIsArray($decoded['actions'][0]['changes']);
-        self::assertIsArray($decoded['actions'][0]['changes'][0]);
         self::assertIsArray($decoded['actions'][1]);
         self::assertIsArray($decoded['actions'][1]['changes']);
         self::assertIsArray($decoded['actions'][1]['changes'][0]);
         self::assertIsArray($decoded['actions'][2]);
-        self::assertSame(3, $decoded['summary']['update']);
-        self::assertSame('update', $decoded['actions'][0]['operation']);
-        self::assertSame([
-            'field' => 'repository',
-            'before' => 'acme/old-api',
-            'after' => 'acme/api',
-        ], $decoded['actions'][0]['changes'][0]);
+        self::assertSame(2, $decoded['summary']['update']);
+        self::assertSame(1, $decoded['summary']['unsupported']);
+        self::assertSame('unsupported', $decoded['actions'][0]['operation']);
+        self::assertArrayNotHasKey('changes', $decoded['actions'][0]);
         self::assertSame('branch', $decoded['actions'][1]['changes'][0]['field']);
         self::assertArrayNotHasKey('changes', $decoded['actions'][2]);
 
@@ -273,10 +268,6 @@ final readonly class PlanClientFactory implements LaravelCloudClientFactory
 
 class PlanCommandCloudClient implements LaravelCloudClient
 {
-    public function updateApplication(string $applicationId, \LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest $request): CloudApplication
-    {
-        throw new LogicException('Plan fake must remain read-only.');
-    }
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         throw new LogicException('Plan fake must remain read-only.');

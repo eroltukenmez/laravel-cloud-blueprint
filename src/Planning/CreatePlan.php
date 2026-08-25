@@ -128,14 +128,8 @@ final readonly class CreatePlan
         if ($remote->repository !== $blueprint->application->source->repository) {
             return $this->applicationAction(
                 $blueprint->application->name,
-                PlanOperation::UPDATE,
-                'Remote application differs from desired state.',
-                $remote->id,
-                new PlanChange(
-                    'repository',
-                    $remote->repository,
-                    $blueprint->application->source->repository,
-                ),
+                PlanOperation::UNSUPPORTED,
+                'Application repository differs and cannot be updated safely.',
             );
         }
 

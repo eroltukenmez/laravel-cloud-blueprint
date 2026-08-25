@@ -6,6 +6,7 @@ namespace LaravelCloudBlueprint\Tests\Unit\Apply;
 
 use LaravelCloudBlueprint\Apply\ApplyStatus;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
+use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
 use LaravelCloudBlueprint\Blueprint\ApplicationDefinition;
 use LaravelCloudBlueprint\Blueprint\Blueprint;
 use LaravelCloudBlueprint\Blueprint\BlueprintSchemaVersion;
@@ -26,7 +27,6 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
-use LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
@@ -42,25 +42,22 @@ use PHPUnit\Framework\TestCase;
 
 final class UpdateReconciliationTest extends TestCase
 {
-    /** @return iterable<string, array{bool, bool, bool, int}> */
+    /** @return iterable<string, array{bool, bool, int}> */
     public static function updateScenarioProvider(): iterable
     {
-        yield 'repository' => [true, false, false, 1];
-        yield 'branch' => [false, true, false, 1];
-        yield 'variable' => [false, false, true, 1];
-        yield 'all updates' => [true, true, true, 3];
+        yield 'branch' => [true, false, 1];
+        yield 'variable' => [false, true, 1];
+        yield 'all supported updates' => [true, true, 2];
     }
 
     #[DataProvider('updateScenarioProvider')]
     public function testSuccessfulUpdatesConvergeThroughTheRealPlannerToNoChange(
-        bool $repositoryDiffers,
         bool $branchDiffers,
         bool $variableDiffers,
         int $expectedUpdates,
     ): void {
         $blueprint = self::blueprint();
         $cloud = new ReconciliationCloud(
-            $repositoryDiffers ? 'acme/old-api' : 'acme/my-api',
             $branchDiffers ? 'main' : 'develop',
             $variableDiffers ? 'remote-value' : 'desired-sensitive-value',
         );
@@ -85,6 +82,26 @@ final class UpdateReconciliationTest extends TestCase
         $safeArtifacts = serialize([$before, $result, $after, $state->state]);
         self::assertStringNotContainsString('desired-sensitive-value', $safeArtifacts);
         self::assertStringNotContainsString('remote-value', $safeArtifacts);
+    }
+
+    public function testRepositoryDifferenceBlocksEnvironmentAndVariableUpdatesBeforeLockOrMutation(): void
+    {
+        $blueprint = self::blueprint();
+        $cloud = new ReconciliationCloud('main', 'remote-value', 'acme/old-api');
+        $values = new VariableValueResolver(new ReconciliationEnvironmentValues());
+        $plan = (new CreatePlan($values))->create($blueprint, $cloud);
+        $state = new ReconciliationState(StateDocument::empty()->withOrganization('acme'));
+
+        self::assertSame(1, $plan->countByOperation(PlanOperation::UNSUPPORTED));
+        self::assertSame(2, $plan->countByOperation(PlanOperation::UPDATE));
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            (new CreateOnlyApply($values))->execute($blueprint, $plan, $cloud, $state);
+        } finally {
+            self::assertSame(0, $state->beginCount);
+            self::assertSame(0, $cloud->mutationCount);
+        }
     }
 
     private static function blueprint(): Blueprint
@@ -120,10 +137,12 @@ final readonly class ReconciliationEnvironmentValues implements EnvironmentValue
 
 final class ReconciliationCloud implements LaravelCloudClient
 {
+    public int $mutationCount = 0;
+
     public function __construct(
-        private string $repository,
         private string $branch,
         private string $variableValue,
+        private readonly string $repository = 'acme/my-api',
     ) {
     }
 
@@ -154,19 +173,6 @@ final class ReconciliationCloud implements LaravelCloudClient
         throw new LogicException('Reconciliation fixture does not create resources.');
     }
 
-    public function updateApplication(string $applicationId, UpdateApplicationRequest $request): CloudApplication
-    {
-        $this->repository = $request->repository;
-        return new CloudApplication(
-            $applicationId,
-            'my-api',
-            'my-api',
-            'eu-central-1',
-            $this->repository,
-            $request->sourceProvider,
-        );
-    }
-
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
     {
         throw new LogicException('Reconciliation fixture does not create resources.');
@@ -174,12 +180,14 @@ final class ReconciliationCloud implements LaravelCloudClient
 
     public function updateEnvironment(string $environmentId, UpdateEnvironmentRequest $request): UpdatedCloudEnvironment
     {
+        ++$this->mutationCount;
         $this->branch = $request->branch;
         return new UpdatedCloudEnvironment($environmentId);
     }
 
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
     {
+        ++$this->mutationCount;
         foreach ($request->variables() as $variable) {
             if ($variable->key === 'APP_ENV') {
                 $this->variableValue = $variable->value;
@@ -190,6 +198,7 @@ final class ReconciliationCloud implements LaravelCloudClient
 
 final class ReconciliationState implements StateStore, StateTransaction
 {
+    public int $beginCount = 0;
     public int $saveCount = 0;
 
     public function __construct(public StateDocument $state)
@@ -198,6 +207,7 @@ final class ReconciliationState implements StateStore, StateTransaction
 
     public function begin(): StateTransaction
     {
+        ++$this->beginCount;
         return $this;
     }
 

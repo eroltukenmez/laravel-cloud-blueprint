@@ -75,7 +75,7 @@ final class CreatePlanTest extends TestCase
 
         self::assertSame(3, $plan->countByOperation(PlanOperation::NO_CHANGE));
         self::assertSame(0, $plan->countByOperation(PlanOperation::CREATE));
-        self::assertFalse($plan->hasActionableChanges());
+        self::assertSame(0, $plan->countByOperation(PlanOperation::UPDATE));
         self::assertSame(['organization', 'applications', 'environments:app-1'], $cloud->calls);
     }
 
@@ -87,17 +87,15 @@ final class CreatePlanTest extends TestCase
         self::assertStringContainsString('region differs', self::actions($plan)[0]->reason);
     }
 
-    public function testApplicationRepositoryDifferenceIsUpdateWithSafeChange(): void
+    public function testApplicationRepositoryDifferenceIsUnsupportedWithoutAChangePayload(): void
     {
         $plan = $this->planWithApplication(self::remoteApplication(repository: 'other/repository'));
 
         $action = self::actions($plan)[0];
-        self::assertSame(PlanOperation::UPDATE, $action->operation);
-        self::assertSame('repository', $action->changes[0]->field);
-        self::assertSame('other/repository', $action->changes[0]->before);
-        self::assertSame('acme/my-api', $action->changes[0]->after);
-        self::assertTrue($plan->hasActionableChanges());
-        self::assertSame(1, $plan->countByOperation(PlanOperation::UPDATE));
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertSame('Application repository differs and cannot be updated safely.', $action->reason);
+        self::assertSame([], $action->changes);
+        self::assertSame(0, $plan->countByOperation(PlanOperation::UPDATE));
     }
 
     public function testApplicationRegionAndRepositoryDifferenceRemainsUnsupportedWithoutChanges(): void
@@ -231,10 +229,6 @@ final class CreatePlanTest extends TestCase
 
 final class PlanningCloudClient implements LaravelCloudClient
 {
-    public function updateApplication(string $applicationId, \LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest $request): CloudApplication
-    {
-        throw new LogicException('Planner fake must remain read-only.');
-    }
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         throw new LogicException('Planner fake must remain read-only.');

@@ -13,7 +13,6 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
-use LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest;
 
 interface LaravelCloudClient
 {
@@ -28,11 +27,6 @@ interface LaravelCloudClient
     public function environment(string $environmentId): CloudEnvironmentDetails;
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication;
-
-    public function updateApplication(
-        string $applicationId,
-        UpdateApplicationRequest $request,
-    ): CloudApplication;
 
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment;
 

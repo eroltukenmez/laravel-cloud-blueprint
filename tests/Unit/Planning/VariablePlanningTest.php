@@ -205,10 +205,6 @@ final readonly class VariablePlanningEnvironment implements EnvironmentValueProv
 
 final class VariablePlanningCloud implements LaravelCloudClient
 {
-    public function updateApplication(string $applicationId, \LaravelCloudBlueprint\Cloud\DTO\UpdateApplicationRequest $request): CloudApplication
-    {
-        throw new LogicException('Planner fake must remain read-only.');
-    }
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
         throw new LogicException('Planner fake must remain read-only.');
