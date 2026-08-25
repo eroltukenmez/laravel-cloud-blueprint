@@ -4,6 +4,17 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2]
+
+### Changed
+
+- Packagist is now the documented primary installation method.
+
+### Fixed
+
+- Composer-installed and global CLI binaries now discover the consumer Composer autoloader correctly.
+- Direct repository execution remains supported.
+
 ## [0.1.0-alpha.1]
 
 ### Added

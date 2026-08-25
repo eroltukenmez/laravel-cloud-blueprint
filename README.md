@@ -3,7 +3,7 @@
 Laravel Cloud Blueprint is a framework-agnostic CLI for describing and reconciling Laravel Cloud infrastructure using version-controlled YAML blueprints.
 
 > [!WARNING]
-> Version `0.1.0-alpha.1` is early alpha software with a CREATE-only mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
+> Version `0.1.0-alpha.2` is early alpha software with a CREATE-only mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
 
 ## Why
 
@@ -11,7 +11,7 @@ Laravel Cloud exposes an API. Laravel Cloud Blueprint provides an experimental d
 
 ## Status
 
-Current version: `0.1.0-alpha.1`.
+Current version: `0.1.0-alpha.2`.
 
 This release can discover and compare applications, environments, and environment variables, then create supported missing resources. Mutations are CREATE-only; differences requiring updates are reported as unsupported.
 
@@ -24,16 +24,20 @@ This release can discover and compare applications, environments, and environmen
 
 ## Installation
 
-The package is not yet published on Packagist. For development usage, clone this repository and install its dependencies:
+Install the current alpha release globally through Composer:
 
 ```shell
-git clone https://github.com/eroltukenmez/laravel-cloud-blueprint.git
-cd laravel-cloud-blueprint
-composer install
-php bin/lcb --version
+composer global require laravel-cloud-blueprint/cli:^0.1@alpha
+lcb --version
 ```
 
-You can invoke the CLI as `php bin/lcb`. A Composer-global installation may be provided in a future release, but is not available yet.
+Expected output:
+
+```text
+Laravel Cloud Blueprint 0.1.0-alpha.2
+```
+
+Composer's global bin directory must be available in `PATH` for the `lcb` command to be found.
 
 ## Authentication
 
@@ -48,10 +52,10 @@ Never commit API tokens or place them in blueprint files.
 ## Quick Start: New Infrastructure
 
 ```shell
-php bin/lcb init
-php bin/lcb validate
-php bin/lcb plan
-php bin/lcb apply
+lcb init
+lcb validate
+lcb plan
+lcb apply
 ```
 
 `apply` displays a fresh plan and asks for confirmation, defaulting to no. Use `--auto-approve` for automation. `--non-interactive` explicitly disables prompting and refuses changes unless combined with `--auto-approve`; JSON apply output likewise requires `--auto-approve` when changes are present.
@@ -59,13 +63,13 @@ php bin/lcb apply
 ## Quick Start: Existing Laravel Cloud Application
 
 ```shell
-php bin/lcb init --from-cloud
+lcb init --from-cloud
 ```
 
 If Laravel Cloud does not return source-provider metadata, provide it explicitly:
 
 ```shell
-php bin/lcb init --from-cloud --provider=github
+lcb init --from-cloud --provider=github
 ```
 
 This exports supported application and environment structure only. It does not import state ownership, export environment variables or secrets, or write remote IDs into YAML.
@@ -124,7 +128,7 @@ Creates a read-only comparison against Laravel Cloud. Supports `--file=<path>` a
 
 Creates supported missing resources after producing a fresh plan. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
 
-Run `php bin/lcb <command> --help` for exact usage.
+Run `lcb <command> --help` for exact usage.
 
 ## Plan Semantics
 
@@ -180,12 +184,14 @@ No release dates are promised for roadmap items.
 ## Development
 
 ```shell
+git clone https://github.com/eroltukenmez/laravel-cloud-blueprint.git
+cd laravel-cloud-blueprint
 composer install
 composer test
 composer analyse
 ```
 
-PHPStan runs at maximum level. Tests use fakes and do not require a live Laravel Cloud account.
+From a repository checkout, invoke the CLI as `php bin/lcb`. PHPStan runs at maximum level. Tests use fakes and do not require a live Laravel Cloud account.
 
 ## Contributing
 
