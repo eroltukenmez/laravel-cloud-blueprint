@@ -34,7 +34,7 @@ use Symfony\Contracts\HttpClient\ResponseInterface;
 final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
 {
     private const string BASE_URL = 'https://cloud.laravel.com/api';
-    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.3';
+    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.4';
 
     public function __construct(
         private HttpClientInterface $http,

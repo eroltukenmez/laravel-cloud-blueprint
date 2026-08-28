@@ -120,7 +120,7 @@ Both commands must pass.
 
 ## Scope
 
-v0.1.0-alpha.3 supports only:
+v0.1.0-alpha.4 supports only:
 
 - Application
 - Environment
@@ -128,17 +128,19 @@ v0.1.0-alpha.3 supports only:
 
 Supported mutations are CREATE for all three resource types, UPDATE for environment branches and environment-variable values, and no DELETE. Application repository and region changes are UNSUPPORTED.
 
+Explicit import supports Application and Environment identity adoption into local state only. Environment variables are not importable.
+
 Commands:
 
 - lcb init
 - lcb validate
 - lcb plan
 - lcb apply
+- lcb import
 
 Do not add:
 
 - destroy
-- import
 - drift detection
 - remote state
 - provider plugins

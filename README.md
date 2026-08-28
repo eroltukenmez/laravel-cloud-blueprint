@@ -11,7 +11,7 @@
 Laravel Cloud Blueprint is an unofficial community CLI for describing a supported subset of Laravel Cloud resources in version-controlled YAML blueprints. It produces a read-only plan before mutation, then reconciles supported application, environment, and environment-variable changes when you apply it.
 
 > [!WARNING]
-> Version `0.1.0-alpha.3` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
+> Version `0.1.0-alpha.4` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
 
 ## See the Plan Before You Apply
 
@@ -42,16 +42,16 @@ lcb --version
 Expected output:
 
 ```text
-Laravel Cloud Blueprint 0.1.0-alpha.3
+Laravel Cloud Blueprint 0.1.0-alpha.4
 ```
 
 Composer's global bin directory must be available in `PATH` for the `lcb` command to be found.
 
 ## Status
 
-Current version: `0.1.0-alpha.3`.
+Current version: `0.1.0-alpha.4`.
 
-This release can discover and compare applications, environments, and environment variables. It can create missing applications, environments, and variables; update an environment's branch; and update an existing variable's value. Application repository and region changes remain unsupported.
+This release can discover and compare applications, environments, and environment variables. It can create missing applications, environments, and variables; update an environment's branch; update an existing variable's value; and explicitly adopt existing Application and Environment identities into local state. Application repository and region changes remain unsupported.
 
 ## Requirements
 

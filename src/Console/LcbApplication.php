@@ -32,7 +32,7 @@ use Symfony\Component\Console\Application;
 final class LcbApplication extends Application
 {
     public const string NAME = 'Laravel Cloud Blueprint';
-    public const string VERSION = '0.1.0-alpha.3';
+    public const string VERSION = '0.1.0-alpha.4';
 
     public function __construct()
     {

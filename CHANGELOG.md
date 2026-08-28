@@ -4,9 +4,16 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-08-28
+
 ### Added
 
-- Explicit, confirmation-gated `lcb import` support for atomically adopting existing Application and Environment identities into local state without modifying Laravel Cloud resources.
+- Explicit, confirmation-gated `lcb import` support for Application and Environment identity adoption, including deterministic text and JSON proposals.
+- Atomic local-state adoption with state locking and fresh state and Cloud identity revalidation before persistence.
+
+### Security
+
+- Import refuses conflicts, ambiguous identities, and unsupported candidates as one operation, never mutates Laravel Cloud, and keeps environment variables and their values outside import state.
 
 ## [0.1.0-alpha.3] - 2026-08-25
 
