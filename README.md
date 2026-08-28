@@ -85,6 +85,7 @@ lcb apply
 
 ```shell
 lcb init --from-cloud
+lcb import
 ```
 
 If Laravel Cloud does not return source-provider metadata, provide it explicitly:
@@ -93,7 +94,7 @@ If Laravel Cloud does not return source-provider metadata, provide it explicitly
 lcb init --from-cloud --provider=github
 ```
 
-This performs read-only Cloud discovery and exports supported application and environment structure only. It does not create `.lcb/state.json`, import or adopt state ownership, export environment-variable values or secrets, or persist remote IDs. Existing resources remain unmanaged. Later supported reconciliation against a matched remote resource does not implicitly adopt it into state. The command refuses to overwrite an existing file unless `--force` is supplied; review generated output before applying it.
+`init --from-cloud` performs read-only Cloud discovery and exports supported application and environment structure only. It does not create `.lcb/state.json`, adopt state ownership, export environment-variable values or secrets, or persist remote IDs. The separate `lcb import` command can explicitly adopt the generated blueprint's existing application and environment identities after review. The init command refuses to overwrite an existing file unless `--force` is supplied; review generated output before importing or applying it.
 
 ## Blueprint Example
 
@@ -149,6 +150,12 @@ Creates a read-only comparison against Laravel Cloud. Supports `--file=<path>` a
 
 Creates and updates supported resources after producing a fresh plan. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
 
+### `import`
+
+Adopts existing Application and Environment identities into local LCB state without modifying Laravel Cloud resources. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
+
+Import requires explicit confirmation unless `--auto-approve` is supplied. Any conflict or unsupported candidate blocks the entire import. Environment variables and their values are never imported into state. Import performs fresh Cloud discovery after acquiring the state lock so that stale preview identities are not persisted.
+
 Run `lcb <command> --help` for exact usage.
 
 ## Plan Semantics
@@ -176,6 +183,8 @@ Local state is stored in `.lcb/state.json`. It contains remote IDs for LCB-manag
 
 State uses local locking and atomic replacement and should not be edited manually. `init --from-cloud` neither creates state nor adopts remote resources into existing state.
 
+`lcb import` is the only explicit state-adoption workflow. It can atomically record matching Application and Environment identities using the existing state schema. It does not adopt variables, repair conflicts, or modify remote configuration. Normal plan and apply matching never adopt unmanaged resources implicitly.
+
 ## Security
 
 - API tokens are never written to blueprints or state.
@@ -192,7 +201,8 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 - Environment branch and variable value updates are supported; other updates and renames are not. A variable-key change is not an in-place rename and cannot remove the old remote key.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
-- DELETE, destroy, import/state adoption, drift repair, and remote state are not supported.
+- Explicit Application and Environment identity adoption is supported through `lcb import`; variable adoption, automatic adoption, conflict repair, and repository migration or rebinding are not supported.
+- DELETE, destroy, drift repair, and remote state are not supported.
 - Databases, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.
 - Source-provider metadata may be absent from API responses and require `--provider`.
@@ -205,7 +215,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 
 - Database and cache resources
 - Richer planning and update semantics
-- Import and state adoption
+- Broader import workflows and conflict repair
 - Destroy and drift detection
 - Distribution improvements
 
