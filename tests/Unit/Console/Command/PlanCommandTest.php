@@ -198,6 +198,57 @@ final class PlanCommandTest extends TestCase
         }
     }
 
+    public function testOwnedOnlyLifecycleActionPreservesTextAndJsonContractsAndExitZero(): void
+    {
+        $desiredApplication = new ResourceAddress(ResourceType::APPLICATION, 'API');
+        $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
+                ResourceType::ENVIRONMENT,
+                'env-preview',
+                $oldApplication,
+            ))
+            ->withResource(new StateResource($oldApplication, ResourceType::APPLICATION, 'app-old'))
+            ->withResource(new StateResource($desiredApplication, ResourceType::APPLICATION, 'app-1'));
+
+        $text = $this->tester(self::validBlueprint(), state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('! application.old-api', $text->getDisplay());
+        self::assertStringContainsString('! environment.preview', $text->getDisplay());
+        self::assertStringContainsString('Plan: 0 to create, 0 to update, 2 unchanged, 2 unsupported.', $text->getDisplay());
+
+        $json = $this->tester(self::validBlueprint(), state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        $summary = $decoded['summary'] ?? null;
+        $actions = $decoded['actions'] ?? null;
+        self::assertIsArray($summary);
+        self::assertIsArray($actions);
+        self::assertSame(2, $summary['unsupported']);
+        self::assertSame([
+            'application.API',
+            'application.old-api',
+            'environment.production',
+            'environment.preview',
+        ], array_column($actions, 'resource'));
+        self::assertIsArray($actions[1]);
+        self::assertSame('unsupported', $actions[1]['operation']);
+        self::assertSame(
+            'This Application is owned by LCB and absent from the blueprint, but its recorded remote identity is missing. State is retained and automatic removal is not supported.',
+            $actions[1]['reason'],
+        );
+
+        foreach ($actions as $action) {
+            self::assertIsArray($action);
+            self::assertArrayNotHasKey('remote_id', $action);
+            self::assertArrayNotHasKey('lifecycle_status', $action);
+            self::assertArrayNotHasKey('ownership', $action);
+            self::assertArrayNotHasKey('desired', $action);
+        }
+    }
+
     private function tester(
         string $blueprint,
         ?CloudApiToken $token = new CloudApiToken('super-secret-token'),

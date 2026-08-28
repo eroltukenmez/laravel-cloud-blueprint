@@ -221,6 +221,62 @@ final class ApplyCommandTest extends TestCase
         self::assertStringContainsString('unsupported changes', $tester->getDisplay());
     }
 
+    public function testOwnedOnlyLifecycleActionBlocksApplicationCreateBeforeMutationOrStateTransaction(): void
+    {
+        $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
+        $stateDocument = StateDocument::empty()->withOrganization('acme')->withResource(
+            new StateResource($oldApplication, ResourceType::APPLICATION, 'app-old'),
+        );
+        [$tester, $cloud, $state] = $this->tester(stateDocument: $stateDocument);
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--auto-approve' => true]));
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+        self::assertSame(0, $state->state->serial);
+        self::assertSame('app-old', $state->state->get($oldApplication)->remoteId);
+        self::assertStringContainsString('unsupported changes', $tester->getDisplay());
+        self::assertStringNotContainsString('Apply these changes?', $tester->getDisplay());
+    }
+
+    public function testOwnedOnlyLifecycleActionBlocksEnvironmentUpdateBeforeMutation(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $stateDocument = self::managedState()->withResource(
+            new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application),
+        );
+        [$tester, $cloud, $state] = $this->tester(
+            ApplyCommandCloudClient::withEnvironmentUpdate(),
+            stateDocument: $stateDocument,
+        );
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--auto-approve' => true]));
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+        self::assertSame(0, $state->state->serial);
+    }
+
+    public function testOwnedOnlyLifecycleActionBlocksVariableUpdateWithoutLeakingValues(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $stateDocument = self::managedState()->withResource(
+            new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application),
+        );
+        [$tester, $cloud, $state] = $this->tester(
+            ApplyCommandCloudClient::withVariableUpdate(),
+            self::blueprintWithVariableUpdate(),
+            $stateDocument,
+        );
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--auto-approve' => true]));
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+        self::assertSame(0, $state->state->serial);
+        self::assertStringNotContainsString('desired-update-secret', $tester->getDisplay());
+        self::assertStringNotContainsString('remote-update-secret', $tester->getDisplay());
+    }
+
     public function testInitialCorruptedStateLoadRendersControlledHumanError(): void
     {
         [$tester, $cloud, $state] = $this->tester(

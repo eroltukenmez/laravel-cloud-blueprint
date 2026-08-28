@@ -171,6 +171,10 @@ Planning is read-only and deterministic. Extra remote resources are not deleted.
 
 Planning loads local state and treats stored Application and Environment remote IDs as authoritative ownership. A missing managed identity or a same-name replacement is reported as unsupported and is never automatically recreated or adopted. Exact-name resources without state ownership may still be inspected read-only; an unmanaged Environment must be explicitly adopted with `lcb import` before LCB can update its branch. A genuinely missing resource with no state ownership remains eligible for `CREATE`.
 
+Removing a managed Application or Environment from the blueprint does not delete the Laravel Cloud resource or remove its identity from local state. The owned resource remains visible in the plan as `UNSUPPORTED`, and apply refuses the entire plan until the lifecycle condition is resolved. LCB does not currently provide destroy, automatic state cleanup, rename inference, or a state-removal command.
+
+Environment variables remain desired-only and are not recorded as owned state resources. Removing a variable key from the blueprint therefore produces no removal action and leaves the remote variable untouched.
+
 ## Apply Semantics
 
 Apply always creates a fresh plan, refuses the entire plan before Cloud mutation when any unsupported action is present, and requests approval unless auto-approved. Interactive approval defaults to no. After approval and preflight checks it acquires the state lock for managed mutation and state work. Potentially duplicate-creating POST requests are never automatically retried.
@@ -206,7 +210,8 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
 - Explicit Application and Environment identity adoption is supported through `lcb import`; variable adoption, automatic adoption, conflict repair, and repository migration or rebinding are not supported.
-- Resources removed from the blueprint are not yet reported from state, and rename/state-move semantics are not supported.
+- Managed Applications and Environments removed from the blueprint are reported as unsupported and retained in state; they are not deleted. Rename/state-move semantics are not supported.
+- Removed environment-variable keys are not reported because variables do not yet have state ownership; remote variables remain untouched.
 - DELETE, destroy, drift repair, and remote state are not supported.
 - Databases, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.

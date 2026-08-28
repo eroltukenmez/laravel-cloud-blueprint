@@ -8,10 +8,14 @@ This project uses a Keep a Changelog-inspired format.
 
 - Planning now resolves state-managed Application and Environment resources by their stored remote IDs before name-based discovery.
 - Matching unmanaged Environments require explicit import before branch reconciliation, while genuinely missing resources remain eligible for creation.
+- Planning now considers desired resources together with state-owned Applications and Environments, reporting owned resources absent from the blueprint as unsupported without deleting them or removing state ownership.
+- Owned-only lifecycle actions retain deterministic Application-before-Environment ordering and block apply before confirmation, state transactions, or Cloud mutation.
+- Environment variables remain desired-only; removing a variable key does not remove or report the remote variable because variables do not yet have state ownership.
 
 ### Security
 
 - Stale, replaced, wrongly parented, or multiply owned state identities produce non-actionable plans instead of implicit reassignment, recreation, or mutation.
+- Removing a managed Application or Environment cannot trigger deletion, automatic state cleanup, replacement adoption, or inferred rename behavior.
 
 ## [0.1.0-alpha.4] - 2026-08-28
 
