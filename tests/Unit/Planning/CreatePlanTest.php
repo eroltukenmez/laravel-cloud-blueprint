@@ -28,7 +28,11 @@ use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\ResourceAddress;
+use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
+use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateResource;
 use PHPUnit\Framework\TestCase;
 
 final class CreatePlanTest extends TestCase
@@ -39,14 +43,14 @@ final class CreatePlanTest extends TestCase
 
         $this->expectException(OrganizationMismatchException::class);
 
-        self::planner()->create(self::blueprint(), $cloud);
+        self::planner()->create(self::blueprint(), $cloud, StateDocument::empty());
     }
 
     public function testMissingApplicationCreatesApplicationAndEveryEnvironmentWithoutEnvironmentLookup(): void
     {
         $cloud = new PlanningCloudClient();
 
-        $plan = self::planner()->create(self::blueprint(), $cloud);
+        $plan = self::planner()->create(self::blueprint(), $cloud, StateDocument::empty());
 
         self::assertSame(
             ['application.my-api', 'environment.production', 'environment.staging'],
@@ -71,7 +75,7 @@ final class CreatePlanTest extends TestCase
             ],
         );
 
-        $plan = self::planner()->create(self::blueprint(), $cloud);
+        $plan = self::planner()->create(self::blueprint(), $cloud, StateDocument::empty());
 
         self::assertSame(3, $plan->countByOperation(PlanOperation::NO_CHANGE));
         self::assertSame(0, $plan->countByOperation(PlanOperation::CREATE));
@@ -121,7 +125,7 @@ final class CreatePlanTest extends TestCase
 
         $this->expectException(AmbiguousResourceMatchException::class);
 
-        self::planner()->create(self::blueprint(), $cloud);
+        self::planner()->create(self::blueprint(), $cloud, StateDocument::empty());
     }
 
     public function testEnvironmentMatchingProducesCreateNoChangeAndUpdateInBlueprintOrder(): void
@@ -131,7 +135,7 @@ final class CreatePlanTest extends TestCase
             environments: [new CloudEnvironment('env-prod', 'app-1', 'production', 'other')],
         );
 
-        $actions = self::actions(self::planner()->create(self::blueprint(), $cloud));
+        $actions = self::actions(self::planner()->create(self::blueprint(), $cloud, self::managedState()));
 
         self::assertSame(PlanOperation::NO_CHANGE, $actions[0]->operation);
         self::assertSame(PlanOperation::UPDATE, $actions[1]->operation);
@@ -154,7 +158,7 @@ final class CreatePlanTest extends TestCase
 
         self::assertSame(
             PlanOperation::UNSUPPORTED,
-            self::actions(self::planner()->create(self::blueprint(), $cloud))[1]->operation,
+            self::actions(self::planner()->create(self::blueprint(), $cloud, StateDocument::empty()))[1]->operation,
         );
     }
 
@@ -170,7 +174,171 @@ final class CreatePlanTest extends TestCase
 
         $this->expectException(AmbiguousResourceMatchException::class);
 
-        self::planner()->create(self::blueprint(), $cloud);
+        self::planner()->create(self::blueprint(), $cloud, StateDocument::empty());
+    }
+
+    public function testManagedApplicationResolvesByRemoteIdInsteadOfNameFallback(): void
+    {
+        $state = self::managedState();
+        $cloud = new PlanningCloudClient(
+            applications: [self::remoteApplication('app-replacement')],
+            environments: [new CloudEnvironment('env-prod', 'app-replacement', 'production', 'main')],
+        );
+
+        $plan = self::planner()->create(self::blueprint(), $cloud, $state);
+        $application = self::action($plan, 'application.my-api');
+
+        self::assertSame(PlanOperation::UNSUPPORTED, $application->operation);
+        self::assertStringContainsString('same-name unmanaged replacement', $application->reason);
+        self::assertSame(0, $plan->countByOperation(PlanOperation::CREATE));
+        self::assertSame(0, $plan->countByOperation(PlanOperation::UPDATE));
+        self::assertSame(2, count($state->resources()));
+    }
+
+    public function testMissingManagedApplicationIsLifecycleDiagnosticNotCreate(): void
+    {
+        $plan = self::planner()->create(self::blueprint(), new PlanningCloudClient(), self::managedState());
+
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'application.my-api')->operation);
+        self::assertStringContainsString('remote identity is missing', self::action($plan, 'application.my-api')->reason);
+        self::assertSame(0, $plan->countByOperation(PlanOperation::CREATE));
+    }
+
+    public function testManagedApplicationNameDriftIsNonActionable(): void
+    {
+        $renamed = new CloudApplication('app-1', 'renamed', 'renamed', 'eu-central-1', 'acme/my-api');
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [$renamed]),
+            self::managedState(),
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'application.my-api')->operation);
+        self::assertStringContainsString('name differs', self::action($plan, 'application.my-api')->reason);
+    }
+
+    public function testDuplicateRemoteIdentityOwnershipBlocksPlanning(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $state = self::managedState()->withResource(new StateResource(
+            new ResourceAddress(ResourceType::ENVIRONMENT, 'duplicate'),
+            ResourceType::ENVIRONMENT,
+            'app-1',
+            $application,
+        ));
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [self::remoteApplication()]),
+            $state,
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'application.my-api')->operation);
+        self::assertStringContainsString('conflicting state address', self::action($plan, 'application.my-api')->reason);
+    }
+
+    public function testManagedEnvironmentMissingOrReplacedNeverBecomesCreate(): void
+    {
+        $cloud = new PlanningCloudClient(
+            applications: [self::remoteApplication()],
+            environments: [new CloudEnvironment('env-replacement', 'app-1', 'production', 'develop')],
+        );
+        $plan = self::planner()->create(self::blueprint(), $cloud, self::managedState());
+        $environment = self::action($plan, 'environment.production');
+
+        self::assertSame(PlanOperation::UNSUPPORTED, $environment->operation);
+        self::assertStringContainsString('same-name unmanaged replacement', $environment->reason);
+        self::assertSame(0, $plan->countByOperation(PlanOperation::UPDATE));
+    }
+
+    public function testManagedEnvironmentMissingWithoutReplacementIsNonActionable(): void
+    {
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [self::remoteApplication()]),
+            self::managedState(),
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'environment.production')->operation);
+        self::assertStringContainsString('remote identity is missing', self::action($plan, 'environment.production')->reason);
+    }
+
+    public function testManagedEnvironmentWrongStateParentIsNonActionable(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-prod',
+                new ResourceAddress(ResourceType::APPLICATION, 'other'),
+            ));
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [new CloudEnvironment('env-prod', 'app-1', 'production', 'main')],
+            ),
+            $state,
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'environment.production')->operation);
+        self::assertStringContainsString('parent relationship', self::action($plan, 'environment.production')->reason);
+    }
+
+    public function testManagedEnvironmentUnexpectedRemoteApplicationIsNonActionable(): void
+    {
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [new CloudEnvironment('env-prod', 'app-other', 'production', 'main')],
+            ),
+            self::managedState(),
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'environment.production')->operation);
+        self::assertStringContainsString('unexpected remote application', self::action($plan, 'environment.production')->reason);
+    }
+
+    public function testUnmanagedMatchingEnvironmentDifferenceRequiresImport(): void
+    {
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [
+                    new CloudEnvironment('env-prod', 'app-1', 'production', 'different'),
+                    new CloudEnvironment('env-stage', 'app-1', 'staging', 'develop'),
+                ],
+            ),
+            StateDocument::empty(),
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'environment.production')->operation);
+        self::assertStringContainsString('Import it before', self::action($plan, 'environment.production')->reason);
+        self::assertSame(0, $plan->countByOperation(PlanOperation::UPDATE));
+    }
+
+    public function testUnmanagedMatchingResourcesRemainReadOnlyAndUnadopted(): void
+    {
+        $state = StateDocument::empty();
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [
+                    new CloudEnvironment('env-prod', 'app-1', 'production', 'main'),
+                    new CloudEnvironment('env-stage', 'app-1', 'staging', 'develop'),
+                ],
+            ),
+            $state,
+        );
+
+        self::assertSame(3, $plan->countByOperation(PlanOperation::NO_CHANGE));
+        self::assertStringContainsString('unmanaged', self::action($plan, 'application.my-api')->reason);
+        self::assertStringContainsString('unmanaged', self::action($plan, 'environment.production')->reason);
+        self::assertSame([], $state->resources());
     }
 
     private function planWithApplication(CloudApplication $application): ExecutionPlan
@@ -178,12 +346,27 @@ final class CreatePlanTest extends TestCase
         return self::planner()->create(
             self::blueprint(),
             new PlanningCloudClient(applications: [$application]),
+            StateDocument::empty(),
         );
     }
 
     private static function planner(): CreatePlan
     {
         return new CreatePlan(new VariableValueResolver(new PlanningEnvironmentValueProvider()));
+    }
+
+    private static function managedState(): StateDocument
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+
+        return StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-prod',
+                $application,
+            ));
     }
 
     private static function blueprint(): Blueprint
@@ -215,6 +398,17 @@ final class CreatePlanTest extends TestCase
     private static function actions(ExecutionPlan $plan): array
     {
         return iterator_to_array($plan, false);
+    }
+
+    private static function action(ExecutionPlan $plan, string $address): PlanAction
+    {
+        foreach ($plan as $action) {
+            if ((string) $action->address === $address) {
+                return $action;
+            }
+        }
+
+        throw new LogicException(sprintf('Missing plan action "%s".', $address));
     }
 
     /** @return list<string> */

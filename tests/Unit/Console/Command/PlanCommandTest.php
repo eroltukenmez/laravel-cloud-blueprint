@@ -28,6 +28,12 @@ use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
+use LaravelCloudBlueprint\Planning\ResourceAddress;
+use LaravelCloudBlueprint\Planning\ResourceType;
+use LaravelCloudBlueprint\State\Contract\StateStore;
+use LaravelCloudBlueprint\State\Contract\StateTransaction;
+use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateResource;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Tester\CommandTester;
 use LogicException;
@@ -66,7 +72,7 @@ final class PlanCommandTest extends TestCase
     public function testUpdateTextAndJsonRenderSafeChangesAndNeverVariableValues(): void
     {
         $blueprint = self::blueprintWithUpdate();
-        $text = $this->tester($blueprint, cloud: new PlanUpdateCloudClient());
+        $text = $this->tester($blueprint, cloud: new PlanUpdateCloudClient(), state: self::managedState());
 
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
         self::assertStringContainsString('! application.API', $text->getDisplay());
@@ -75,7 +81,7 @@ final class PlanCommandTest extends TestCase
         self::assertStringContainsString('Environment variable differs from desired state.', $text->getDisplay());
         self::assertStringContainsString('Plan: 0 to create, 2 to update, 0 unchanged, 1 unsupported.', $text->getDisplay());
 
-        $json = $this->tester($blueprint, cloud: new PlanUpdateCloudClient());
+        $json = $this->tester($blueprint, cloud: new PlanUpdateCloudClient(), state: self::managedState());
         self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
         $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
@@ -140,7 +146,11 @@ final class PlanCommandTest extends TestCase
 
     public function testJsonEncodingFailureProducesSafeValidJson(): void
     {
-        $tester = $this->tester(self::validBlueprint(), cloud: new PlanInvalidUtf8CloudClient());
+        $tester = $this->tester(
+            self::validBlueprint(),
+            cloud: new PlanInvalidUtf8CloudClient(),
+            state: self::managedState(),
+        );
 
         self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
         self::assertJsonError($tester, 'Unable to encode command output as JSON.');
@@ -193,6 +203,7 @@ final class PlanCommandTest extends TestCase
         ?CloudApiToken $token = new CloudApiToken('super-secret-token'),
         LaravelCloudClient $cloud = new PlanCommandCloudClient(),
         bool $fileExists = true,
+        ?StateDocument $state = null,
     ): CommandTester {
         return new CommandTester(new PlanCommand(
             new PlanFileReader($blueprint, $fileExists),
@@ -200,7 +211,22 @@ final class PlanCommandTest extends TestCase
             new PlanTokenProvider($token),
             new PlanClientFactory($cloud),
             new CreatePlan(new VariableValueResolver(new PlanEnvironmentValueProvider())),
+            new PlanCommandStateStore($state ?? StateDocument::empty()),
         ));
+    }
+
+    private static function managedState(): StateDocument
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'API');
+
+        return StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-1',
+                $application,
+            ));
     }
 
     private static function assertJsonError(CommandTester $tester, string $message): void
@@ -272,6 +298,28 @@ environments:
         value: desired-variable-secret
         sensitive: true
 YAML;
+    }
+}
+
+final class PlanCommandStateStore implements StateStore
+{
+    public function __construct(private readonly StateDocument $state)
+    {
+    }
+
+    public function load(): StateDocument
+    {
+        return $this->state;
+    }
+
+    public function save(StateDocument $state): StateDocument
+    {
+        throw new LogicException('Plan must not save state.');
+    }
+
+    public function begin(): StateTransaction
+    {
+        throw new LogicException('Plan must not begin a state transaction.');
     }
 }
 

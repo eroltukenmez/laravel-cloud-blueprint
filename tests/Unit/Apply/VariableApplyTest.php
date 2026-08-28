@@ -42,6 +42,7 @@ use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateResource;
 use PHPUnit\Framework\TestCase;
 
 final class VariableApplyTest extends TestCase
@@ -264,7 +265,7 @@ final class VariableApplyTest extends TestCase
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
         );
 
-        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events, self::managedState()));
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(2, $result->updatedCount());
@@ -283,7 +284,7 @@ final class VariableApplyTest extends TestCase
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
         );
 
-        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events, self::managedState()));
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
         self::assertSame([], $cloud->variableRequests);
@@ -303,7 +304,7 @@ final class VariableApplyTest extends TestCase
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
         );
 
-        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events, self::managedState()));
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertSame(1, $result->updatedCount());
@@ -322,7 +323,7 @@ final class VariableApplyTest extends TestCase
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
         );
 
-        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events, self::managedState()));
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(2, $result->updatedCount());
@@ -346,7 +347,7 @@ final class VariableApplyTest extends TestCase
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::CREATE),
         );
 
-        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events, self::managedState()));
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(1, $result->updatedCount());
@@ -490,6 +491,20 @@ final class VariableApplyTest extends TestCase
             'env-production',
             new PlanChange('branch', 'develop', 'main'),
         );
+    }
+
+    private static function managedState(): StateDocument
+    {
+        $application = self::address(ResourceType::APPLICATION, 'my-api');
+
+        return StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource(
+                self::address(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-production',
+                $application,
+            ));
     }
 
     private static function address(ResourceType $type, string $name): ResourceAddress

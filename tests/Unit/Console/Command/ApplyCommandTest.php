@@ -28,10 +28,15 @@ use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
+use LaravelCloudBlueprint\Planning\ResourceAddress;
+use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
+use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
+use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateResource;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Application;
 use Symfony\Component\Console\Tester\CommandTester;
@@ -181,7 +186,10 @@ final class ApplyCommandTest extends TestCase
 
     public function testEnvironmentBranchUpdateRendersSafeDiffAndUpdatedOutcome(): void
     {
-        [$text, $textCloud, $state] = $this->tester(ApplyCommandCloudClient::withEnvironmentUpdate());
+        [$text, $textCloud, $state] = $this->tester(
+            ApplyCommandCloudClient::withEnvironmentUpdate(),
+            stateDocument: self::managedState(),
+        );
 
         self::assertSame(ExitCode::SUCCESS->value, $text->execute(['--auto-approve' => true]));
         self::assertSame(1, $textCloud->mutationCount);
@@ -190,7 +198,10 @@ final class ApplyCommandTest extends TestCase
         self::assertStringContainsString('branch: develop → main', $text->getDisplay());
         self::assertStringContainsString('environment.production: updated', $text->getDisplay());
 
-        [$json] = $this->tester(ApplyCommandCloudClient::withEnvironmentUpdate());
+        [$json] = $this->tester(
+            ApplyCommandCloudClient::withEnvironmentUpdate(),
+            stateDocument: self::managedState(),
+        );
         self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true, '--auto-approve' => true]));
         $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
@@ -198,6 +209,60 @@ final class ApplyCommandTest extends TestCase
         self::assertIsArray($decoded['resources'][1]);
         self::assertSame('environment.production', $decoded['resources'][1]['resource']);
         self::assertSame('updated', $decoded['resources'][1]['operation']);
+    }
+
+    public function testUnmanagedEnvironmentBranchDifferenceIsNeverPatched(): void
+    {
+        [$tester, $cloud, $state] = $this->tester(ApplyCommandCloudClient::withEnvironmentUpdate());
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--auto-approve' => true]));
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+        self::assertStringContainsString('unsupported changes', $tester->getDisplay());
+    }
+
+    public function testInitialCorruptedStateLoadRendersControlledHumanError(): void
+    {
+        [$tester, $cloud, $state] = $this->tester(
+            stateLoadFailure: new StateCorruptedException('Local state contains invalid JSON.'),
+        );
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute([]));
+        self::assertStringContainsString('Local state contains invalid JSON.', $tester->getDisplay());
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+    }
+
+    public function testInitialCorruptedStateLoadRendersValidJsonError(): void
+    {
+        [$tester, $cloud, $state] = $this->tester(
+            stateLoadFailure: new StateCorruptedException('Local state contains invalid JSON.'),
+        );
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('error', $decoded['status']);
+        self::assertIsString($decoded['message']);
+        self::assertStringContainsString('invalid JSON', $decoded['message']);
+        self::assertStringNotContainsString('<error>', $tester->getDisplay());
+        self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
+    }
+
+    public function testInitialStateStorageFailureRendersControlledError(): void
+    {
+        [$tester, $cloud, $state] = $this->tester(
+            stateLoadFailure: new StateStorageException('Unable to read local state.'),
+        );
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('error', $decoded['status']);
+        self::assertSame(0, $cloud->mutationCount);
+        self::assertSame(0, $state->beginCount);
     }
 
     public function testCloudValidationErrorsRenderSafelyInTextAndJson(): void
@@ -282,10 +347,15 @@ final class ApplyCommandTest extends TestCase
     private function tester(
         ?ApplyCommandCloudClient $cloud = null,
         ?string $blueprint = null,
+        ?StateDocument $stateDocument = null,
+        StateCorruptedException|StateStorageException|null $stateLoadFailure = null,
     ): array
     {
         $cloud ??= ApplyCommandCloudClient::empty();
-        $state = new ApplyCommandStateStore();
+        $state = new ApplyCommandStateStore($stateLoadFailure);
+        if ($stateDocument !== null) {
+            $state->state = $stateDocument;
+        }
         $values = new VariableValueResolver(new ApplyCommandEnvironmentValueProvider());
         $command = new ApplyCommand(
             new ApplyCommandFileReader($blueprint ?? self::blueprint()),
@@ -301,6 +371,20 @@ final class ApplyCommandTest extends TestCase
         $application->add($command);
 
         return [new CommandTester($application->find('apply')), $cloud, $state];
+    }
+
+    private static function managedState(): StateDocument
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+
+        return StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-existing'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-existing',
+                $application,
+            ));
     }
 
     private static function blueprint(): string
@@ -522,13 +606,18 @@ final class ApplyCommandStateStore implements StateStore, StateTransaction
     public int $releaseCount = 0;
     public StateDocument $state;
 
-    public function __construct()
+    public function __construct(
+        private readonly StateCorruptedException|StateStorageException|null $loadFailure = null,
+    )
     {
         $this->state = StateDocument::empty();
     }
 
     public function load(): StateDocument
     {
+        if ($this->loadFailure !== null) {
+            throw $this->loadFailure;
+        }
         return $this->state;
     }
 

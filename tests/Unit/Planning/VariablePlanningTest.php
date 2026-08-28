@@ -34,6 +34,8 @@ use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
+use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateResource;
 use LogicException;
 use PHPUnit\Framework\TestCase;
 
@@ -82,7 +84,7 @@ final class VariablePlanningTest extends TestCase
             new VariableDefinition('MISSING', new LiteralVariableValue('new-secret'), true),
             new VariableDefinition('EQUAL', new LiteralVariableValue('same'), false),
             new VariableDefinition('DIFFERENT', new LiteralVariableValue('desired-secret'), true),
-        ), $cloud));
+        ), $cloud, StateDocument::empty()));
 
         self::assertSame(
             ['application.my-api', 'environment.production', 'variable.production.MISSING', 'variable.production.EQUAL', 'variable.production.DIFFERENT'],
@@ -106,6 +108,7 @@ final class VariablePlanningTest extends TestCase
         $actions = self::actions($this->planner()->create(
             self::blueprint(new VariableDefinition('APP_ENV', new LiteralVariableValue('production'), false)),
             VariablePlanningCloud::existing(null),
+            StateDocument::empty(),
         ));
 
         self::assertSame(PlanOperation::UNSUPPORTED, $actions[2]->operation);
@@ -118,6 +121,7 @@ final class VariablePlanningTest extends TestCase
         $plan = $this->planner()->create(
             self::blueprint(new VariableDefinition('APP_ENV', new LiteralVariableValue('production'), false)),
             $cloud,
+            self::managedApplicationState(),
         );
 
         self::assertSame(
@@ -134,6 +138,7 @@ final class VariablePlanningTest extends TestCase
         $plan = $this->planner()->create(
             self::blueprint(new VariableDefinition('APP_KEY', new EnvironmentVariableReference('LOCAL_KEY'), true)),
             $cloud,
+            StateDocument::empty(),
         );
 
         self::assertSame(
@@ -159,6 +164,15 @@ final class VariablePlanningTest extends TestCase
         return new CreatePlan(new VariableValueResolver(new VariablePlanningEnvironment([
             'LOCAL_KEY' => 'local-sensitive-value',
         ])));
+    }
+
+    private static function managedApplicationState(): StateDocument
+    {
+        $address = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+
+        return StateDocument::empty()->withOrganization('acme')->withResource(
+            new StateResource($address, ResourceType::APPLICATION, 'app-1'),
+        );
     }
 
     private static function blueprint(VariableDefinition ...$variables): Blueprint

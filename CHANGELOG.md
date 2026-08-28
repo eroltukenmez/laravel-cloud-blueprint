@@ -4,6 +4,15 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+### Changed
+
+- Planning now resolves state-managed Application and Environment resources by their stored remote IDs before name-based discovery.
+- Matching unmanaged Environments require explicit import before branch reconciliation, while genuinely missing resources remain eligible for creation.
+
+### Security
+
+- Stale, replaced, wrongly parented, or multiply owned state identities produce non-actionable plans instead of implicit reassignment, recreation, or mutation.
+
 ## [0.1.0-alpha.4] - 2026-08-28
 
 ### Added

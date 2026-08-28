@@ -382,7 +382,46 @@ final readonly class CreateOnlyApply
             }
             $managed = $state->find($action->address);
             if ($managed === null) {
+                if ($action->resourceType === ResourceType::ENVIRONMENT
+                    && $action->operation === PlanOperation::UPDATE) {
+                    throw new StateIdentityConflictException(sprintf(
+                        'Local state ownership for "%s" no longer exists.',
+                        (string) $action->address,
+                    ));
+                }
                 continue;
+            }
+
+            if ($managed->type !== $action->resourceType) {
+                throw new StateIdentityConflictException(sprintf(
+                    'Local state resource type for "%s" is invalid.',
+                    (string) $action->address,
+                ));
+            }
+            if ($action->resourceType === ResourceType::APPLICATION && $managed->parent !== null) {
+                throw new StateIdentityConflictException(sprintf(
+                    'Local state parent for "%s" is invalid.',
+                    (string) $action->address,
+                ));
+            }
+            if ($action->resourceType === ResourceType::ENVIRONMENT) {
+                $expectedParent = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+                if ($managed->parent === null
+                    || (string) $managed->parent !== (string) $expectedParent) {
+                    throw new StateIdentityConflictException(sprintf(
+                        'Local state parent for "%s" is invalid.',
+                        (string) $action->address,
+                    ));
+                }
+            }
+            foreach ($state->resources() as $resource) {
+                if ((string) $resource->address !== (string) $managed->address
+                    && $resource->remoteId === $managed->remoteId) {
+                    throw new StateIdentityConflictException(sprintf(
+                        'Local state remote identity for "%s" is owned by more than one address.',
+                        (string) $action->address,
+                    ));
+                }
             }
 
             if ($action->remoteId === null || $managed->remoteId !== $action->remoteId) {
