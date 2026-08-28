@@ -21,6 +21,9 @@ use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanChange;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\State\Contract\StateStore;
+use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
+use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -38,6 +41,7 @@ final class PlanCommand extends Command
         private readonly CloudTokenProvider $tokens,
         private readonly LaravelCloudClientFactory $clients,
         private readonly CreatePlan $planner,
+        private readonly StateStore $states,
         ?JsonOutput $json = null,
     ) {
         $this->json = $json ?? new JsonOutput();
@@ -95,8 +99,12 @@ final class PlanCommand extends Command
         }
 
         try {
-            $plan = $this->planner->create($loaded->blueprint(), $this->clients->create($token));
-        } catch (OrganizationMismatchException|AmbiguousResourceMatchException|MissingEnvironmentValueException|CloudException $exception) {
+            $plan = $this->planner->create(
+                $loaded->blueprint(),
+                $this->clients->create($token),
+                $this->states->load(),
+            );
+        } catch (OrganizationMismatchException|AmbiguousResourceMatchException|MissingEnvironmentValueException|CloudException|StateCorruptedException|StateStorageException $exception) {
             return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json);
         }
 
@@ -118,7 +126,15 @@ final class PlanCommand extends Command
         $unchanged = $plan->countByOperation(PlanOperation::NO_CHANGE);
         $unsupported = $plan->countByOperation(PlanOperation::UNSUPPORTED);
 
-        if ($create === 0 && $update === 0 && $unsupported === 0) {
+        $hasUnmanagedMatches = false;
+        foreach ($plan as $action) {
+            if (str_contains($action->reason, 'unmanaged')) {
+                $hasUnmanagedMatches = true;
+                break;
+            }
+        }
+
+        if ($create === 0 && $update === 0 && $unsupported === 0 && !$hasUnmanagedMatches) {
             $output->writeln('No changes.');
             $output->writeln('');
             $output->writeln('Laravel Cloud infrastructure matches the blueprint.');

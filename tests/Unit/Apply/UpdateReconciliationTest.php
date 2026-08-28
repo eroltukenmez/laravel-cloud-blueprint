@@ -7,6 +7,7 @@ namespace LaravelCloudBlueprint\Tests\Unit\Apply;
 use LaravelCloudBlueprint\Apply\ApplyStatus;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
+use LaravelCloudBlueprint\Apply\Exception\StateIdentityConflictException;
 use LaravelCloudBlueprint\Blueprint\ApplicationDefinition;
 use LaravelCloudBlueprint\Blueprint\Blueprint;
 use LaravelCloudBlueprint\Blueprint\BlueprintSchemaVersion;
@@ -32,10 +33,13 @@ use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\ResourceAddress;
+use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateResource;
 use LogicException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -63,9 +67,9 @@ final class UpdateReconciliationTest extends TestCase
         );
         $values = new VariableValueResolver(new ReconciliationEnvironmentValues());
         $planner = new CreatePlan($values);
-        $state = new ReconciliationState(StateDocument::empty()->withOrganization('acme')->withSerial(11));
+        $state = new ReconciliationState(self::managedState()->withSerial(11));
 
-        $before = $planner->create($blueprint, $cloud);
+        $before = $planner->create($blueprint, $cloud, $state->state);
         self::assertSame($expectedUpdates, $before->countByOperation(PlanOperation::UPDATE));
 
         $result = (new CreateOnlyApply($values))->execute($blueprint, $before, $cloud, $state);
@@ -75,7 +79,7 @@ final class UpdateReconciliationTest extends TestCase
         self::assertSame(11, $state->state->serial);
         self::assertSame(0, $state->saveCount);
 
-        $after = $planner->create($blueprint, $cloud);
+        $after = $planner->create($blueprint, $cloud, $state->state);
         self::assertSame(0, $after->countByOperation(PlanOperation::UPDATE));
         self::assertSame(3, $after->countByOperation(PlanOperation::NO_CHANGE));
 
@@ -89,8 +93,8 @@ final class UpdateReconciliationTest extends TestCase
         $blueprint = self::blueprint();
         $cloud = new ReconciliationCloud('main', 'remote-value', 'acme/old-api');
         $values = new VariableValueResolver(new ReconciliationEnvironmentValues());
-        $plan = (new CreatePlan($values))->create($blueprint, $cloud);
-        $state = new ReconciliationState(StateDocument::empty()->withOrganization('acme'));
+        $state = new ReconciliationState(self::managedState());
+        $plan = (new CreatePlan($values))->create($blueprint, $cloud, $state->state);
 
         self::assertSame(1, $plan->countByOperation(PlanOperation::UNSUPPORTED));
         self::assertSame(2, $plan->countByOperation(PlanOperation::UPDATE));
@@ -102,6 +106,43 @@ final class UpdateReconciliationTest extends TestCase
             self::assertSame(0, $state->beginCount);
             self::assertSame(0, $cloud->mutationCount);
         }
+    }
+
+    public function testEnvironmentUpdateIsRefusedWhenOwnershipDisappearsBeforeLockedApply(): void
+    {
+        $blueprint = self::blueprint();
+        $cloud = new ReconciliationCloud('main', 'desired-sensitive-value');
+        $values = new VariableValueResolver(new ReconciliationEnvironmentValues());
+        $state = new ReconciliationState(self::managedState());
+        $plan = (new CreatePlan($values))->create($blueprint, $cloud, $state->state);
+
+        self::assertSame(1, $plan->countByOperation(PlanOperation::UPDATE));
+        $state->state = StateDocument::empty()->withOrganization('acme');
+
+        try {
+            (new CreateOnlyApply($values))->execute($blueprint, $plan, $cloud, $state);
+            self::fail('Expected missing ownership to refuse the planned Environment update.');
+        } catch (StateIdentityConflictException $exception) {
+            self::assertStringContainsString('ownership', $exception->getMessage());
+        }
+
+        self::assertSame(1, $state->beginCount);
+        self::assertSame(0, $state->saveCount);
+        self::assertSame(0, $cloud->mutationCount);
+    }
+
+    private static function managedState(): StateDocument
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+
+        return StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-1',
+                $application,
+            ));
     }
 
     private static function blueprint(): Blueprint

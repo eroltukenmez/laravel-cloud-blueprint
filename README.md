@@ -169,6 +169,8 @@ Text plans use `+` for create, `~` for update, `=` for no change, and `!` for un
 
 Planning is read-only and deterministic. Extra remote resources are not deleted. Application repository and region differences are reported as unsupported, so they cannot be accidentally applied.
 
+Planning loads local state and treats stored Application and Environment remote IDs as authoritative ownership. A missing managed identity or a same-name replacement is reported as unsupported and is never automatically recreated or adopted. Exact-name resources without state ownership may still be inspected read-only; an unmanaged Environment must be explicitly adopted with `lcb import` before LCB can update its branch. A genuinely missing resource with no state ownership remains eligible for `CREATE`.
+
 ## Apply Semantics
 
 Apply always creates a fresh plan, refuses the entire plan before Cloud mutation when any unsupported action is present, and requests approval unless auto-approved. Interactive approval defaults to no. After approval and preflight checks it acquires the state lock for managed mutation and state work. Potentially duplicate-creating POST requests are never automatically retried.
@@ -182,6 +184,8 @@ Successful application and environment creations are checkpointed as work progre
 Local state is stored in `.lcb/state.json`. It contains remote IDs for LCB-managed application and environment resources. Variables are not state resources, and their values are never stored.
 
 State uses local locking and atomic replacement and should not be edited manually. `init --from-cloud` neither creates state nor adopts remote resources into existing state.
+
+Managed Application and Environment addresses are resolved by their stored remote IDs. Planning validates their expected type, Environment parent address, and conflicting reuse of a remote ID. State ownership is not silently reassigned when Cloud contains another resource with the same name.
 
 `lcb import` is the only explicit state-adoption workflow. It can atomically record matching Application and Environment identities using the existing state schema. It does not adopt variables, repair conflicts, or modify remote configuration. Normal plan and apply matching never adopt unmanaged resources implicitly.
 
@@ -202,6 +206,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
 - Explicit Application and Environment identity adoption is supported through `lcb import`; variable adoption, automatic adoption, conflict repair, and repository migration or rebinding are not supported.
+- Resources removed from the blueprint are not yet reported from state, and rename/state-move semantics are not supported.
 - DELETE, destroy, drift repair, and remote state are not supported.
 - Databases, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.

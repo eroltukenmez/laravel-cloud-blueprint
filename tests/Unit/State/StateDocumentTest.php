@@ -81,4 +81,15 @@ final class StateDocumentTest extends TestCase
             new StateResource($address, ResourceType::APPLICATION, 'app_2'),
         );
     }
+
+    public function testStateResourceRejectsATypeThatDoesNotMatchItsAddress(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new StateResource(
+            new ResourceAddress(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::ENVIRONMENT,
+            'env_123',
+        );
+    }
 }

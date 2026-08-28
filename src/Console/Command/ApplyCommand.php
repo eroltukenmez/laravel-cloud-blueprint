@@ -102,10 +102,10 @@ final class ApplyCommand extends Command
 
         try {
             $cloud = $this->clients->create($token);
-            $plan = $this->planner->create($loaded->blueprint(), $cloud);
+            $plan = $this->planner->create($loaded->blueprint(), $cloud, $this->states->load());
         } catch (CloudValidationException $exception) {
             return $this->renderCloudValidationFailure($exception, $output, $jsonOutput);
-        } catch (OrganizationMismatchException|AmbiguousResourceMatchException|MissingEnvironmentValueException|CloudException $exception) {
+        } catch (OrganizationMismatchException|AmbiguousResourceMatchException|MissingEnvironmentValueException|CloudException|StateCorruptedException|StateStorageException $exception) {
             return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
         }
 

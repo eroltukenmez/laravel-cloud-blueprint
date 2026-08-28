@@ -13,6 +13,8 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
+use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateResource;
 
 final readonly class CreatePlan
 {
@@ -20,76 +22,98 @@ final readonly class CreatePlan
     {
     }
 
-    public function create(Blueprint $blueprint, LaravelCloudClient $cloud): ExecutionPlan
+    public function create(Blueprint $blueprint, LaravelCloudClient $cloud, StateDocument $state): ExecutionPlan
     {
         $organization = $cloud->organization();
-
         if ($organization->slug !== $blueprint->organization) {
             throw new OrganizationMismatchException($blueprint->organization, $organization->slug);
         }
 
-        $matches = array_values(array_filter(
-            $cloud->applications(),
-            static fn (CloudApplication $application): bool => $application->name === $blueprint->application->name,
-        ));
-
-        if (count($matches) > 1) {
-            throw new AmbiguousResourceMatchException('application', $blueprint->application->name);
+        if ($state->organization !== null && $state->organization !== $blueprint->organization) {
+            return $this->blockedPlan($blueprint, 'Local state belongs to a different organization.');
         }
 
-        if ($matches === []) {
-            $actions = [$this->applicationAction(
-                $blueprint->application->name,
-                PlanOperation::CREATE,
-                'Application does not exist.',
-            )];
+        $applications = $cloud->applications();
+        $applicationAddress = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+        $managedApplication = $state->find($applicationAddress);
 
-            foreach ($blueprint->environments as $environment) {
-                $actions[] = $this->environmentAction(
-                    $environment->name,
-                    PlanOperation::CREATE,
-                    'Environment does not exist because the application will be created.',
+        if ($managedApplication !== null) {
+            $invalid = $this->invalidApplicationOwnership($managedApplication, $state);
+            if ($invalid !== null) {
+                return $this->blockedPlan($blueprint, $invalid);
+            }
+
+            $application = $this->findApplicationById($applications, $managedApplication->remoteId);
+            if ($application === null) {
+                $replacement = $this->applicationsNamed($applications, $blueprint->application->name);
+                return $this->blockedPlan(
+                    $blueprint,
+                    $replacement === []
+                        ? 'Managed application remote identity is missing. State must be repaired before reconciliation.'
+                        : 'Managed application remote identity is missing and a same-name unmanaged replacement exists. Import or state repair is required.',
+                );
+            }
+            if ($application->name !== $blueprint->application->name) {
+                return $this->blockedPlan(
+                    $blueprint,
+                    'Managed application name differs from its blueprint address. Rename or state-move reconciliation is not supported.',
                 );
             }
 
-            foreach ($blueprint->environments as $environment) {
-                foreach ($environment->variables as $variable) {
-                    $address = $this->variableAddress($environment->name, $variable->name);
-                    $this->values->resolve($variable, $address);
-                    $actions[] = $this->variableAction(
-                        $address,
-                        PlanOperation::CREATE,
-                        'Environment variable does not exist because the environment will be created.',
-                    );
-                }
-            }
-
-            return new ExecutionPlan(...$actions);
+            return $this->planForApplication($blueprint, $cloud, $state, $applications, $application, true);
         }
 
-        $application = $matches[0];
-        $actions = [$this->compareApplication($blueprint, $application)];
+        $matches = $this->applicationsNamed($applications, $blueprint->application->name);
+        if (count($matches) > 1) {
+            throw new AmbiguousResourceMatchException('application', $blueprint->application->name);
+        }
+        if ($matches === []) {
+            return $this->createAllPlan($blueprint);
+        }
+
+        return $this->planForApplication($blueprint, $cloud, $state, $applications, $matches[0], false);
+    }
+
+    /** @param list<CloudApplication> $applications */
+    private function planForApplication(
+        Blueprint $blueprint,
+        LaravelCloudClient $cloud,
+        StateDocument $state,
+        array $applications,
+        CloudApplication $application,
+        bool $applicationIsManaged,
+    ): ExecutionPlan {
+        $actions = [$this->compareApplication($blueprint, $application, $applicationIsManaged)];
         $remoteEnvironments = $cloud->environments($application->id);
+        /** @var array<string, array{PlanAction, CloudEnvironment|null}> $resolved */
+        $resolved = [];
 
-        /** @var array<string, CloudEnvironment|null> $matchedEnvironments */
-        $matchedEnvironments = [];
         foreach ($blueprint->environments as $environment) {
-            [$action, $matched] = $this->compareEnvironment($environment, $remoteEnvironments);
-            $actions[] = $action;
-            $matchedEnvironments[$environment->name] = $matched;
+            $resolved[$environment->name] = $this->resolveEnvironment(
+                $environment,
+                $blueprint,
+                $state,
+                $application,
+                $remoteEnvironments,
+                $applications,
+                $cloud,
+            );
+            $actions[] = $resolved[$environment->name][0];
         }
 
         foreach ($blueprint->environments as $environment) {
-            $remote = $matchedEnvironments[$environment->name];
+            [$environmentAction, $remote] = $resolved[$environment->name];
             if ($remote === null) {
                 foreach ($environment->variables as $variable) {
                     $address = $this->variableAddress($environment->name, $variable->name);
-                    $this->values->resolve($variable, $address);
-                    $actions[] = $this->variableAction(
-                        $address,
-                        PlanOperation::CREATE,
-                        'Environment variable does not exist because the environment will be created.',
-                    );
+                    if ($environmentAction->operation === PlanOperation::CREATE) {
+                        $this->values->resolve($variable, $address);
+                        $actions[] = $this->variableAction($address, PlanOperation::CREATE,
+                            'Environment variable does not exist because the environment will be created.');
+                    } else {
+                        $actions[] = $this->variableAction($address, PlanOperation::UNSUPPORTED,
+                            'Environment variable cannot be reconciled while its environment identity is unresolved.');
+                    }
                 }
                 continue;
             }
@@ -97,7 +121,6 @@ final readonly class CreatePlan
             if (count($environment->variables) === 0) {
                 continue;
             }
-
             $details = $cloud->environment($remote->id);
             foreach ($environment->variables as $variable) {
                 $actions[] = $this->compareVariable($environment->name, $variable, $details->variables);
@@ -107,92 +130,174 @@ final readonly class CreatePlan
         return new ExecutionPlan(...$actions);
     }
 
-    private function compareApplication(Blueprint $blueprint, CloudApplication $remote): PlanAction
+    private function createAllPlan(Blueprint $blueprint): ExecutionPlan
+    {
+        $actions = [$this->applicationAction($blueprint->application->name, PlanOperation::CREATE,
+            'Application does not exist.')];
+        foreach ($blueprint->environments as $environment) {
+            $actions[] = $this->environmentAction($environment->name, PlanOperation::CREATE,
+                'Environment does not exist because the application will be created.');
+        }
+        foreach ($blueprint->environments as $environment) {
+            foreach ($environment->variables as $variable) {
+                $address = $this->variableAddress($environment->name, $variable->name);
+                $this->values->resolve($variable, $address);
+                $actions[] = $this->variableAction($address, PlanOperation::CREATE,
+                    'Environment variable does not exist because the environment will be created.');
+            }
+        }
+
+        return new ExecutionPlan(...$actions);
+    }
+
+    private function blockedPlan(Blueprint $blueprint, string $reason): ExecutionPlan
+    {
+        $actions = [$this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED, $reason)];
+        foreach ($blueprint->environments as $environment) {
+            $actions[] = $this->environmentAction($environment->name, PlanOperation::UNSUPPORTED,
+                'Environment cannot be reconciled while its parent application identity is unresolved.');
+        }
+        foreach ($blueprint->environments as $environment) {
+            foreach ($environment->variables as $variable) {
+                $actions[] = $this->variableAction(
+                    $this->variableAddress($environment->name, $variable->name),
+                    PlanOperation::UNSUPPORTED,
+                    'Environment variable cannot be reconciled while its parent application identity is unresolved.',
+                );
+            }
+        }
+
+        return new ExecutionPlan(...$actions);
+    }
+
+    private function compareApplication(Blueprint $blueprint, CloudApplication $remote, bool $managed): PlanAction
     {
         if ($remote->region !== $blueprint->application->region) {
-            return $this->applicationAction(
-                $blueprint->application->name,
-                PlanOperation::UNSUPPORTED,
-                'Remote application region differs from desired region.',
-            );
+            return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
+                'Remote application region differs from desired region.', $remote->id);
         }
-
         if ($remote->repository === null) {
-            return $this->applicationAction(
-                $blueprint->application->name,
-                PlanOperation::UNSUPPORTED,
-                'Remote application repository information is unavailable.',
-            );
+            return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
+                'Remote application repository information is unavailable.', $remote->id);
         }
-
         if ($remote->repository !== $blueprint->application->source->repository) {
-            return $this->applicationAction(
-                $blueprint->application->name,
-                PlanOperation::UNSUPPORTED,
-                'Application repository differs and cannot be updated safely.',
-            );
+            return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
+                'Application repository differs and cannot be updated safely.', $remote->id);
         }
 
         return $this->applicationAction(
             $blueprint->application->name,
             PlanOperation::NO_CHANGE,
-            'Remote application matches desired state.',
+            $managed
+                ? 'Managed remote application matches desired state.'
+                : 'Matching remote application is unmanaged; use import to establish ownership before future mutation.',
             $remote->id,
         );
     }
 
     /**
      * @param list<CloudEnvironment> $remoteEnvironments
+     * @param list<CloudApplication> $applications
      * @return array{PlanAction, CloudEnvironment|null}
      */
-    private function compareEnvironment(
+    private function resolveEnvironment(
         EnvironmentDefinition $desired,
+        Blueprint $blueprint,
+        StateDocument $state,
+        CloudApplication $application,
         array $remoteEnvironments,
+        array $applications,
+        LaravelCloudClient $cloud,
     ): array {
-        $matches = array_values(array_filter(
-            $remoteEnvironments,
-            static fn (CloudEnvironment $environment): bool => $environment->name === $desired->name,
-        ));
+        $address = new ResourceAddress(ResourceType::ENVIRONMENT, $desired->name);
+        $managed = $state->find($address);
 
+        if ($managed !== null) {
+            $invalid = $this->invalidEnvironmentOwnership($managed, $state, $blueprint);
+            if ($invalid !== null) {
+                return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED, $invalid), null];
+            }
+            $remote = $this->findEnvironmentById($remoteEnvironments, $managed->remoteId);
+            if ($remote === null) {
+                foreach ($applications as $candidateApplication) {
+                    if ($candidateApplication->id === $application->id) {
+                        continue;
+                    }
+                    if ($this->findEnvironmentById($cloud->environments($candidateApplication->id), $managed->remoteId) !== null) {
+                        return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
+                            'Managed environment belongs to an unexpected remote application.'), null];
+                    }
+                }
+
+                $replacement = $this->environmentsNamed($remoteEnvironments, $desired->name);
+                return [$this->environmentAction(
+                    $desired->name,
+                    PlanOperation::UNSUPPORTED,
+                    $replacement === []
+                        ? 'Managed environment remote identity is missing. State must be repaired before reconciliation.'
+                        : 'Managed environment remote identity is missing and a same-name unmanaged replacement exists. Import or state repair is required.',
+                ), null];
+            }
+
+            if ($remote->applicationId !== $application->id) {
+                return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
+                    'Managed environment belongs to an unexpected remote application.'), null];
+            }
+            if ($remote->name !== $desired->name) {
+                return [$this->environmentAction(
+                    $desired->name,
+                    PlanOperation::UNSUPPORTED,
+                    'Managed environment name differs from its blueprint address. Rename or state-move reconciliation is not supported.',
+                    $remote->id,
+                ), $remote];
+            }
+
+            return [$this->compareEnvironment($desired, $remote, true), $remote];
+        }
+
+        $matches = $this->environmentsNamed($remoteEnvironments, $desired->name);
         if (count($matches) > 1) {
             throw new AmbiguousResourceMatchException('environment', $desired->name);
         }
-
         if ($matches === []) {
-            return [$this->environmentAction(
-                $desired->name,
-                PlanOperation::CREATE,
-                'Environment does not exist.',
-            ), null];
+            return [$this->environmentAction($desired->name, PlanOperation::CREATE, 'Environment does not exist.'), null];
         }
 
-        $remote = $matches[0];
+        return [$this->compareEnvironment($desired, $matches[0], false), $matches[0]];
+    }
 
+    private function compareEnvironment(EnvironmentDefinition $desired, CloudEnvironment $remote, bool $managed): PlanAction
+    {
         if ($remote->branch === null) {
-            return [$this->environmentAction(
-                $desired->name,
-                PlanOperation::UNSUPPORTED,
-                'Remote branch information is unavailable.',
-                $remote->id,
-            ), $remote];
+            return $this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
+                'Remote branch information is unavailable.', $remote->id);
         }
-
         if ($remote->branch !== $desired->branch) {
-            return [$this->environmentAction(
+            if (!$managed) {
+                return $this->environmentAction(
+                    $desired->name,
+                    PlanOperation::UNSUPPORTED,
+                    'Matching remote environment is unmanaged. Import it before reconciling its branch.',
+                    $remote->id,
+                );
+            }
+            return $this->environmentAction(
                 $desired->name,
                 PlanOperation::UPDATE,
-                'Remote environment differs from desired state.',
+                'Managed remote environment differs from desired state.',
                 $remote->id,
                 new PlanChange('branch', $remote->branch, $desired->branch),
-            ), $remote];
+            );
         }
 
-        return [$this->environmentAction(
+        return $this->environmentAction(
             $desired->name,
             PlanOperation::NO_CHANGE,
-            'Remote environment matches desired state.',
+            $managed
+                ? 'Managed remote environment matches desired state.'
+                : 'Matching remote environment is unmanaged; use import to establish ownership before future mutation.',
             $remote->id,
-        ), $remote];
+        );
     }
 
     private function compareVariable(
@@ -202,37 +307,91 @@ final readonly class CreatePlan
     ): PlanAction {
         $address = $this->variableAddress($environmentName, $desired->name);
         $desiredValue = $this->values->resolve($desired, $address);
-
         if ($remoteVariables === null) {
-            return $this->variableAction(
-                $address,
-                PlanOperation::UNSUPPORTED,
-                'Remote environment variable information is unavailable.',
-            );
+            return $this->variableAction($address, PlanOperation::UNSUPPORTED,
+                'Remote environment variable information is unavailable.');
         }
-
         $remote = $remoteVariables->find($desired->name);
         if ($remote === null) {
-            return $this->variableAction(
-                $address,
-                PlanOperation::CREATE,
-                'Environment variable does not exist.',
-            );
+            return $this->variableAction($address, PlanOperation::CREATE, 'Environment variable does not exist.');
         }
-
         if ($remote->value !== $desiredValue) {
-            return $this->variableAction(
-                $address,
-                PlanOperation::UPDATE,
-                'Environment variable differs from desired state.',
-            );
+            return $this->variableAction($address, PlanOperation::UPDATE,
+                'Environment variable differs from desired state.');
         }
+        return $this->variableAction($address, PlanOperation::NO_CHANGE,
+            'Environment variable matches desired state.');
+    }
 
-        return $this->variableAction(
-            $address,
-            PlanOperation::NO_CHANGE,
-            'Environment variable matches desired state.',
-        );
+    private function invalidApplicationOwnership(StateResource $resource, StateDocument $state): ?string
+    {
+        if ($resource->type !== ResourceType::APPLICATION || $resource->parent !== null) {
+            return 'Application state ownership has an invalid resource type or parent relationship.';
+        }
+        return $this->duplicateOwnershipReason($resource, $state);
+    }
+
+    private function invalidEnvironmentOwnership(StateResource $resource, StateDocument $state, Blueprint $blueprint): ?string
+    {
+        $expectedParent = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+        if ($resource->type !== ResourceType::ENVIRONMENT
+            || $resource->parent === null
+            || (string) $resource->parent !== (string) $expectedParent) {
+            return 'Environment state ownership has an invalid resource type or parent relationship.';
+        }
+        return $this->duplicateOwnershipReason($resource, $state);
+    }
+
+    private function duplicateOwnershipReason(StateResource $managed, StateDocument $state): ?string
+    {
+        foreach ($state->resources() as $resource) {
+            if ((string) $resource->address !== (string) $managed->address && $resource->remoteId === $managed->remoteId) {
+                return sprintf('Remote identity is also owned by conflicting state address "%s".', (string) $resource->address);
+            }
+        }
+        return null;
+    }
+
+    /** @param list<CloudApplication> $applications */
+    private function findApplicationById(array $applications, string $id): ?CloudApplication
+    {
+        foreach ($applications as $application) {
+            if ($application->id === $id) {
+                return $application;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param list<CloudApplication> $applications
+     * @return list<CloudApplication>
+     */
+    private function applicationsNamed(array $applications, string $name): array
+    {
+        return array_values(array_filter($applications,
+            static fn (CloudApplication $application): bool => $application->name === $name));
+    }
+
+    /** @param list<CloudEnvironment> $environments */
+    private function findEnvironmentById(array $environments, string $id): ?CloudEnvironment
+    {
+        foreach ($environments as $environment) {
+            if ($environment->id === $id) {
+                return $environment;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param list<CloudEnvironment> $environments
+     * @return list<CloudEnvironment>
+     */
+    private function environmentsNamed(array $environments, string $name): array
+    {
+        return array_values(array_filter($environments,
+            static fn (CloudEnvironment $environment): bool => $environment->name === $name));
     }
 
     private function applicationAction(
@@ -241,16 +400,9 @@ final readonly class CreatePlan
         string $reason,
         ?string $remoteId = null,
         PlanChange ...$changes,
-    ): PlanAction
-    {
-        return new PlanAction(
-            new ResourceAddress(ResourceType::APPLICATION, $name),
-            ResourceType::APPLICATION,
-            $operation,
-            $reason,
-            $remoteId,
-            ...$changes,
-        );
+    ): PlanAction {
+        return new PlanAction(new ResourceAddress(ResourceType::APPLICATION, $name), ResourceType::APPLICATION,
+            $operation, $reason, $remoteId, ...$changes);
     }
 
     private function environmentAction(
@@ -259,16 +411,9 @@ final readonly class CreatePlan
         string $reason,
         ?string $remoteId = null,
         PlanChange ...$changes,
-    ): PlanAction
-    {
-        return new PlanAction(
-            new ResourceAddress(ResourceType::ENVIRONMENT, $name),
-            ResourceType::ENVIRONMENT,
-            $operation,
-            $reason,
-            $remoteId,
-            ...$changes,
-        );
+    ): PlanAction {
+        return new PlanAction(new ResourceAddress(ResourceType::ENVIRONMENT, $name), ResourceType::ENVIRONMENT,
+            $operation, $reason, $remoteId, ...$changes);
     }
 
     private function variableAddress(string $environmentName, string $variableName): ResourceAddress
@@ -276,11 +421,8 @@ final readonly class CreatePlan
         return new ResourceAddress(ResourceType::VARIABLE, $environmentName . '.' . $variableName);
     }
 
-    private function variableAction(
-        ResourceAddress $address,
-        PlanOperation $operation,
-        string $reason,
-    ): PlanAction {
+    private function variableAction(ResourceAddress $address, PlanOperation $operation, string $reason): PlanAction
+    {
         return new PlanAction($address, ResourceType::VARIABLE, $operation, $reason);
     }
 }

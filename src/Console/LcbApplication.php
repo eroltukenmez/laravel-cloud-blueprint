@@ -46,6 +46,7 @@ final class LcbApplication extends Application
         );
         $variableValues = new VariableValueResolver(new NativeEnvironmentValueProvider());
         $planner = new CreatePlan($variableValues);
+        $states = new LocalFileStateStore();
 
         $this->add(new InitCommand(
             $files,
@@ -64,6 +65,7 @@ final class LcbApplication extends Application
             new LcbTokenProvider(),
             new SymfonyLaravelCloudClientFactory(),
             $planner,
+            $states,
         ));
         $this->add(new ApplyCommand(
             $files,
@@ -72,7 +74,7 @@ final class LcbApplication extends Application
             new SymfonyLaravelCloudClientFactory(),
             $planner,
             new CreateOnlyApply($variableValues),
-            new LocalFileStateStore(),
+            $states,
         ));
         $this->add(new ImportCommand(
             $files,
@@ -80,7 +82,7 @@ final class LcbApplication extends Application
             new LcbTokenProvider(),
             new SymfonyLaravelCloudClientFactory(),
             new ImportResources(new CreateImportProposal()),
-            new LocalFileStateStore(),
+            $states,
         ));
     }
 }

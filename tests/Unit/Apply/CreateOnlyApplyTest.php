@@ -133,7 +133,16 @@ final class CreateOnlyApplyTest extends TestCase
     public function testEnvironmentBranchUpdateIsAcceptedWithoutSavingState(): void
     {
         $events = new ApplyEvents();
-        $states = new ApplyStateStore($events, StateDocument::empty()->withOrganization('acme')->withSerial(4));
+        $application = self::address(ResourceType::APPLICATION, 'my-api');
+        $states = new ApplyStateStore($events, StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-existing'))
+            ->withResource(new StateResource(
+                self::address(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-existing',
+                $application,
+            ))
+            ->withSerial(4));
         $plan = new ExecutionPlan(new PlanAction(
             self::address(ResourceType::ENVIRONMENT, 'production'),
             ResourceType::ENVIRONMENT,
@@ -149,7 +158,7 @@ final class CreateOnlyApplyTest extends TestCase
         self::assertSame(1, $result->updatedCount());
         self::assertSame(['lock', 'update:environment.env-existing:main', 'release'], $events->values);
         self::assertSame(4, $states->state->serial);
-        self::assertSame([], $states->state->resources());
+        self::assertCount(2, $states->state->resources());
     }
 
     public function testUnsupportedEnvironmentUpdateFieldsRefuseBeforeLockOrMutation(): void
@@ -227,7 +236,14 @@ final class CreateOnlyApplyTest extends TestCase
             'env-managed',
             self::address(ResourceType::APPLICATION, 'my-api'),
         );
-        $state = StateDocument::empty()->withOrganization('acme')->withResource($managed)->withSerial(3);
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(
+                self::address(ResourceType::APPLICATION, 'my-api'),
+                ResourceType::APPLICATION,
+                'app-managed',
+            ))
+            ->withResource($managed)
+            ->withSerial(3);
         $plan = new ExecutionPlan(new PlanAction(
             self::address(ResourceType::ENVIRONMENT, 'production'),
             ResourceType::ENVIRONMENT,
