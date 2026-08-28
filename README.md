@@ -154,7 +154,7 @@ Creates and updates supported resources after producing a fresh plan. Supports `
 
 Adopts existing Application and Environment identities into local LCB state without modifying Laravel Cloud resources. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
 
-Import requires explicit confirmation unless `--auto-approve` is supplied. Any conflict or unsupported candidate blocks the entire import. Environment variables and their values are never imported into state. Import performs fresh Cloud discovery after acquiring the state lock so that stale preview identities are not persisted.
+Import requires explicit confirmation unless `--auto-approve` is supplied. Any conflict or unsupported candidate blocks the entire import. Environment variables and their values are never imported into state. Import performs fresh Cloud discovery after acquiring the state lock so that stale preview identities are not persisted. The lock protects local state writers only; it does not lock or freeze Laravel Cloud resources.
 
 Run `lcb <command> --help` for exact usage.
 

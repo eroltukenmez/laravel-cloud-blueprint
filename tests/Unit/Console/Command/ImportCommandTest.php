@@ -155,6 +155,39 @@ final class ImportCommandTest extends TestCase
         self::assertSame(0, $states->state->serial);
     }
 
+    public function testJsonNoChangesIsPureConsistentJsonWithoutSaving(): void
+    {
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::APPLICATION, 'my-api'),
+                ResourceType::APPLICATION,
+                'app-secret-id',
+            ))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-secret-id',
+                new ResourceAddress(ResourceType::APPLICATION, 'my-api'),
+            ));
+        [$tester, , $states] = self::tester($state);
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--json' => true]));
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['summary']);
+        self::assertIsArray($decoded['resources']);
+        self::assertSame('no_changes', $decoded['status']);
+        self::assertSame(0, $decoded['summary']['importable']);
+        self::assertSame(2, $decoded['summary']['already_managed']);
+        self::assertSame(0, $decoded['summary']['adopted']);
+        self::assertCount(2, $decoded['resources']);
+        self::assertSame(0, $states->beginCount);
+        self::assertSame(0, $states->saveCount);
+        self::assertSame(StateVersion::V1, $states->state->version);
+        self::assertStringNotContainsString('literal-secret-value', $tester->getDisplay());
+        self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
+    }
+
     public function testNonInteractiveRequiresAutoApproveWhenImportable(): void
     {
         [$tester, , $states] = self::tester();

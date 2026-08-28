@@ -138,6 +138,69 @@ final class ImportResourcesTest extends TestCase
         }
     }
 
+    public function testRemoteDisappearanceDuringLockedRevalidationWritesNothing(): void
+    {
+        $cloud = new ImportResourcesCloud(
+            applicationSnapshots: [[self::application()], []],
+            environments: ['app-1' => [self::environment()]],
+        );
+        $states = new ImportResourcesStateStore();
+        self::assertSame(2, self::service()->preview(self::blueprint(), $cloud, $states)->count());
+
+        try {
+            self::service()->execute(self::blueprint(), $cloud, $states);
+            self::fail('Expected import refusal after the remote application disappeared.');
+        } catch (ImportRefusedException $exception) {
+            self::assertNotNull($exception->proposal);
+        }
+
+        self::assertSame(0, $states->saveCount);
+        self::assertSame([], $states->state->resources());
+    }
+
+    public function testEnvironmentDisappearanceDuringLockedRevalidationWritesNothing(): void
+    {
+        $cloud = new ImportResourcesCloud(
+            applicationSnapshots: [[self::application()]],
+            environments: ['app-1' => [self::environment()]],
+            environmentSnapshots: [[self::environment()], []],
+        );
+        $states = new ImportResourcesStateStore();
+        self::assertSame(2, self::service()->preview(self::blueprint(), $cloud, $states)->count());
+
+        try {
+            self::service()->execute(self::blueprint(), $cloud, $states);
+            self::fail('Expected import refusal after the remote environment disappeared.');
+        } catch (ImportRefusedException $exception) {
+            self::assertNotNull($exception->proposal);
+        }
+
+        self::assertSame(0, $states->saveCount);
+        self::assertSame([], $states->state->resources());
+    }
+
+    public function testNewLocalOwnershipConflictUnderLockWritesNothing(): void
+    {
+        $conflicted = StateDocument::empty()->withOrganization('acme')->withResource(new StateResource(
+            self::address(ResourceType::APPLICATION, 'my-api'),
+            ResourceType::APPLICATION,
+            'app-other',
+        ));
+        $states = new ImportResourcesStateStore(stateOnBegin: $conflicted);
+        $cloud = ImportResourcesCloud::matching();
+        self::assertSame(2, self::service()->preview(self::blueprint(), $cloud, $states)->count());
+
+        try {
+            self::service()->execute(self::blueprint(), $cloud, $states);
+            self::fail('Expected import refusal after local ownership changed.');
+        } catch (ImportRefusedException $exception) {
+            self::assertNotNull($exception->proposal);
+        }
+
+        self::assertSame(0, $states->saveCount);
+        self::assertSame('app-other', $states->state->get(self::address(ResourceType::APPLICATION, 'my-api'))->remoteId);
+    }
+
     public function testFreshRemoteIdentityReplacesStalePreviewIdentity(): void
     {
         $cloud = new ImportResourcesCloud(
@@ -212,8 +275,10 @@ final class ImportResourcesStateStore implements StateStore, StateTransaction
     public int $saveCount = 0;
     public int $releaseCount = 0;
 
-    public function __construct(public StateDocument $state = new StateDocument(\LaravelCloudBlueprint\State\StateVersion::V1, 0, null))
-    {
+    public function __construct(
+        public StateDocument $state = new StateDocument(\LaravelCloudBlueprint\State\StateVersion::V1, 0, null),
+        private readonly ?StateDocument $stateOnBegin = null,
+    ) {
     }
 
     public function load(): StateDocument
@@ -235,6 +300,9 @@ final class ImportResourcesStateStore implements StateStore, StateTransaction
     public function begin(): StateTransaction
     {
         ++$this->beginCount;
+        if ($this->stateOnBegin !== null) {
+            $this->state = $this->stateOnBegin;
+        }
         return $this;
     }
 
@@ -250,13 +318,18 @@ final class ImportResourcesCloud implements LaravelCloudClient
     public array $calls = [];
     public int $mutationCount = 0;
     private int $applicationRead = 0;
+    private int $environmentRead = 0;
 
     /**
      * @param list<list<CloudApplication>> $applicationSnapshots
      * @param array<string, list<CloudEnvironment>> $environments
+     * @param list<list<CloudEnvironment>>|null $environmentSnapshots
      */
-    public function __construct(private array $applicationSnapshots, private array $environments)
-    {
+    public function __construct(
+        private array $applicationSnapshots,
+        private array $environments,
+        private ?array $environmentSnapshots = null,
+    ) {
     }
 
     public static function matching(): self
@@ -280,6 +353,10 @@ final class ImportResourcesCloud implements LaravelCloudClient
     public function environments(string $applicationId): array
     {
         $this->calls[] = 'environments:' . $applicationId;
+        if ($this->environmentSnapshots !== null) {
+            $index = min($this->environmentRead++, count($this->environmentSnapshots) - 1);
+            return $this->environmentSnapshots[$index];
+        }
         return $this->environments[$applicationId] ?? [];
     }
 
