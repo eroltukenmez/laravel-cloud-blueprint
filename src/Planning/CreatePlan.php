@@ -40,27 +40,47 @@ final readonly class CreatePlan
         if ($managedApplication !== null) {
             $invalid = $this->invalidApplicationOwnership($managedApplication, $state);
             if ($invalid !== null) {
-                return $this->blockedPlan($blueprint, $invalid);
+                return $this->withOwnedOnlyResources(
+                    $this->blockedPlan($blueprint, $invalid),
+                    $blueprint,
+                    $cloud,
+                    $state,
+                    $applications,
+                );
             }
 
             $application = $this->findApplicationById($applications, $managedApplication->remoteId);
             if ($application === null) {
                 $replacement = $this->applicationsNamed($applications, $blueprint->application->name);
-                return $this->blockedPlan(
+                return $this->withOwnedOnlyResources(
+                    $this->blockedPlan(
+                        $blueprint,
+                        $replacement === []
+                            ? 'Managed application remote identity is missing. State must be repaired before reconciliation.'
+                            : 'Managed application remote identity is missing and a same-name unmanaged replacement exists. Import or state repair is required.',
+                    ),
                     $blueprint,
-                    $replacement === []
-                        ? 'Managed application remote identity is missing. State must be repaired before reconciliation.'
-                        : 'Managed application remote identity is missing and a same-name unmanaged replacement exists. Import or state repair is required.',
+                    $cloud,
+                    $state,
+                    $applications,
                 );
             }
             if ($application->name !== $blueprint->application->name) {
-                return $this->blockedPlan(
+                return $this->withOwnedOnlyResources(
+                    $this->blockedPlan(
+                        $blueprint,
+                        'Managed application name differs from its blueprint address. Rename or state-move reconciliation is not supported.',
+                    ),
                     $blueprint,
-                    'Managed application name differs from its blueprint address. Rename or state-move reconciliation is not supported.',
+                    $cloud,
+                    $state,
+                    $applications,
                 );
             }
 
-            return $this->planForApplication($blueprint, $cloud, $state, $applications, $application, true);
+            $desiredPlan = $this->planForApplication($blueprint, $cloud, $state, $applications, $application, true);
+
+            return $this->withOwnedOnlyResources($desiredPlan, $blueprint, $cloud, $state, $applications);
         }
 
         $matches = $this->applicationsNamed($applications, $blueprint->application->name);
@@ -68,10 +88,227 @@ final readonly class CreatePlan
             throw new AmbiguousResourceMatchException('application', $blueprint->application->name);
         }
         if ($matches === []) {
-            return $this->createAllPlan($blueprint);
+            return $this->withOwnedOnlyResources(
+                $this->createAllPlan($blueprint),
+                $blueprint,
+                $cloud,
+                $state,
+                $applications,
+            );
         }
 
-        return $this->planForApplication($blueprint, $cloud, $state, $applications, $matches[0], false);
+        return $this->withOwnedOnlyResources(
+            $this->planForApplication($blueprint, $cloud, $state, $applications, $matches[0], false),
+            $blueprint,
+            $cloud,
+            $state,
+            $applications,
+        );
+    }
+
+    /** @param list<CloudApplication> $applications */
+    private function withOwnedOnlyResources(
+        ExecutionPlan $desiredPlan,
+        Blueprint $blueprint,
+        LaravelCloudClient $cloud,
+        StateDocument $state,
+        array $applications,
+    ): ExecutionPlan {
+        $desiredApplication = (string) new ResourceAddress(
+            ResourceType::APPLICATION,
+            $blueprint->application->name,
+        );
+        $desiredEnvironments = [];
+        foreach ($blueprint->environments as $environment) {
+            $desiredEnvironments[(string) new ResourceAddress(ResourceType::ENVIRONMENT, $environment->name)] = true;
+        }
+
+        $ownedApplications = [];
+        $ownedEnvironments = [];
+        foreach ($state->resources() as $resource) {
+            $address = (string) $resource->address;
+            if ($resource->type === ResourceType::APPLICATION && $address !== $desiredApplication) {
+                $ownedApplications[$address] = $resource;
+            }
+            if ($resource->type === ResourceType::ENVIRONMENT && !isset($desiredEnvironments[$address])) {
+                $ownedEnvironments[$address] = $resource;
+            }
+        }
+        ksort($ownedApplications, SORT_STRING);
+        ksort($ownedEnvironments, SORT_STRING);
+
+        $applicationActions = [];
+        $environmentActions = [];
+        $variableActions = [];
+        foreach ($desiredPlan as $action) {
+            match ($action->resourceType) {
+                ResourceType::APPLICATION => $applicationActions[] = $action,
+                ResourceType::ENVIRONMENT => $environmentActions[] = $action,
+                ResourceType::VARIABLE => $variableActions[] = $action,
+            };
+        }
+
+        foreach ($ownedApplications as $resource) {
+            $applicationActions[] = $this->ownedOnlyApplicationAction($resource, $state, $applications);
+        }
+
+        /** @var array<string, list<CloudEnvironment>> $environmentCache */
+        $environmentCache = [];
+        foreach ($ownedEnvironments as $resource) {
+            $environmentActions[] = $this->ownedOnlyEnvironmentAction(
+                $resource,
+                $state,
+                $cloud,
+                $applications,
+                $environmentCache,
+            );
+        }
+
+        return new ExecutionPlan(...$applicationActions, ...$environmentActions, ...$variableActions);
+    }
+
+    /** @param list<CloudApplication> $applications */
+    private function ownedOnlyApplicationAction(
+        StateResource $resource,
+        StateDocument $state,
+        array $applications,
+    ): PlanAction {
+        if ($resource->parent !== null) {
+            return $this->applicationAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'Owned Application state has an invalid parent relationship and is absent from the blueprint.',
+            );
+        }
+
+        $duplicate = $this->duplicateOwnershipReason($resource, $state);
+        if ($duplicate !== null) {
+            return $this->applicationAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                $duplicate . ' This owned Application is absent from the blueprint.',
+            );
+        }
+
+        if ($this->findApplicationById($applications, $resource->remoteId) !== null) {
+            return $this->applicationAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'This Application is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+            );
+        }
+
+        $replacement = $this->applicationsNamed($applications, $resource->address->name);
+
+        return $this->applicationAction(
+            $resource->address->name,
+            PlanOperation::UNSUPPORTED,
+            $replacement === []
+                ? 'This Application is owned by LCB and absent from the blueprint, but its recorded remote identity is missing. State is retained and automatic removal is not supported.'
+                : 'This Application is owned by LCB and absent from the blueprint. Its recorded remote identity is missing and a same-name unmanaged replacement exists; state is retained and automatic removal is not supported.',
+        );
+    }
+
+    /**
+     * @param list<CloudApplication> $applications
+     * @param array<string, list<CloudEnvironment>> $environmentCache
+     */
+    private function ownedOnlyEnvironmentAction(
+        StateResource $resource,
+        StateDocument $state,
+        LaravelCloudClient $cloud,
+        array $applications,
+        array &$environmentCache,
+    ): PlanAction {
+        $invalid = $this->invalidOwnedOnlyEnvironmentParent($resource, $state);
+        if ($invalid !== null) {
+            return $this->environmentAction($resource->address->name, PlanOperation::UNSUPPORTED, $invalid);
+        }
+
+        $duplicate = $this->duplicateOwnershipReason($resource, $state);
+        if ($duplicate !== null) {
+            return $this->environmentAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                $duplicate . ' This owned Environment is absent from the blueprint.',
+            );
+        }
+
+        $parentAddress = $resource->parent;
+        if ($parentAddress === null) {
+            return $this->environmentAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'Owned Environment state has an invalid parent relationship and is absent from the blueprint.',
+            );
+        }
+        $parent = $state->get($parentAddress);
+        $remoteParent = $this->findApplicationById($applications, $parent->remoteId);
+        if ($remoteParent === null) {
+            return $this->environmentAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'This Environment is owned by LCB and absent from the blueprint, but its recorded parent Application identity is missing. State is retained and automatic removal is not supported.',
+            );
+        }
+
+        $remoteEnvironments = $this->cachedEnvironments($cloud, $remoteParent->id, $environmentCache);
+        if ($this->findEnvironmentById($remoteEnvironments, $resource->remoteId) !== null) {
+            return $this->environmentAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'This Environment is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+            );
+        }
+
+        foreach ($applications as $application) {
+            if ($application->id === $remoteParent->id) {
+                continue;
+            }
+            if ($this->findEnvironmentById(
+                $this->cachedEnvironments($cloud, $application->id, $environmentCache),
+                $resource->remoteId,
+            ) !== null) {
+                return $this->environmentAction(
+                    $resource->address->name,
+                    PlanOperation::UNSUPPORTED,
+                    'This Environment is owned by LCB and absent from the blueprint, but its recorded remote identity belongs to an unexpected Application. Automatic removal is not supported.',
+                );
+            }
+        }
+
+        $replacement = $this->environmentsNamed($remoteEnvironments, $resource->address->name);
+
+        return $this->environmentAction(
+            $resource->address->name,
+            PlanOperation::UNSUPPORTED,
+            $replacement === []
+                ? 'This Environment is owned by LCB and absent from the blueprint, but its recorded remote identity is missing. State is retained and automatic removal is not supported.'
+                : 'This Environment is owned by LCB and absent from the blueprint. Its recorded remote identity is missing and a same-name unmanaged replacement exists; state is retained and automatic removal is not supported.',
+        );
+    }
+
+    private function invalidOwnedOnlyEnvironmentParent(StateResource $resource, StateDocument $state): ?string
+    {
+        if ($resource->parent === null || $resource->parent->type !== ResourceType::APPLICATION) {
+            return 'Owned Environment state has an invalid parent relationship and is absent from the blueprint.';
+        }
+
+        $parent = $state->find($resource->parent);
+        if ($parent === null || $parent->type !== ResourceType::APPLICATION || $parent->parent !== null) {
+            return 'Owned Environment state has an unresolvable parent ownership relationship and is absent from the blueprint.';
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, list<CloudEnvironment>> $cache
+     * @return list<CloudEnvironment>
+     */
+    private function cachedEnvironments(LaravelCloudClient $cloud, string $applicationId, array &$cache): array
+    {
+        return $cache[$applicationId] ??= $cloud->environments($applicationId);
     }
 
     /** @param list<CloudApplication> $applications */

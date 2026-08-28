@@ -341,6 +341,296 @@ final class CreatePlanTest extends TestCase
         self::assertSame([], $state->resources());
     }
 
+    public function testOwnedOnlyApplicationIsVisibleWithoutDeletionSemantics(): void
+    {
+        $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
+        $state = StateDocument::empty()->withOrganization('acme')->withResource(
+            new StateResource($oldApplication, ResourceType::APPLICATION, 'app-old'),
+        );
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [
+                self::remoteApplication(),
+                new CloudApplication('app-old', 'old-api', 'old-api', 'eu-central-1', 'acme/old-api'),
+            ]),
+            $state,
+        );
+
+        $action = self::action($plan, 'application.old-api');
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertSame(
+            'This Application is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+            $action->reason,
+        );
+        self::assertNull($action->remoteId);
+        self::assertSame(1, count($state->resources()));
+    }
+
+    public function testOwnedOnlyApplicationMissingIdentityDiagnosesReplacementWithoutAdoption(): void
+    {
+        $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
+        $state = StateDocument::empty()->withOrganization('acme')->withResource(
+            new StateResource($oldApplication, ResourceType::APPLICATION, 'app-missing'),
+        );
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [
+                self::remoteApplication(),
+                new CloudApplication('app-replacement', 'old-api', 'old-api', 'eu-central-1', 'acme/old-api'),
+            ]),
+            $state,
+        );
+
+        $action = self::action($plan, 'application.old-api');
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertStringContainsString('recorded remote identity is missing', $action->reason);
+        self::assertStringContainsString('same-name unmanaged replacement', $action->reason);
+        self::assertNull($action->remoteId);
+    }
+
+    public function testOwnedOnlyMissingApplicationRetainsStateAndNeverBecomesCreate(): void
+    {
+        $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
+        $state = StateDocument::empty()->withOrganization('acme')->withResource(
+            new StateResource($oldApplication, ResourceType::APPLICATION, 'app-missing'),
+        );
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [self::remoteApplication()]),
+            $state,
+        );
+
+        $action = self::action($plan, 'application.old-api');
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertStringContainsString('recorded remote identity is missing', $action->reason);
+        self::assertSame('app-missing', $state->get($oldApplication)->remoteId);
+    }
+
+    public function testOwnedOnlyEnvironmentUnderDesiredOwnedParentIsVisible(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $state = self::managedState()->withResource(
+            new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application),
+        );
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [
+                    new CloudEnvironment('env-prod', 'app-1', 'production', 'main'),
+                    new CloudEnvironment('env-preview', 'app-1', 'preview', 'feature'),
+                ],
+            ),
+            $state,
+        );
+
+        $action = self::action($plan, 'environment.preview');
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertStringContainsString('owned by LCB', $action->reason);
+        self::assertStringContainsString('absent from the blueprint', $action->reason);
+        self::assertNull($action->remoteId);
+    }
+
+    public function testOwnedOnlyEnvironmentMissingIdentityDiagnosesSameNameReplacement(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $state = self::managedState()->withResource(new StateResource(
+            new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
+            ResourceType::ENVIRONMENT,
+            'env-missing',
+            $application,
+        ));
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [
+                    new CloudEnvironment('env-prod', 'app-1', 'production', 'main'),
+                    new CloudEnvironment('env-replacement', 'app-1', 'preview', 'feature'),
+                ],
+            ),
+            $state,
+        );
+
+        $action = self::action($plan, 'environment.preview');
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertStringContainsString('recorded remote identity is missing', $action->reason);
+        self::assertStringContainsString('same-name unmanaged replacement', $action->reason);
+    }
+
+    public function testOwnedOnlyEnvironmentMissingIdentityRemainsVisible(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $state = self::managedState()->withResource(new StateResource(
+            new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
+            ResourceType::ENVIRONMENT,
+            'env-missing',
+            $application,
+        ));
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [new CloudEnvironment('env-prod', 'app-1', 'production', 'main')],
+            ),
+            $state,
+        );
+
+        $action = self::action($plan, 'environment.preview');
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertStringContainsString('recorded remote identity is missing', $action->reason);
+        self::assertSame('env-missing', $state->get($action->address)->remoteId);
+    }
+
+    public function testOwnedOnlyEnvironmentRemainsVisibleWhenDesiredParentIdentityIsMissing(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $state = self::managedState()->withResource(new StateResource(
+            new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
+            ResourceType::ENVIRONMENT,
+            'env-preview',
+            $application,
+        ));
+        $plan = self::planner()->create(self::blueprint(), new PlanningCloudClient(), $state);
+
+        self::assertSame(
+            PlanOperation::UNSUPPORTED,
+            self::action($plan, 'application.my-api')->operation,
+        );
+        $environment = self::action($plan, 'environment.preview');
+        self::assertSame(PlanOperation::UNSUPPORTED, $environment->operation);
+        self::assertStringContainsString('parent Application identity is missing', $environment->reason);
+    }
+
+    public function testOwnedOnlyEnvironmentWithMissingParentIsVisibleAsStructurallyInvalid(): void
+    {
+        $state = StateDocument::empty()->withOrganization('acme')->withResource(new StateResource(
+            new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
+            ResourceType::ENVIRONMENT,
+            'env-preview',
+            new ResourceAddress(ResourceType::APPLICATION, 'missing'),
+        ));
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [self::remoteApplication()]),
+            $state,
+        );
+
+        $action = self::action($plan, 'environment.preview');
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertSame(
+            'Owned Environment state has an unresolvable parent ownership relationship and is absent from the blueprint.',
+            $action->reason,
+        );
+    }
+
+    public function testRemovedApplicationSubtreeIsParentFirstAndEnvironmentsAreSorted(): void
+    {
+        $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'zeta'),
+                ResourceType::ENVIRONMENT,
+                'env-zeta',
+                $oldApplication,
+            ))
+            ->withResource(new StateResource($oldApplication, ResourceType::APPLICATION, 'app-old'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'alpha'),
+                ResourceType::ENVIRONMENT,
+                'env-alpha',
+                $oldApplication,
+            ));
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [
+                    self::remoteApplication(),
+                    new CloudApplication('app-old', 'old-api', 'old-api', 'eu-central-1', 'acme/old-api'),
+                ],
+                environmentsByApplication: [
+                    'app-old' => [
+                        new CloudEnvironment('env-zeta', 'app-old', 'zeta', 'zeta'),
+                        new CloudEnvironment('env-alpha', 'app-old', 'alpha', 'alpha'),
+                    ],
+                ],
+            ),
+            $state,
+        );
+
+        self::assertSame([
+            'application.my-api',
+            'application.old-api',
+            'environment.production',
+            'environment.staging',
+            'environment.alpha',
+            'environment.zeta',
+        ], self::addresses($plan));
+        self::assertSame(3, $plan->countByOperation(PlanOperation::UNSUPPORTED));
+    }
+
+    public function testAddressChangeDoesNotInferRename(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-production',
+                $application,
+            ));
+        $blueprint = new Blueprint(
+            BlueprintSchemaVersion::V1,
+            'acme',
+            self::blueprint()->application,
+            new EnvironmentDefinitionCollection(
+                new EnvironmentDefinition('prod', 'main', new VariableDefinitionCollection()),
+            ),
+        );
+        $plan = self::planner()->create(
+            $blueprint,
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [new CloudEnvironment('env-production', 'app-1', 'production', 'main')],
+            ),
+            $state,
+        );
+
+        self::assertSame(PlanOperation::CREATE, self::action($plan, 'environment.prod')->operation);
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'environment.production')->operation);
+    }
+
+    public function testOwnedOnlyEnvironmentFoundUnderUnexpectedApplicationIsUnsupported(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $state = self::managedState()->withResource(new StateResource(
+            new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
+            ResourceType::ENVIRONMENT,
+            'env-preview',
+            $application,
+        ));
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [
+                    self::remoteApplication(),
+                    new CloudApplication('app-other', 'other', 'other', 'eu-central-1', 'acme/other'),
+                ],
+                environmentsByApplication: [
+                    'app-1' => [new CloudEnvironment('env-prod', 'app-1', 'production', 'main')],
+                    'app-other' => [new CloudEnvironment('env-preview', 'app-other', 'preview', 'feature')],
+                ],
+            ),
+            $state,
+        );
+
+        $action = self::action($plan, 'environment.preview');
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertStringContainsString('unexpected Application', $action->reason);
+    }
+
     private function planWithApplication(CloudApplication $application): ExecutionPlan
     {
         return self::planner()->create(
@@ -438,6 +728,8 @@ final class PlanningCloudClient implements LaravelCloudClient
         private string $organizationSlug = 'acme',
         private array $applications = [],
         private array $environments = [],
+        /** @var array<string, list<CloudEnvironment>> */
+        private array $environmentsByApplication = [],
     ) {
     }
 
@@ -456,7 +748,7 @@ final class PlanningCloudClient implements LaravelCloudClient
     public function environments(string $applicationId): array
     {
         $this->calls[] = 'environments:' . $applicationId;
-        return $this->environments;
+        return $this->environmentsByApplication[$applicationId] ?? $this->environments;
     }
 
     public function environment(string $environmentId): CloudEnvironmentDetails
