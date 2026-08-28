@@ -206,7 +206,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 ## Known Limitations
 
 - This is early alpha software with a limited mutation model.
-- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references as a read-only foundation only. Plan, apply, import, state, `cloud:inspect`, and `init --from-cloud` do not reconcile or export these Database definitions yet.
+- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references. `lcb plan` compares them with Laravel Cloud read-only: missing, differing, ambiguous, unknown, or attachment-changing resources are reported as unsupported, while exact matches remain unmanaged. Database creation and attachment mutation are not supported, and future mutation requires explicit import/state ownership. Apply, import, state, `cloud:inspect`, and `init --from-cloud` do not mutate, own, or export Database definitions.
 - Environment branch and variable value updates are supported; other updates and renames are not. A variable-key change is not an in-place rename and cannot remove the old remote key.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
@@ -214,7 +214,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 - Managed Applications and Environments removed from the blueprint are reported as unsupported and retained in state; they are not deleted. Rename/state-move semantics are not supported.
 - Removed environment-variable keys are not reported because variables do not yet have state ownership; remote variables remain untouched.
 - DELETE, destroy, drift repair, and remote state are not supported.
-- Databases, caches, storage, domains, and Secrets Manager are not supported.
+- Database mutation and ownership, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.
 - Source-provider metadata may be absent from API responses and require `--provider`.
 - Environment-variable mutation uses Laravel Cloud's `method=set` request mode for both creates and updates.

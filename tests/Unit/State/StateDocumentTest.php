@@ -92,4 +92,15 @@ final class StateDocumentTest extends TestCase
             'env_123',
         );
     }
+
+    public function testPlanningOnlyDatabaseResourceTypesCannotBePersisted(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new StateResource(
+            new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+            ResourceType::DATABASE_CLUSTER,
+            'cluster-1',
+        );
+    }
 }

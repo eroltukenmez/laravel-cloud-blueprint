@@ -16,6 +16,10 @@ final readonly class StateResource
         public string $remoteId,
         public ?ResourceAddress $parent = null,
     ) {
+        if (!in_array($type, [ResourceType::APPLICATION, ResourceType::ENVIRONMENT], true)) {
+            throw new InvalidArgumentException('Only Application and Environment resources may be persisted in state.');
+        }
+
         if ($address->type !== $type) {
             throw new InvalidArgumentException('State resource type must match its address type.');
         }

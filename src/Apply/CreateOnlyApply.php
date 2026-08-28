@@ -57,7 +57,7 @@ final readonly class CreateOnlyApply
             $implicitEnvironments = [];
 
             foreach ($plan as $action) {
-                if ($action->resourceType === ResourceType::VARIABLE) {
+                if ($action->resourceType === ResourceType::VARIABLE || $this->isDatabaseResource($action->resourceType)) {
                     continue;
                 }
 
@@ -299,6 +299,11 @@ final readonly class CreateOnlyApply
         }
 
         foreach ($plan as $action) {
+            if ($this->isDatabaseResource($action->resourceType)
+                && $action->operation !== PlanOperation::NO_CHANGE) {
+                throw new ApplyRefusedException('Database plan actions are read-only. No resources were modified.');
+            }
+
             if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::APPLICATION) {
                 throw new ApplyRefusedException('Application UPDATE apply is not supported. No resources were modified.');
             }
@@ -377,7 +382,7 @@ final readonly class CreateOnlyApply
         }
 
         foreach ($plan as $action) {
-            if ($action->resourceType === ResourceType::VARIABLE) {
+            if ($action->resourceType === ResourceType::VARIABLE || $this->isDatabaseResource($action->resourceType)) {
                 continue;
             }
             $managed = $state->find($action->address);
@@ -474,6 +479,13 @@ final readonly class CreateOnlyApply
         }
 
         return $groups;
+    }
+
+    private function isDatabaseResource(ResourceType $type): bool
+    {
+        return $type === ResourceType::DATABASE_CLUSTER
+            || $type === ResourceType::DATABASE
+            || $type === ResourceType::DATABASE_ATTACHMENT;
     }
 
     /**
