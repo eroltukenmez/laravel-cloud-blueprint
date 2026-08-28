@@ -6,13 +6,19 @@ namespace LaravelCloudBlueprint\Infrastructure\Http;
 
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
-use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseClusterConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariable;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CloudUnknownDatabaseConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
@@ -31,7 +37,7 @@ use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
-final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
+final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseClient
 {
     private const string BASE_URL = 'https://cloud.laravel.com/api';
     private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.4';
@@ -83,7 +89,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
     public function environments(string $applicationId): array
     {
         $environments = [];
-        $initialPath = sprintf('/applications/%s/environments?include=branch', rawurlencode($applicationId));
+        $initialPath = sprintf('/applications/%s/environments?include=branch,database', rawurlencode($applicationId));
 
         foreach ($this->pages($initialPath) as [$document, $path]) {
             foreach ($this->listAt($document, 'data', $path) as $resource) {
@@ -95,6 +101,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
                     $applicationId,
                     $this->requiredString($attributes, 'name', $path),
                     $this->branch($resource, $document, $path),
+                    $this->databaseRelationshipId($resource, $path),
                 );
             }
         }
@@ -104,7 +111,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
 
     public function environment(string $environmentId): CloudEnvironmentDetails
     {
-        $path = sprintf('/environments/%s', rawurlencode($environmentId));
+        $path = sprintf('/environments/%s?include=database', rawurlencode($environmentId));
         $document = $this->get($path);
         $resource = $this->mappingAt($document, 'data', $path);
         $id = $this->requiredString($resource, 'id', $path);
@@ -117,7 +124,77 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
             $id,
             $this->requiredString($attributes, 'name', $path),
             $this->environmentVariables($attributes, $path),
+            $this->databaseRelationshipId($resource, $path),
         );
+    }
+
+    public function databaseClusters(): array
+    {
+        $clusters = [];
+        $seen = [];
+
+        foreach ($this->pages('/databases/clusters') as [$document, $path]) {
+            foreach ($this->listAt($document, 'data', $path) as $value) {
+                $cluster = $this->databaseClusterFromResource($this->valueAsMapping($value, $path), $path);
+                if (isset($seen[$cluster->id])) {
+                    throw $this->malformed($path, 'Database Cluster response contains duplicate IDs.');
+                }
+                $seen[$cluster->id] = true;
+                $clusters[] = $cluster;
+            }
+        }
+
+        usort($clusters, static fn (CloudDatabaseCluster $left, CloudDatabaseCluster $right): int => $left->id <=> $right->id);
+        return $clusters;
+    }
+
+    public function databaseCluster(string $clusterId): CloudDatabaseCluster
+    {
+        $path = sprintf('/databases/clusters/%s', rawurlencode($clusterId));
+        $resource = $this->mappingAt($this->get($path), 'data', $path);
+        $cluster = $this->databaseClusterFromResource($resource, $path);
+        if ($cluster->id !== $clusterId) {
+            throw $this->malformed($path, 'Database Cluster response identity does not match the requested Cluster.');
+        }
+
+        return $cluster;
+    }
+
+    public function databases(string $clusterId): array
+    {
+        $databases = [];
+        $seen = [];
+        $initialPath = sprintf('/databases/clusters/%s/databases', rawurlencode($clusterId));
+
+        foreach ($this->pages($initialPath) as [$document, $path]) {
+            foreach ($this->listAt($document, 'data', $path) as $value) {
+                $database = $this->databaseFromResource($this->valueAsMapping($value, $path), $clusterId, $path);
+                if (isset($seen[$database->id])) {
+                    throw $this->malformed($path, 'Logical Database response contains duplicate IDs.');
+                }
+                $seen[$database->id] = true;
+                $databases[] = $database;
+            }
+        }
+
+        usort($databases, static fn (CloudDatabase $left, CloudDatabase $right): int => $left->id <=> $right->id);
+        return $databases;
+    }
+
+    public function database(string $clusterId, string $databaseId): CloudDatabase
+    {
+        $path = sprintf(
+            '/databases/clusters/%s/databases/%s',
+            rawurlencode($clusterId),
+            rawurlencode($databaseId),
+        );
+        $resource = $this->mappingAt($this->get($path), 'data', $path);
+        $database = $this->databaseFromResource($resource, $clusterId, $path);
+        if ($database->id !== $databaseId) {
+            throw $this->malformed($path, 'Logical Database response identity does not match the requested Database.');
+        }
+
+        return $database;
     }
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication
@@ -526,6 +603,85 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
         return null;
     }
 
+    /** @param array<string, mixed> $resource */
+    private function databaseClusterFromResource(array $resource, string $path): CloudDatabaseCluster
+    {
+        $attributes = $this->mappingAt($resource, 'attributes', $path);
+        $type = $this->requiredNonEmptyString($attributes, 'type', $path);
+
+        return new CloudDatabaseCluster(
+            $this->requiredNonEmptyString($resource, 'id', $path),
+            $this->requiredNonEmptyString($attributes, 'name', $path),
+            $type,
+            $this->requiredNonEmptyString($attributes, 'status', $path),
+            $this->requiredNonEmptyString($attributes, 'region', $path),
+            $this->databaseConfiguration($type, $attributes, $path),
+        );
+    }
+
+    /** @param array<string, mixed> $attributes */
+    private function databaseConfiguration(
+        string $type,
+        array $attributes,
+        string $path,
+    ): CloudDatabaseClusterConfiguration {
+        if (!in_array($type, ['laravel_mysql_8', 'neon_serverless_postgres_18', 'neon_serverless_postgres_17'], true)) {
+            return new CloudUnknownDatabaseConfiguration();
+        }
+
+        $config = $this->mappingAt($attributes, 'config', $path);
+        if ($type === 'laravel_mysql_8') {
+            return new CloudLaravelMySqlConfiguration(
+                $this->requiredNonEmptyString($config, 'size', $path),
+                $this->requiredInteger($config, 'storage', $path),
+                $this->requiredInteger($config, 'retention_days', $path),
+                $this->requiredBoolean($config, 'uses_scheduled_snapshots', $path),
+                $this->requiredBoolean($config, 'is_public', $path),
+            );
+        }
+
+        return new CloudNeonPostgresConfiguration(
+            $this->requiredNumber($config, 'cu_min', $path),
+            $this->requiredNumber($config, 'cu_max', $path),
+            $this->requiredInteger($config, 'suspend_seconds', $path),
+            $this->requiredInteger($config, 'retention_days', $path),
+        );
+    }
+
+    /** @param array<string, mixed> $resource */
+    private function databaseFromResource(array $resource, string $clusterId, string $path): CloudDatabase
+    {
+        return new CloudDatabase(
+            $this->requiredNonEmptyString($resource, 'id', $path),
+            $clusterId,
+            $this->requiredNonEmptyString($this->mappingAt($resource, 'attributes', $path), 'name', $path),
+        );
+    }
+
+    /** @param array<string, mixed> $resource */
+    private function databaseRelationshipId(array $resource, string $path): ?string
+    {
+        $relationships = $this->optionalMapping($resource, 'relationships', $path);
+        if ($relationships === null || !array_key_exists('database', $relationships)) {
+            return null;
+        }
+
+        $relationship = $this->valueAsMapping($relationships['database'], $path);
+        if (!array_key_exists('data', $relationship)) {
+            throw $this->malformed($path, 'Database relationship is missing "data".');
+        }
+        if ($relationship['data'] === null) {
+            return null;
+        }
+
+        $identifier = $this->valueAsMapping($relationship['data'], $path);
+        if ($this->requiredNonEmptyString($identifier, 'type', $path) !== 'databaseSchemas') {
+            throw $this->malformed($path, 'Database relationship type must be "databaseSchemas".');
+        }
+
+        return $this->requiredNonEmptyString($identifier, 'id', $path);
+    }
+
     /**
      * @param array<string, mixed> $resource
      * @param array<string, mixed> $document
@@ -651,6 +807,47 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudClient
     {
         if (!array_key_exists($key, $data) || !is_string($data[$key])) {
             throw $this->malformed($path, sprintf('Required response field "%s" must be a string.', $key));
+        }
+
+        return $data[$key];
+    }
+
+    /** @param array<string, mixed> $data */
+    private function requiredNonEmptyString(array $data, string $key, string $path): string
+    {
+        $value = $this->requiredString($data, $key, $path);
+        if (trim($value) === '') {
+            throw $this->malformed($path, sprintf('Required response field "%s" must not be empty.', $key));
+        }
+
+        return $value;
+    }
+
+    /** @param array<string, mixed> $data */
+    private function requiredInteger(array $data, string $key, string $path): int
+    {
+        if (!array_key_exists($key, $data) || !is_int($data[$key])) {
+            throw $this->malformed($path, sprintf('Required response field "%s" must be an integer.', $key));
+        }
+
+        return $data[$key];
+    }
+
+    /** @param array<string, mixed> $data */
+    private function requiredNumber(array $data, string $key, string $path): float
+    {
+        if (!array_key_exists($key, $data) || (!is_int($data[$key]) && !is_float($data[$key]))) {
+            throw $this->malformed($path, sprintf('Required response field "%s" must be a number.', $key));
+        }
+
+        return (float) $data[$key];
+    }
+
+    /** @param array<string, mixed> $data */
+    private function requiredBoolean(array $data, string $key, string $path): bool
+    {
+        if (!array_key_exists($key, $data) || !is_bool($data[$key])) {
+            throw $this->malformed($path, sprintf('Required response field "%s" must be a boolean.', $key));
         }
 
         return $data[$key];
