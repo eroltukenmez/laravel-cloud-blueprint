@@ -6,9 +6,12 @@ namespace LaravelCloudBlueprint\Console;
 
 use LaravelCloudBlueprint\Application\BlueprintLoader;
 use LaravelCloudBlueprint\Application\CloudBlueprintExporter;
+use LaravelCloudBlueprint\Application\Import\CreateImportProposal;
+use LaravelCloudBlueprint\Application\Import\ImportResources;
 use LaravelCloudBlueprint\Blueprint\Normalization\BlueprintNormalizer;
 use LaravelCloudBlueprint\Blueprint\Validation\BlueprintValidator;
 use LaravelCloudBlueprint\Console\Command\InitCommand;
+use LaravelCloudBlueprint\Console\Command\ImportCommand;
 use LaravelCloudBlueprint\Console\Command\CloudInspectCommand;
 use LaravelCloudBlueprint\Console\Command\PlanCommand;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
@@ -69,6 +72,14 @@ final class LcbApplication extends Application
             new SymfonyLaravelCloudClientFactory(),
             $planner,
             new CreateOnlyApply($variableValues),
+            new LocalFileStateStore(),
+        ));
+        $this->add(new ImportCommand(
+            $files,
+            $loader,
+            new LcbTokenProvider(),
+            new SymfonyLaravelCloudClientFactory(),
+            new ImportResources(new CreateImportProposal()),
             new LocalFileStateStore(),
         ));
     }

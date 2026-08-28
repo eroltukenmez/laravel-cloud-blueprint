@@ -4,6 +4,10 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+### Added
+
+- Explicit, confirmation-gated `lcb import` support for atomically adopting existing Application and Environment identities into local state without modifying Laravel Cloud resources.
+
 ## [0.1.0-alpha.3] - 2026-08-25
 
 ### Added
