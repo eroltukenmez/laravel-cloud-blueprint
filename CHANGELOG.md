@@ -6,6 +6,8 @@ This project uses a Keep a Changelog-inspired format.
 
 ### Changed
 
+- Blueprint schema v1 now accepts typed top-level Laravel MySQL and Neon Serverless Postgres Cluster definitions, logical Databases, and optional Environment Database references as a read-only foundation for future reconciliation.
+- Database configuration validation is provider-specific and rejects unknown, incompatible, RDS, connection, and credential properties.
 - Planning now resolves state-managed Application and Environment resources by their stored remote IDs before name-based discovery.
 - Matching unmanaged Environments require explicit import before branch reconciliation, while genuinely missing resources remain eligible for creation.
 - Planning now considers desired resources together with state-owned Applications and Environments, reporting owned resources absent from the blueprint as unsupported without deleting them or removing state ownership.

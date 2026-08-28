@@ -10,6 +10,7 @@ final readonly class EnvironmentDefinition
         public string $name,
         public string $branch,
         public VariableDefinitionCollection $variables,
+        public ?DatabaseReference $database = null,
     ) {
     }
 }

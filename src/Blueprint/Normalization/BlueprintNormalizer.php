@@ -7,10 +7,19 @@ namespace LaravelCloudBlueprint\Blueprint\Normalization;
 use LaravelCloudBlueprint\Blueprint\ApplicationDefinition;
 use LaravelCloudBlueprint\Blueprint\Blueprint;
 use LaravelCloudBlueprint\Blueprint\BlueprintSchemaVersion;
+use LaravelCloudBlueprint\Blueprint\DatabaseClusterConfiguration;
+use LaravelCloudBlueprint\Blueprint\DatabaseClusterDefinition;
+use LaravelCloudBlueprint\Blueprint\DatabaseClusterDefinitionCollection;
+use LaravelCloudBlueprint\Blueprint\DatabaseClusterType;
+use LaravelCloudBlueprint\Blueprint\DatabaseReference;
 use LaravelCloudBlueprint\Blueprint\EnvironmentDefinition;
 use LaravelCloudBlueprint\Blueprint\EnvironmentDefinitionCollection;
 use LaravelCloudBlueprint\Blueprint\EnvironmentVariableReference;
 use LaravelCloudBlueprint\Blueprint\LiteralVariableValue;
+use LaravelCloudBlueprint\Blueprint\LaravelMySqlConfiguration;
+use LaravelCloudBlueprint\Blueprint\LogicalDatabaseDefinition;
+use LaravelCloudBlueprint\Blueprint\LogicalDatabaseDefinitionCollection;
+use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Blueprint\SourceDefinition;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Blueprint\VariableDefinition;
@@ -37,6 +46,7 @@ final readonly class BlueprintNormalizer
                 ),
             ),
             $this->environments($data),
+            $this->databaseClusters($data),
         );
     }
 
@@ -74,10 +84,93 @@ final readonly class BlueprintNormalizer
                 $name,
                 $this->string($environment, 'branch', $path . '.branch'),
                 $this->variables($environment, $path),
+                $this->databaseReference($environment, $path),
             );
         }
 
         return new EnvironmentDefinitionCollection(...$normalized);
+    }
+
+    /** @param array<string, mixed> $data */
+    private function databaseClusters(array $data): DatabaseClusterDefinitionCollection
+    {
+        if (!array_key_exists('database_clusters', $data)) {
+            return new DatabaseClusterDefinitionCollection();
+        }
+
+        $clusters = [];
+        foreach ($this->mapping($data, 'database_clusters') as $name => $clusterValue) {
+            $path = 'database_clusters.' . $name;
+            $cluster = $this->valueAsMapping($clusterValue, $path);
+            $typeValue = $this->string($cluster, 'type', $path . '.type');
+            $type = DatabaseClusterType::tryFrom($typeValue)
+                ?? throw new BlueprintNormalizationException($path . '.type', 'Unsupported Database Cluster type.');
+
+            $clusters[] = new DatabaseClusterDefinition(
+                $name,
+                $type,
+                $this->string($cluster, 'region', $path . '.region'),
+                $this->databaseConfiguration($type, $this->mapping($cluster, 'config', $path . '.config'), $path),
+                $this->logicalDatabases($cluster, $path),
+            );
+        }
+
+        return new DatabaseClusterDefinitionCollection(...$clusters);
+    }
+
+    /** @param array<string, mixed> $config */
+    private function databaseConfiguration(
+        DatabaseClusterType $type,
+        array $config,
+        string $clusterPath,
+    ): DatabaseClusterConfiguration {
+        $path = $clusterPath . '.config';
+        if ($type === DatabaseClusterType::LARAVEL_MYSQL_8) {
+            return new LaravelMySqlConfiguration(
+                $this->string($config, 'size', $path . '.size'),
+                $this->integerAt($config, 'storage', $path . '.storage'),
+                $this->integerAt($config, 'retention_days', $path . '.retention_days'),
+                $this->boolean($config, 'uses_scheduled_snapshots', $path . '.uses_scheduled_snapshots'),
+                $this->boolean($config, 'is_public', $path . '.is_public'),
+            );
+        }
+
+        return new NeonPostgresConfiguration(
+            $this->number($config, 'cu_min', $path . '.cu_min'),
+            $this->number($config, 'cu_max', $path . '.cu_max'),
+            $this->integerAt($config, 'suspend_seconds', $path . '.suspend_seconds'),
+            $this->integerAt($config, 'retention_days', $path . '.retention_days'),
+        );
+    }
+
+    /** @param array<string, mixed> $cluster */
+    private function logicalDatabases(array $cluster, string $clusterPath): LogicalDatabaseDefinitionCollection
+    {
+        $databases = [];
+        foreach ($this->mapping($cluster, 'databases', $clusterPath . '.databases') as $name => $definition) {
+            $this->valueAsMapping($definition, $clusterPath . '.databases.' . $name);
+            $databases[] = new LogicalDatabaseDefinition($name);
+        }
+
+        return new LogicalDatabaseDefinitionCollection(...$databases);
+    }
+
+    /** @param array<string, mixed> $environment */
+    private function databaseReference(array $environment, string $environmentPath): ?DatabaseReference
+    {
+        if (!array_key_exists('database', $environment)) {
+            return null;
+        }
+
+        $reference = $this->string($environment, 'database', $environmentPath . '.database');
+        try {
+            return DatabaseReference::fromString($reference);
+        } catch (\InvalidArgumentException) {
+            throw new BlueprintNormalizationException(
+                $environmentPath . '.database',
+                'Database reference must use <cluster>.<database>.',
+            );
+        }
     }
 
     /** @param array<string, mixed> $environment */
@@ -180,6 +273,36 @@ final readonly class BlueprintNormalizer
     {
         if (!array_key_exists($key, $data) || !is_int($data[$key])) {
             throw new BlueprintNormalizationException($key, 'Expected an integer.');
+        }
+
+        return $data[$key];
+    }
+
+    /** @param array<string, mixed> $data */
+    private function integerAt(array $data, string $key, string $path): int
+    {
+        if (!array_key_exists($key, $data) || !is_int($data[$key])) {
+            throw new BlueprintNormalizationException($path, 'Expected an integer.');
+        }
+
+        return $data[$key];
+    }
+
+    /** @param array<string, mixed> $data */
+    private function number(array $data, string $key, string $path): float
+    {
+        if (!array_key_exists($key, $data) || (!is_int($data[$key]) && !is_float($data[$key]))) {
+            throw new BlueprintNormalizationException($path, 'Expected a number.');
+        }
+
+        return (float) $data[$key];
+    }
+
+    /** @param array<string, mixed> $data */
+    private function boolean(array $data, string $key, string $path): bool
+    {
+        if (!array_key_exists($key, $data) || !is_bool($data[$key])) {
+            throw new BlueprintNormalizationException($path, 'Expected a boolean.');
         }
 
         return $data[$key];

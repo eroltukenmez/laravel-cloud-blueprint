@@ -206,6 +206,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 ## Known Limitations
 
 - This is early alpha software with a limited mutation model.
+- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references as a read-only foundation only. Plan, apply, import, state, `cloud:inspect`, and `init --from-cloud` do not reconcile or export these Database definitions yet.
 - Environment branch and variable value updates are supported; other updates and renames are not. A variable-key change is not an in-place rename and cannot remove the old remote key.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
