@@ -251,6 +251,33 @@ final class ApplyCommandTest extends TestCase
         }
     }
 
+    public function testJsonEncodingFailureProducesSafeValidJson(): void
+    {
+        $validation = new CloudValidationException(
+            "invalid-\xB1",
+            [],
+            'POST',
+            '/environments/env-created/variables',
+            422,
+        );
+        [$tester] = $this->tester(
+            ApplyCommandCloudClient::withVariableValidationFailure($validation),
+            self::blueprintWithVariables(),
+        );
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute([
+            '--auto-approve' => true,
+            '--json' => true,
+        ]));
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('error', $decoded['status']);
+        self::assertSame('Unable to encode command output as JSON.', $decoded['message']);
+        self::assertStringNotContainsString('<error>', $tester->getDisplay());
+        self::assertStringNotContainsString('literal-secret-value', $tester->getDisplay());
+        self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
+    }
+
     /** @return array{CommandTester, ApplyCommandCloudClient, ApplyCommandStateStore} */
     private function tester(
         ?ApplyCommandCloudClient $cloud = null,

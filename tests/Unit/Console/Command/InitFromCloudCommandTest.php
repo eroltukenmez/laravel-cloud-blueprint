@@ -87,6 +87,10 @@ final class InitFromCloudCommandTest extends TestCase
         self::assertStringNotContainsString('secret', $yaml);
         self::assertFileDoesNotExist($this->directory . '/.lcb/state.json');
         self::assertSame(0, $cloud->mutationCalls);
+        self::assertStringContainsString('Next: review the generated blueprint', $tester->getDisplay());
+        self::assertStringContainsString('lcb import --file=', $tester->getDisplay());
+        self::assertStringContainsString('lcb plan --file=', $tester->getDisplay());
+        self::assertStringNotContainsString('before applying', $tester->getDisplay());
     }
 
     public function testMultipleApplicationsRequireSelectionWhenNonInteractive(): void

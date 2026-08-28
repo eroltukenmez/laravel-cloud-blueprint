@@ -188,6 +188,24 @@ final class ImportCommandTest extends TestCase
         self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
     }
 
+    public function testJsonEncodingFailureProducesSafeValidJson(): void
+    {
+        [$tester, , $states] = self::tester(cloud: new ImportCommandCloud(remoteId: "invalid-\xB1"));
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute([
+            '--json' => true,
+            '--auto-approve' => true,
+        ]));
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('error', $decoded['status']);
+        self::assertSame('Unable to encode command output as JSON.', $decoded['message']);
+        self::assertStringNotContainsString('<error>', $tester->getDisplay());
+        self::assertStringNotContainsString('literal-secret-value', $tester->getDisplay());
+        self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
+        self::assertSame(1, $states->saveCount);
+    }
+
     public function testNonInteractiveRequiresAutoApproveWhenImportable(): void
     {
         [$tester, , $states] = self::tester();
@@ -302,7 +320,7 @@ final class ImportCommandCloud implements LaravelCloudClient
     public int $environmentReads = 0;
     public int $mutationCount = 0;
 
-    public function __construct(private bool $matching = true)
+    public function __construct(private bool $matching = true, private string $remoteId = 'app-secret-id')
     {
     }
 
@@ -315,14 +333,14 @@ final class ImportCommandCloud implements LaravelCloudClient
     {
         ++$this->applicationReads;
         return $this->matching
-            ? [new CloudApplication('app-secret-id', 'my-api', 'my-api', 'remote-region', 'other/repository')]
+            ? [new CloudApplication($this->remoteId, 'my-api', 'my-api', 'remote-region', 'other/repository')]
             : [];
     }
 
     public function environments(string $applicationId): array
     {
         ++$this->environmentReads;
-        return [new CloudEnvironment('env-secret-id', 'app-secret-id', 'production', 'main')];
+        return [new CloudEnvironment('env-secret-id', $this->remoteId, 'production', 'main')];
     }
 
     public function environment(string $environmentId): CloudEnvironmentDetails

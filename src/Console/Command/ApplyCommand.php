@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Console\Command;
 
-use JsonException;
 use LaravelCloudBlueprint\Application\BlueprintLoader;
 use LaravelCloudBlueprint\Application\File\FileOperationException;
 use LaravelCloudBlueprint\Application\File\FileReader;
@@ -20,6 +19,7 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Console\JsonOutput;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
@@ -37,9 +37,11 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Question\ConfirmationQuestion;
 
-#[AsCommand(name: 'apply', description: 'Apply supported Laravel Cloud changes.')]
+#[AsCommand(name: 'apply', description: 'Apply supported changes; may modify Laravel Cloud resources.')]
 final class ApplyCommand extends Command
 {
+    private readonly JsonOutput $jsonOutput;
+
     public function __construct(
         private readonly FileReader $files,
         private readonly BlueprintLoader $blueprints,
@@ -48,7 +50,9 @@ final class ApplyCommand extends Command
         private readonly CreatePlan $planner,
         private readonly CreateOnlyApply $apply,
         private readonly StateStore $states,
+        ?JsonOutput $jsonOutput = null,
     ) {
+        $this->jsonOutput = $jsonOutput ?? new JsonOutput();
         parent::__construct();
     }
 
@@ -57,7 +61,7 @@ final class ApplyCommand extends Command
         $this
             ->addOption('file', null, InputOption::VALUE_REQUIRED, 'Blueprint file path.', InitCommand::DEFAULT_FILE)
             ->addOption('auto-approve', null, InputOption::VALUE_NONE, 'Apply without confirmation.')
-            ->addOption('non-interactive', null, InputOption::VALUE_NONE, 'Disable interactive approval.')
+            ->addOption('non-interactive', null, InputOption::VALUE_NONE, 'Disable prompting; changes still require --auto-approve.')
             ->addOption('json', null, InputOption::VALUE_NONE, 'Output structured JSON.');
     }
 
@@ -281,12 +285,9 @@ final class ApplyCommand extends Command
     /** @param array<string, mixed> $data */
     private function json(array $data, OutputInterface $output): int
     {
-        try {
-            $output->writeln(json_encode($data, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            return ExitCode::SUCCESS->value;
-        } catch (JsonException) {
-            return $this->error($output, 'Unable to encode apply output.', ExitCode::GENERAL_ERROR);
-        }
+        return $this->jsonOutput->write($data, $output)
+            ? ExitCode::SUCCESS->value
+            : ExitCode::GENERAL_ERROR->value;
     }
 
     private function validationJson(\LaravelCloudBlueprint\Blueprint\Validation\ValidationResult $validation, OutputInterface $output): int

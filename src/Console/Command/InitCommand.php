@@ -47,10 +47,10 @@ final class InitCommand extends Command
         $this
             ->addOption('file', null, InputOption::VALUE_REQUIRED, 'Blueprint file path.', self::DEFAULT_FILE)
             ->addOption('force', null, InputOption::VALUE_NONE, 'Overwrite an existing blueprint file.')
-            ->addOption('from-cloud', null, InputOption::VALUE_NONE, 'Generate from an existing Laravel Cloud application.')
+            ->addOption('from-cloud', null, InputOption::VALUE_NONE, 'Read Laravel Cloud and generate a blueprint without writing local state.')
             ->addOption('application', null, InputOption::VALUE_REQUIRED, 'Exact application name or slug.')
             ->addOption('provider', null, InputOption::VALUE_REQUIRED, 'Source provider when unavailable from Laravel Cloud.')
-            ->addOption('non-interactive', null, InputOption::VALUE_NONE, 'Disable interactive application selection.');
+            ->addOption('non-interactive', null, InputOption::VALUE_NONE, 'Disable application selection prompts; use --application when ambiguous.');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -114,7 +114,9 @@ final class InitCommand extends Command
         $output->writeln('Not exported: Environment variables, Secrets, Databases, Caches, Other unsupported resources');
         $output->writeln('No resources were imported into LCB state.');
         $output->writeln(sprintf('<info>Created blueprint file "%s".</info>', $path));
-        $output->writeln('Review the generated blueprint before applying.');
+        $output->writeln('Next: review the generated blueprint, then run:');
+        $output->writeln('  lcb import --file=' . escapeshellarg($path));
+        $output->writeln('  lcb plan --file=' . escapeshellarg($path));
 
         return ExitCode::SUCCESS->value;
     }
@@ -129,6 +131,9 @@ final class InitCommand extends Command
         }
 
         $output->writeln(sprintf('<info>Created blueprint file "%s".</info>', $path));
+        $output->writeln('Next: review or edit the blueprint, then run:');
+        $output->writeln('  lcb validate --file=' . escapeshellarg($path));
+        $output->writeln('  lcb plan --file=' . escapeshellarg($path));
 
         return ExitCode::SUCCESS->value;
     }
