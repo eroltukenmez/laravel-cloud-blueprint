@@ -4,24 +4,28 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Console\Command;
 
-use JsonException;
 use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Console\JsonOutput;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
-#[AsCommand(name: 'cloud:inspect', description: 'Inspect Laravel Cloud resources without making changes.')]
+#[AsCommand(name: 'cloud:inspect', description: 'Discover Laravel Cloud resources using read-only requests.')]
 final class CloudInspectCommand extends Command
 {
+    private readonly JsonOutput $json;
+
     public function __construct(
         private readonly CloudTokenProvider $tokens,
         private readonly LaravelCloudClientFactory $clients,
+        ?JsonOutput $json = null,
     ) {
+        $this->json = $json ?? new JsonOutput();
         parent::__construct();
     }
 
@@ -32,11 +36,11 @@ final class CloudInspectCommand extends Command
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        $json = $input->getOption('json') === true;
         $token = $this->tokens->token();
 
         if ($token === null) {
-            $output->writeln('<error>LCB_TOKEN is not set.</error>');
-            return ExitCode::GENERAL_ERROR->value;
+            return $this->error($output, 'LCB_TOKEN is not set.', $json);
         }
 
         try {
@@ -49,13 +53,11 @@ final class CloudInspectCommand extends Command
                 $applications[] = [$application, $environments];
             }
         } catch (CloudException $exception) {
-            $output->writeln(sprintf('<error>%s</error>', $exception->getMessage()));
-            return ExitCode::GENERAL_ERROR->value;
+            return $this->error($output, $exception->getMessage(), $json);
         }
 
-        if ($input->getOption('json') === true) {
-            try {
-                $output->writeln(json_encode([
+        if ($json) {
+            return $this->json->write([
                     'organization' => [
                         'id' => $organization->id,
                         'name' => $organization->name,
@@ -79,13 +81,9 @@ final class CloudInspectCommand extends Command
                         ],
                         $applications,
                     ),
-                ], JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-            } catch (JsonException) {
-                $output->writeln('<error>Unable to encode Laravel Cloud inspection output.</error>');
-                return ExitCode::GENERAL_ERROR->value;
-            }
-
-            return ExitCode::SUCCESS->value;
+                ], $output)
+                ? ExitCode::SUCCESS->value
+                : ExitCode::GENERAL_ERROR->value;
         }
 
         $output->writeln('Organization:');
@@ -101,5 +99,16 @@ final class CloudInspectCommand extends Command
         }
 
         return ExitCode::SUCCESS->value;
+    }
+
+    private function error(OutputInterface $output, string $message, bool $json): int
+    {
+        if ($json) {
+            $this->json->write(['status' => 'error', 'message' => $message], $output);
+        } else {
+            $output->writeln(sprintf('<error>%s</error>', $message));
+        }
+
+        return ExitCode::GENERAL_ERROR->value;
     }
 }

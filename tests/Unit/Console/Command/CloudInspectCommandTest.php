@@ -15,6 +15,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
+use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LogicException;
 use LaravelCloudBlueprint\Console\Command\CloudInspectCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
@@ -63,12 +64,49 @@ final class CloudInspectCommandTest extends TestCase
         self::assertSame('production', $decoded['applications'][0]['environments'][0]['name']);
     }
 
+    public function testJsonErrorsRemainStructuredForMissingTokenAndCloudFailure(): void
+    {
+        $missing = new CommandTester(new CloudInspectCommand(
+            new FakeCloudTokenProvider(null),
+            new FakeLaravelCloudClientFactory(new FakeLaravelCloudClient()),
+        ));
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $missing->execute(['--json' => true]));
+        self::assertJsonError($missing, 'LCB_TOKEN is not set.');
+
+        $cloud = $this->tester(new ThrowingInspectCloudClient());
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $cloud->execute(['--json' => true]));
+        self::assertJsonError($cloud, 'Laravel Cloud is unavailable.');
+
+        foreach ([$missing, $cloud] as $tester) {
+            self::assertStringNotContainsString('<error>', $tester->getDisplay());
+            self::assertStringNotContainsString('test-token', $tester->getDisplay());
+        }
+    }
+
+    public function testJsonEncodingFailureProducesSafeValidJson(): void
+    {
+        $tester = $this->tester(new InvalidUtf8InspectCloudClient());
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
+        self::assertJsonError($tester, 'Unable to encode command output as JSON.');
+        self::assertStringNotContainsString('<error>', $tester->getDisplay());
+    }
+
     private function tester(FakeLaravelCloudClient $client): CommandTester
     {
         return new CommandTester(new CloudInspectCommand(
             new FakeCloudTokenProvider(new CloudApiToken('test-token')),
             new FakeLaravelCloudClientFactory($client),
         ));
+    }
+
+    private static function assertJsonError(CommandTester $tester, string $message): void
+    {
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('error', $decoded['status']);
+        self::assertIsString($decoded['message']);
+        self::assertStringContainsString($message, $decoded['message']);
     }
 }
 
@@ -96,7 +134,7 @@ final readonly class FakeLaravelCloudClientFactory implements LaravelCloudClient
     }
 }
 
-final class FakeLaravelCloudClient implements LaravelCloudClient
+class FakeLaravelCloudClient implements LaravelCloudClient
 {
     public function updateEnvironment(string $environmentId, \LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest $request): \LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment
     {
@@ -144,5 +182,21 @@ final class FakeLaravelCloudClient implements LaravelCloudClient
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
     {
         throw new LogicException('Read-only fake must not set environment variables.');
+    }
+}
+
+final class ThrowingInspectCloudClient extends FakeLaravelCloudClient
+{
+    public function organization(): CloudOrganization
+    {
+        throw new CloudApiException('Laravel Cloud is unavailable.', 'GET', '/meta/organization', 500);
+    }
+}
+
+final class InvalidUtf8InspectCloudClient extends FakeLaravelCloudClient
+{
+    public function organization(): CloudOrganization
+    {
+        return new CloudOrganization('org-1', "invalid-\xB1", 'acme');
     }
 }

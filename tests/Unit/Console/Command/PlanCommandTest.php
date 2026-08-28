@@ -107,6 +107,46 @@ final class PlanCommandTest extends TestCase
         self::assertStringContainsString('LCB_TOKEN is not set.', $tester->getDisplay());
     }
 
+    public function testJsonErrorsRemainStructuredForMissingBlueprintTokenValidationAndCloudFailure(): void
+    {
+        $missing = $this->tester(self::validBlueprint(), fileExists: false);
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $missing->execute(['--json' => true]));
+        self::assertJsonError($missing, 'does not exist');
+
+        $token = $this->tester(self::validBlueprint(), null);
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $token->execute(['--json' => true]));
+        self::assertJsonError($token, 'LCB_TOKEN is not set.');
+
+        $validation = $this->tester("version: 1\n", null);
+        self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $validation->execute(['--json' => true]));
+        $validationJson = json_decode($validation->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($validationJson);
+        self::assertSame('validation_failed', $validationJson['status']);
+        self::assertIsArray($validationJson['errors']);
+
+        $malformed = $this->tester("application:\n  name: example\n invalid: indentation\n", null);
+        self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $malformed->execute(['--json' => true]));
+        self::assertJsonError($malformed, 'Blueprint YAML could not be decoded.');
+
+        $cloud = $this->tester(self::validBlueprint(), cloud: new PlanThrowingCloudClient());
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $cloud->execute(['--json' => true]));
+        self::assertJsonError($cloud, 'Laravel Cloud is unavailable.');
+
+        foreach ([$missing, $token, $validation, $malformed, $cloud] as $tester) {
+            self::assertStringNotContainsString('<error>', $tester->getDisplay());
+            self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
+        }
+    }
+
+    public function testJsonEncodingFailureProducesSafeValidJson(): void
+    {
+        $tester = $this->tester(self::validBlueprint(), cloud: new PlanInvalidUtf8CloudClient());
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
+        self::assertJsonError($tester, 'Unable to encode command output as JSON.');
+        self::assertStringNotContainsString('<error>', $tester->getDisplay());
+    }
+
     public function testInvalidBlueprintReturnsBlueprintErrorBeforeTokenLookup(): void
     {
         $tester = $this->tester("version: 1\n", null);
@@ -152,14 +192,24 @@ final class PlanCommandTest extends TestCase
         string $blueprint,
         ?CloudApiToken $token = new CloudApiToken('super-secret-token'),
         LaravelCloudClient $cloud = new PlanCommandCloudClient(),
+        bool $fileExists = true,
     ): CommandTester {
         return new CommandTester(new PlanCommand(
-            new PlanFileReader($blueprint),
+            new PlanFileReader($blueprint, $fileExists),
             new BlueprintLoader(new SymfonyYamlDecoder(), new BlueprintValidator(), new BlueprintNormalizer()),
             new PlanTokenProvider($token),
             new PlanClientFactory($cloud),
             new CreatePlan(new VariableValueResolver(new PlanEnvironmentValueProvider())),
         ));
+    }
+
+    private static function assertJsonError(CommandTester $tester, string $message): void
+    {
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('error', $decoded['status']);
+        self::assertIsString($decoded['message']);
+        self::assertStringContainsString($message, $decoded['message']);
     }
 
     private static function validBlueprint(string $applicationName = 'API'): string
@@ -227,13 +277,13 @@ YAML;
 
 final readonly class PlanFileReader implements FileReader
 {
-    public function __construct(private string $contents)
+    public function __construct(private string $contents, private bool $exists = true)
     {
     }
 
     public function exists(string $path): bool
     {
-        return true;
+        return $this->exists;
     }
 
     public function read(string $path): string
@@ -341,5 +391,13 @@ final class PlanUpdateCloudClient extends PlanCommandCloudClient
         return new CloudEnvironmentDetails($environmentId, 'production', new CloudEnvironmentVariableCollection(
             new CloudEnvironmentVariable('APP_KEY', 'remote-variable-secret'),
         ));
+    }
+}
+
+final class PlanInvalidUtf8CloudClient extends PlanCommandCloudClient
+{
+    public function environments(string $applicationId): array
+    {
+        return [new CloudEnvironment('env-1', $applicationId, 'production', "invalid-\xB1")];
     }
 }

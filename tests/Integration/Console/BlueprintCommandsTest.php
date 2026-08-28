@@ -44,6 +44,9 @@ final class BlueprintCommandsTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $init->execute([]));
         self::assertFileExists('cloud.blueprint.yaml');
         self::assertStringContainsString('Created blueprint file', $init->getDisplay());
+        self::assertStringContainsString('Next: review or edit the blueprint', $init->getDisplay());
+        self::assertStringContainsString("lcb validate --file='cloud.blueprint.yaml'", $init->getDisplay());
+        self::assertStringContainsString("lcb plan --file='cloud.blueprint.yaml'", $init->getDisplay());
         $contents = (string) file_get_contents('cloud.blueprint.yaml');
         self::assertStringContainsString('region: eu-central-1', $contents);
         self::assertStringContainsString(

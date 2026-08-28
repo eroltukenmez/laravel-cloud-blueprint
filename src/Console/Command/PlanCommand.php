@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Console\Command;
 
-use JsonException;
 use LaravelCloudBlueprint\Application\BlueprintLoader;
 use LaravelCloudBlueprint\Application\File\FileOperationException;
 use LaravelCloudBlueprint\Application\File\FileReader;
@@ -13,6 +12,7 @@ use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Console\JsonOutput;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
@@ -27,16 +27,20 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
-#[AsCommand(name: 'plan', description: 'Create a read-only Laravel Cloud execution plan.')]
+#[AsCommand(name: 'plan', description: 'Compare a blueprint with Laravel Cloud without making changes.')]
 final class PlanCommand extends Command
 {
+    private readonly JsonOutput $json;
+
     public function __construct(
         private readonly FileReader $files,
         private readonly BlueprintLoader $blueprints,
         private readonly CloudTokenProvider $tokens,
         private readonly LaravelCloudClientFactory $clients,
         private readonly CreatePlan $planner,
+        ?JsonOutput $json = null,
     ) {
+        $this->json = $json ?? new JsonOutput();
         parent::__construct();
     }
 
@@ -49,28 +53,35 @@ final class PlanCommand extends Command
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        $json = $input->getOption('json') === true;
         $path = $input->getOption('file');
         if (!is_string($path)) {
-            $output->writeln('<error>The --file option must be a path.</error>');
-            return ExitCode::GENERAL_ERROR->value;
+            return $this->error($output, 'The --file option must be a path.', ExitCode::GENERAL_ERROR, $json);
         }
 
         if (!$this->files->exists($path)) {
-            $output->writeln(sprintf('<error>Blueprint file "%s" does not exist.</error>', $path));
-            return ExitCode::GENERAL_ERROR->value;
+            return $this->error($output, sprintf('Blueprint file "%s" does not exist.', $path), ExitCode::GENERAL_ERROR, $json);
         }
 
         try {
             $loaded = $this->blueprints->load($this->files->read($path));
         } catch (StructuredDataDecodingException) {
-            $output->writeln('<error>Blueprint YAML could not be decoded.</error>');
-            return ExitCode::BLUEPRINT_ERROR->value;
+            return $this->error($output, 'Blueprint YAML could not be decoded.', ExitCode::BLUEPRINT_ERROR, $json);
         } catch (FileOperationException $exception) {
-            $output->writeln(sprintf('<error>%s</error>', $exception->getMessage()));
-            return ExitCode::GENERAL_ERROR->value;
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json);
         }
 
         if (!$loaded->isValid()) {
+            if ($json) {
+                $this->json->write([
+                    'status' => 'validation_failed',
+                    'errors' => array_map(
+                        static fn ($error): array => ['path' => $error->path, 'code' => $error->code->value, 'message' => $error->message],
+                        iterator_to_array($loaded->validation, false),
+                    ),
+                ], $output);
+                return ExitCode::BLUEPRINT_ERROR->value;
+            }
             foreach ($loaded->validation as $error) {
                 $output->writeln(sprintf('[%s] %s: %s', $error->code->value, $error->path, $error->message));
             }
@@ -80,18 +91,16 @@ final class PlanCommand extends Command
 
         $token = $this->tokens->token();
         if ($token === null) {
-            $output->writeln('<error>LCB_TOKEN is not set.</error>');
-            return ExitCode::GENERAL_ERROR->value;
+            return $this->error($output, 'LCB_TOKEN is not set.', ExitCode::GENERAL_ERROR, $json);
         }
 
         try {
             $plan = $this->planner->create($loaded->blueprint(), $this->clients->create($token));
         } catch (OrganizationMismatchException|AmbiguousResourceMatchException|MissingEnvironmentValueException|CloudException $exception) {
-            $output->writeln(sprintf('<error>%s</error>', $exception->getMessage()));
-            return ExitCode::GENERAL_ERROR->value;
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json);
         }
 
-        if ($input->getOption('json') === true) {
+        if ($json) {
             return $this->renderJson($plan, $output);
         }
 
@@ -139,8 +148,7 @@ final class PlanCommand extends Command
 
     private function renderJson(ExecutionPlan $plan, OutputInterface $output): int
     {
-        try {
-            $output->writeln(json_encode([
+        return $this->json->write([
                 'status' => 'success',
                 'summary' => [
                     'create' => $plan->countByOperation(PlanOperation::CREATE),
@@ -165,13 +173,20 @@ final class PlanCommand extends Command
                     ], static fn (mixed $value): bool => $value !== null),
                     iterator_to_array($plan, false),
                 ),
-            ], JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-        } catch (JsonException) {
-            $output->writeln('<error>Unable to encode the execution plan.</error>');
-            return ExitCode::GENERAL_ERROR->value;
+            ], $output)
+            ? ExitCode::SUCCESS->value
+            : ExitCode::GENERAL_ERROR->value;
+    }
+
+    private function error(OutputInterface $output, string $message, ExitCode $code, bool $json): int
+    {
+        if ($json) {
+            $this->json->write(['status' => 'error', 'message' => $message], $output);
+        } else {
+            $output->writeln(sprintf('<error>%s</error>', $message));
         }
 
-        return ExitCode::SUCCESS->value;
+        return $code->value;
     }
 
     private function symbol(PlanOperation $operation): string
