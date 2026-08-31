@@ -6,6 +6,8 @@ namespace LaravelCloudBlueprint\Application\Import;
 
 use LaravelCloudBlueprint\Blueprint\Blueprint;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
@@ -17,12 +19,16 @@ final readonly class CreateImportProposal
     /**
      * @param list<CloudApplication> $applications
      * @param list<CloudEnvironment> $environments
+     * @param list<CloudDatabaseCluster> $databaseClusters
+     * @param array<string, list<CloudDatabase>> $databasesByCluster
      */
     public function create(
         Blueprint $blueprint,
         StateDocument $state,
         array $applications,
         array $environments,
+        array $databaseClusters = [],
+        array $databasesByCluster = [],
     ): ImportProposal {
         $applicationAddress = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
         $applicationMatches = array_values(array_filter(
@@ -89,7 +95,169 @@ final readonly class CreateImportProposal
             );
         }
 
+        $desiredClusters = iterator_to_array($blueprint->databaseClusters, false);
+        usort($desiredClusters, static fn ($left, $right): int => strcmp($left->name, $right->name));
+        foreach ($desiredClusters as $desiredCluster) {
+            $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, $desiredCluster->name);
+            $managedCluster = $state->find($clusterAddress);
+            $remoteCluster = null;
+
+            if ($managedCluster !== null) {
+                $remoteCluster = $this->databaseClusterById($databaseClusters, $managedCluster->remoteId);
+                if ($managedCluster->type !== ResourceType::DATABASE_CLUSTER || $managedCluster->parent !== null) {
+                    $clusterCandidate = $this->candidate($clusterAddress, ResourceType::DATABASE_CLUSTER, null,
+                        $desiredCluster->name, null, ImportStatus::CONFLICT,
+                        'The logical address has incompatible Database Cluster ownership.');
+                } elseif ($remoteCluster === null) {
+                    $clusterCandidate = $this->candidate($clusterAddress, ResourceType::DATABASE_CLUSTER, null,
+                        $desiredCluster->name, null, ImportStatus::UNSUPPORTED,
+                        'The owned Database Cluster remote identity is missing.');
+                } else {
+                    $clusterCandidate = $this->compatibleClusterCandidate(
+                        $clusterAddress, $desiredCluster->name, $desiredCluster->type->value,
+                        $desiredCluster->region, $remoteCluster, $state,
+                    );
+                }
+            } else {
+                $matches = array_values(array_filter(
+                    $databaseClusters,
+                    static fn (CloudDatabaseCluster $cluster): bool => $cluster->name === $desiredCluster->name,
+                ));
+                if (count($matches) > 1) {
+                    $clusterCandidate = $this->candidate($clusterAddress, ResourceType::DATABASE_CLUSTER, null,
+                        $desiredCluster->name, null, ImportStatus::CONFLICT,
+                        'Multiple remote Database Clusters match this address.');
+                } elseif ($matches === []) {
+                    $clusterCandidate = $this->candidate($clusterAddress, ResourceType::DATABASE_CLUSTER, null,
+                        $desiredCluster->name, null, ImportStatus::UNSUPPORTED,
+                        'No remote Database Cluster matches this address.');
+                } else {
+                    $remoteCluster = $matches[0];
+                    $clusterCandidate = $this->compatibleClusterCandidate(
+                        $clusterAddress, $desiredCluster->name, $desiredCluster->type->value,
+                        $desiredCluster->region, $remoteCluster, $state,
+                    );
+                }
+            }
+            $candidates[] = $clusterCandidate;
+
+            foreach ($desiredCluster->databases as $desiredDatabase) {
+                $databaseAddress = new ResourceAddress(
+                    ResourceType::DATABASE,
+                    $desiredCluster->name . '.' . $desiredDatabase->name,
+                );
+                if ($remoteCluster === null
+                    || ($clusterCandidate->status !== ImportStatus::IMPORTABLE
+                        && $clusterCandidate->status !== ImportStatus::ALREADY_MANAGED)) {
+                    $candidates[] = $this->candidate(
+                        $databaseAddress,
+                        ResourceType::DATABASE,
+                        null,
+                        $desiredDatabase->name,
+                        $clusterAddress,
+                        $clusterCandidate->status === ImportStatus::CONFLICT ? ImportStatus::CONFLICT : ImportStatus::UNSUPPORTED,
+                        'Parent Database Cluster identity cannot be resolved safely.',
+                    );
+                    continue;
+                }
+
+                $remoteDatabases = $databasesByCluster[$remoteCluster->id] ?? [];
+                $managedDatabase = $state->find($databaseAddress);
+                if ($managedDatabase !== null) {
+                    $remoteDatabase = $this->databaseById($remoteDatabases, $managedDatabase->remoteId);
+                    if ($managedDatabase->type !== ResourceType::DATABASE
+                        || $managedDatabase->parent === null
+                        || (string) $managedDatabase->parent !== (string) $clusterAddress) {
+                        $candidates[] = $this->candidate($databaseAddress, ResourceType::DATABASE, null,
+                            $desiredDatabase->name, $clusterAddress, ImportStatus::CONFLICT,
+                            'The logical address has incompatible logical Database ownership.');
+                    } elseif ($remoteDatabase === null) {
+                        $candidates[] = $this->candidate($databaseAddress, ResourceType::DATABASE, null,
+                            $desiredDatabase->name, $clusterAddress, ImportStatus::UNSUPPORTED,
+                            'The owned logical Database remote identity is missing from its expected Cluster.');
+                    } elseif ($remoteDatabase->name !== $desiredDatabase->name) {
+                        $candidates[] = $this->candidate($databaseAddress, ResourceType::DATABASE, $remoteDatabase->id,
+                            $remoteDatabase->name, $clusterAddress, ImportStatus::CONFLICT,
+                            'The owned logical Database name does not match its blueprint address.');
+                    } else {
+                        $candidates[] = $this->candidateForIdentity(
+                            $databaseAddress, ResourceType::DATABASE, $remoteDatabase->id,
+                            $remoteDatabase->name, $clusterAddress, $state,
+                        );
+                    }
+                    continue;
+                }
+
+                $matches = array_values(array_filter(
+                    $remoteDatabases,
+                    static fn (CloudDatabase $database): bool => $database->name === $desiredDatabase->name,
+                ));
+                if (count($matches) > 1) {
+                    $candidates[] = $this->candidate($databaseAddress, ResourceType::DATABASE, null,
+                        $desiredDatabase->name, $clusterAddress, ImportStatus::CONFLICT,
+                        'Multiple logical Databases match this address under the parent Cluster.');
+                } elseif ($matches === []) {
+                    $candidates[] = $this->candidate($databaseAddress, ResourceType::DATABASE, null,
+                        $desiredDatabase->name, $clusterAddress, ImportStatus::UNSUPPORTED,
+                        'No logical Database matches this address under the parent Cluster.');
+                } else {
+                    $candidates[] = $this->candidateForIdentity(
+                        $databaseAddress, ResourceType::DATABASE, $matches[0]->id,
+                        $matches[0]->name, $clusterAddress, $state,
+                    );
+                }
+            }
+        }
+
         return new ImportProposal(...$candidates);
+    }
+
+    private function compatibleClusterCandidate(
+        ResourceAddress $address,
+        string $desiredName,
+        string $desiredType,
+        string $desiredRegion,
+        CloudDatabaseCluster $remote,
+        StateDocument $state,
+    ): ImportCandidate {
+        if ($remote->name !== $desiredName) {
+            return $this->candidate($address, ResourceType::DATABASE_CLUSTER, $remote->id, $remote->name, null,
+                ImportStatus::CONFLICT, 'The owned Database Cluster name does not match its blueprint address.');
+        }
+        if ($remote->type !== $desiredType) {
+            return $this->candidate($address, ResourceType::DATABASE_CLUSTER, $remote->id, $remote->name, null,
+                ImportStatus::UNSUPPORTED, 'The remote Database Cluster type is incompatible with the blueprint.');
+        }
+        if ($remote->region !== $desiredRegion) {
+            return $this->candidate($address, ResourceType::DATABASE_CLUSTER, $remote->id, $remote->name, null,
+                ImportStatus::UNSUPPORTED, 'The remote Database Cluster region is incompatible with the blueprint.');
+        }
+
+        return $this->candidateForIdentity(
+            $address, ResourceType::DATABASE_CLUSTER, $remote->id, $remote->name, null, $state,
+        );
+    }
+
+    /** @param list<CloudDatabaseCluster> $clusters */
+    private function databaseClusterById(array $clusters, string $id): ?CloudDatabaseCluster
+    {
+        foreach ($clusters as $cluster) {
+            if ($cluster->id === $id) {
+                return $cluster;
+            }
+        }
+        return null;
+    }
+
+    /** @param list<CloudDatabase> $databases */
+    private function databaseById(array $databases, string $id): ?CloudDatabase
+    {
+        foreach ($databases as $database) {
+            if ($database->id === $id) {
+                return $database;
+            }
+        }
+        return null;
     }
 
     /** @param list<CloudApplication> $matches */

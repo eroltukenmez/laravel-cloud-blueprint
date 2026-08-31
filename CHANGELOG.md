@@ -6,6 +6,8 @@ This project uses a Keep a Changelog-inspired format.
 
 ### Changed
 
+- Extended atomic `lcb import` state adoption to Database Clusters and logical Databases, with exact scoped matching, parent-first dependencies, locked rediscovery, and no Database mutations or attachment ownership.
+- State schema v1 now persists Database Cluster and logical Database identities, and planning resolves imported resources by stored IDs while safely reporting stale identities, same-name replacements, configuration differences, and owned resources absent from the blueprint.
 - Planning now compares desired Database Clusters, logical Databases, and Environment attachments with safe Cloud discovery while classifying every required Database change as unsupported and exact unmanaged matches as read-only no-change actions.
 - Added a typed, read-only Laravel Cloud discovery boundary for Database Clusters, logical Databases, and Environment Database attachment identities; connection and credential data is discarded during response parsing.
 - Blueprint schema v1 now accepts typed top-level Laravel MySQL and Neon Serverless Postgres Cluster definitions, logical Databases, and optional Environment Database references as a read-only foundation for future reconciliation.

@@ -23,8 +23,8 @@ final readonly class ImportCandidate
             throw new InvalidArgumentException('Import candidate type must match its address type.');
         }
 
-        if ($type === ResourceType::VARIABLE) {
-            throw new InvalidArgumentException('Environment variables cannot be imported into state.');
+        if ($type === ResourceType::VARIABLE || $type === ResourceType::DATABASE_ATTACHMENT) {
+            throw new InvalidArgumentException('This resource type cannot be imported into state.');
         }
 
         if ($status === ImportStatus::IMPORTABLE && ($remoteId === null || trim($remoteId) === '')) {

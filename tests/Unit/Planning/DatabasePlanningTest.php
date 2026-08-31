@@ -47,6 +47,8 @@ use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateResource;
+use LaravelCloudBlueprint\State\StateVersion;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -85,6 +87,77 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database_attachment.production')->operation);
         self::assertSame(1, $cloud->clusterCalls);
         self::assertSame(['cluster-1' => 1], $cloud->databaseCalls);
+    }
+
+    public function testImportedDatabaseGraphIsResolvedByOwnedRemoteIdentity(): void
+    {
+        $plan = self::plan(self::blueprint(), self::matchingCloud(), self::databaseState());
+
+        $cluster = self::action($plan, 'database_cluster.primary');
+        $database = self::action($plan, 'database.primary.application');
+        self::assertSame(PlanOperation::NO_CHANGE, $cluster->operation);
+        self::assertStringContainsString('Owned', $cluster->reason);
+        self::assertSame(PlanOperation::NO_CHANGE, $database->operation);
+        self::assertStringContainsString('Owned', $database->reason);
+        self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database_attachment.production')->operation);
+    }
+
+    public function testOwnedClusterMissingIdentityAndSameNameReplacementAreUnsupported(): void
+    {
+        $missing = self::action(self::plan(
+            self::blueprint(),
+            new DatabasePlanningCloud(clusters: []),
+            self::databaseState(),
+        ), 'database_cluster.primary');
+        self::assertSame(PlanOperation::UNSUPPORTED, $missing->operation);
+        self::assertStringContainsString('missing', $missing->reason);
+
+        $replacement = self::action(self::plan(
+            self::blueprint(),
+            self::matchingCloud(self::mysqlCluster(id: 'replacement-cluster')),
+            self::databaseState(),
+        ), 'database_cluster.primary');
+        self::assertSame(PlanOperation::UNSUPPORTED, $replacement->operation);
+        self::assertStringContainsString('replacement', $replacement->reason);
+    }
+
+    public function testOwnedLogicalDatabaseMissingIdentityAndSameNameReplacementAreUnsupported(): void
+    {
+        $missing = self::action(self::plan(
+            self::blueprint(),
+            self::matchingCloud(databases: []),
+            self::databaseState(),
+        ), 'database.primary.application');
+        self::assertSame(PlanOperation::UNSUPPORTED, $missing->operation);
+        self::assertStringContainsString('missing', $missing->reason);
+
+        $replacement = self::action(self::plan(
+            self::blueprint(),
+            self::matchingCloud(databases: [new CloudDatabase('replacement-database', 'cluster-1', 'application')]),
+            self::databaseState(),
+        ), 'database.primary.application');
+        self::assertSame(PlanOperation::UNSUPPORTED, $replacement->operation);
+        self::assertStringContainsString('replacement', $replacement->reason);
+    }
+
+    public function testImportedClusterConfigurationDifferenceRemainsReadOnlyUnsupported(): void
+    {
+        $cloud = self::matchingCloud(self::mysqlCluster(configuration: new CloudLaravelMySqlConfiguration(
+            'different-size', 5, 1, false, false,
+        )));
+        $action = self::action(self::plan(self::blueprint(), $cloud, self::databaseState()), 'database_cluster.primary');
+
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertSame('size', $action->changes[0]->field);
+    }
+
+    public function testOwnedDatabaseResourcesAbsentFromBlueprintRemainVisibleAndNonDestructive(): void
+    {
+        $plan = self::plan(self::blueprint(database: false), self::matchingCloud(), self::databaseState());
+
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database_cluster.primary')->operation);
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database.primary.application')->operation);
+        self::assertNull(self::findAction($plan, 'database_attachment.production'));
     }
 
     /** @return iterable<string, array{CloudDatabaseCluster, string}> */
@@ -346,10 +419,32 @@ final class DatabasePlanningTest extends TestCase
         }
     }
 
-    private static function plan(Blueprint $blueprint, DatabasePlanningCloud $cloud): ExecutionPlan
+    private static function plan(
+        Blueprint $blueprint,
+        DatabasePlanningCloud $cloud,
+        ?StateDocument $state = null,
+    ): ExecutionPlan
     {
         return (new CreatePlan(new VariableValueResolver(new EmptyEnvironmentValues())))
-            ->create($blueprint, $cloud, StateDocument::empty());
+            ->create($blueprint, $cloud, $state ?? StateDocument::empty());
+    }
+
+    private static function databaseState(): StateDocument
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+
+        return new StateDocument(
+            StateVersion::V1,
+            0,
+            null,
+            new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-1',
+                $cluster,
+            ),
+        );
     }
 
     private static function apply(): CreateOnlyApply

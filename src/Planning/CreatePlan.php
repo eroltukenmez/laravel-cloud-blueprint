@@ -36,7 +36,7 @@ final readonly class CreatePlan
     public function create(Blueprint $blueprint, LaravelCloudClient $cloud, StateDocument $state): ExecutionPlan
     {
         $base = $this->createBasePlan($blueprint, $cloud, $state);
-        if (count($blueprint->databaseClusters) === 0) {
+        if (count($blueprint->databaseClusters) === 0 && !$this->hasOwnedDatabaseResources($state)) {
             return $base;
         }
         if (!$cloud instanceof LaravelCloudDatabaseClient) {
@@ -47,7 +47,17 @@ final readonly class CreatePlan
             );
         }
 
-        return $this->withDatabaseActions($base, $blueprint, $cloud);
+        return $this->withDatabaseActions($base, $blueprint, $cloud, $state);
+    }
+
+    private function hasOwnedDatabaseResources(StateDocument $state): bool
+    {
+        foreach ($state->resources() as $resource) {
+            if ($resource->type === ResourceType::DATABASE_CLUSTER || $resource->type === ResourceType::DATABASE) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function createBasePlan(Blueprint $blueprint, LaravelCloudClient $cloud, StateDocument $state): ExecutionPlan
@@ -666,6 +676,7 @@ final readonly class CreatePlan
         ExecutionPlan $base,
         Blueprint $blueprint,
         LaravelCloudDatabaseClient $cloud,
+        StateDocument $state,
     ): ExecutionPlan {
         $applicationActions = [];
         $environmentActions = [];
@@ -688,16 +699,27 @@ final readonly class CreatePlan
         $resolvedDatabases = [];
 
         foreach ($blueprint->databaseClusters as $desiredCluster) {
-            $matches = array_values(array_filter(
-                $remoteClusters,
-                static fn (CloudDatabaseCluster $cluster): bool => $cluster->name === $desiredCluster->name,
-            ));
+            $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, $desiredCluster->name);
+            $managedCluster = $state->find($clusterAddress);
+            $matches = $managedCluster === null
+                ? array_values(array_filter(
+                    $remoteClusters,
+                    static fn (CloudDatabaseCluster $cluster): bool => $cluster->name === $desiredCluster->name,
+                ))
+                : array_values(array_filter(
+                    $remoteClusters,
+                    static fn (CloudDatabaseCluster $cluster): bool => $cluster->id === $managedCluster->remoteId,
+                ));
 
             if ($matches === []) {
                 $clusterActions[] = $this->databaseClusterAction(
                     $desiredCluster->name,
                     PlanOperation::UNSUPPORTED,
-                    'Matching Database Cluster does not exist. Database Cluster creation is not supported yet.',
+                    $managedCluster === null
+                        ? 'Matching Database Cluster does not exist. Database Cluster creation is not supported yet.'
+                        : ($this->hasClusterNamed($remoteClusters, $desiredCluster->name)
+                            ? 'Owned Database Cluster remote identity is missing and a same-name unmanaged replacement exists. Automatic adoption or creation is not supported.'
+                            : 'Owned Database Cluster remote identity is missing. State repair is required; replacement creation is not supported.'),
                 );
                 $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
                     'Logical Database cannot be resolved because its parent Database Cluster does not exist.');
@@ -715,7 +737,17 @@ final readonly class CreatePlan
             }
 
             $remoteCluster = $matches[0];
-            $clusterAction = $this->compareDatabaseCluster($desiredCluster, $remoteCluster);
+            if ($remoteCluster->name !== $desiredCluster->name) {
+                $clusterActions[] = $this->databaseClusterAction(
+                    $desiredCluster->name,
+                    PlanOperation::UNSUPPORTED,
+                    'Owned Database Cluster name differs from its blueprint address. Rename or state-move reconciliation is not supported.',
+                );
+                $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
+                    'Logical Database cannot be compared while its owned parent Database Cluster identity conflicts.');
+                continue;
+            }
+            $clusterAction = $this->compareDatabaseCluster($desiredCluster, $remoteCluster, $managedCluster !== null);
             $clusterActions[] = $clusterAction;
             if ($clusterAction->operation !== PlanOperation::NO_CHANGE) {
                 $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
@@ -725,14 +757,28 @@ final readonly class CreatePlan
 
             $remoteDatabases = $cloud->databases($remoteCluster->id);
             foreach ($desiredCluster->databases as $desiredDatabase) {
-                $databaseMatches = array_values(array_filter(
-                    $remoteDatabases,
-                    static fn (CloudDatabase $database): bool => $database->name === $desiredDatabase->name,
-                ));
                 $name = $desiredCluster->name . '.' . $desiredDatabase->name;
+                $databaseAddress = new ResourceAddress(ResourceType::DATABASE, $name);
+                $managedDatabase = $state->find($databaseAddress);
+                $databaseMatches = $managedDatabase === null
+                    ? array_values(array_filter(
+                        $remoteDatabases,
+                        static fn (CloudDatabase $database): bool => $database->name === $desiredDatabase->name,
+                    ))
+                    : array_values(array_filter(
+                        $remoteDatabases,
+                        static fn (CloudDatabase $database): bool => $database->id === $managedDatabase->remoteId,
+                    ));
                 if ($databaseMatches === []) {
-                    $databaseActions[] = $this->databaseAction($name, PlanOperation::UNSUPPORTED,
-                        'Matching logical Database does not exist. Logical Database creation is not supported yet.');
+                    $databaseActions[] = $this->databaseAction(
+                        $name,
+                        PlanOperation::UNSUPPORTED,
+                        $managedDatabase === null
+                            ? 'Matching logical Database does not exist. Logical Database creation is not supported yet.'
+                            : ($this->hasDatabaseNamed($remoteDatabases, $desiredDatabase->name)
+                                ? 'Owned logical Database remote identity is missing and a same-name unmanaged replacement exists. Automatic adoption or creation is not supported.'
+                                : 'Owned logical Database remote identity is missing from its expected Cluster. State repair is required.'),
+                    );
                     continue;
                 }
                 if (count($databaseMatches) > 1) {
@@ -741,14 +787,24 @@ final readonly class CreatePlan
                     continue;
                 }
 
+                if ($databaseMatches[0]->name !== $desiredDatabase->name) {
+                    $databaseActions[] = $this->databaseAction($name, PlanOperation::UNSUPPORTED,
+                        'Owned logical Database name differs from its blueprint address. Rename or state-move reconciliation is not supported.');
+                    continue;
+                }
+
                 $databaseActions[] = $this->databaseAction(
                     $name,
                     PlanOperation::NO_CHANGE,
-                    'Matching remote logical Database exists but is unmanaged; future mutation requires import and state ownership.',
+                    $managedDatabase === null
+                        ? 'Matching remote logical Database exists but is unmanaged; future mutation requires import and state ownership.'
+                        : 'Owned remote logical Database matches desired identity.',
                 );
                 $resolvedDatabases[$desiredCluster->name][$desiredDatabase->name] = $databaseMatches[0];
             }
         }
+
+        $this->ownedOnlyDatabaseActions($clusterActions, $databaseActions, $blueprint, $state);
 
         $attachmentActions = $this->databaseAttachmentActions(
             $blueprint,
@@ -768,9 +824,73 @@ final readonly class CreatePlan
         );
     }
 
+    /** @param list<CloudDatabaseCluster> $clusters */
+    private function hasClusterNamed(array $clusters, string $name): bool
+    {
+        foreach ($clusters as $cluster) {
+            if ($cluster->name === $name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** @param list<CloudDatabase> $databases */
+    private function hasDatabaseNamed(array $databases, string $name): bool
+    {
+        foreach ($databases as $database) {
+            if ($database->name === $name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param list<PlanAction> $clusterActions
+     * @param list<PlanAction> $databaseActions
+     */
+    private function ownedOnlyDatabaseActions(
+        array &$clusterActions,
+        array &$databaseActions,
+        Blueprint $blueprint,
+        StateDocument $state,
+    ): void {
+        $desiredClusters = [];
+        $desiredDatabases = [];
+        foreach ($blueprint->databaseClusters as $cluster) {
+            $desiredClusters[(string) new ResourceAddress(ResourceType::DATABASE_CLUSTER, $cluster->name)] = true;
+            foreach ($cluster->databases as $database) {
+                $desiredDatabases[(string) new ResourceAddress(
+                    ResourceType::DATABASE,
+                    $cluster->name . '.' . $database->name,
+                )] = true;
+            }
+        }
+
+        foreach ($state->resources() as $resource) {
+            $address = (string) $resource->address;
+            if ($resource->type === ResourceType::DATABASE_CLUSTER && !isset($desiredClusters[$address])) {
+                $clusterActions[] = $this->databaseClusterAction(
+                    $resource->address->name,
+                    PlanOperation::UNSUPPORTED,
+                    'This Database Cluster is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+                );
+            }
+            if ($resource->type === ResourceType::DATABASE && !isset($desiredDatabases[$address])) {
+                $databaseActions[] = $this->databaseAction(
+                    $resource->address->name,
+                    PlanOperation::UNSUPPORTED,
+                    'This logical Database is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+                );
+            }
+        }
+    }
+
     private function compareDatabaseCluster(
         DatabaseClusterDefinition $desired,
         CloudDatabaseCluster $remote,
+        bool $managed,
     ): PlanAction {
         $statusReason = $this->databaseStatuses->unsupportedReason($remote->status);
         if ($statusReason !== null) {
@@ -813,7 +933,9 @@ final readonly class CreatePlan
         return $this->databaseClusterAction(
             $desired->name,
             PlanOperation::NO_CHANGE,
-            'Matching remote Database Cluster exists but is unmanaged; future mutation requires import and state ownership.',
+            $managed
+                ? 'Owned remote Database Cluster matches desired state.'
+                : 'Matching remote Database Cluster exists but is unmanaged; future mutation requires import and state ownership.',
         );
     }
 

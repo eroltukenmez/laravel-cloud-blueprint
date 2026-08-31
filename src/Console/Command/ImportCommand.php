@@ -32,7 +32,7 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Question\ConfirmationQuestion;
 
-#[AsCommand(name: 'import', description: 'Adopt Application and Environment identities into local state without modifying Laravel Cloud.')]
+#[AsCommand(name: 'import', description: 'Adopt supported existing resource identities into local state without modifying Laravel Cloud.')]
 final class ImportCommand extends Command
 {
     private readonly JsonOutput $jsonOutput;
