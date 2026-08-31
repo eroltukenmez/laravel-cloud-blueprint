@@ -120,20 +120,23 @@ Both commands must pass.
 
 ## Scope
 
-v0.1.0-alpha.4 supports only:
+v0.1.0-alpha.5 supports only:
 
 - Application
 - Environment
 - Environment Variables
+- Database Cluster
+- logical Database
 
-Supported mutations are CREATE for all three resource types, UPDATE for environment branches and environment-variable values, and no DELETE. Application repository and region changes are UNSUPPORTED.
+Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, and no DELETE. Application repository and region changes, Database updates and replacements, and Environment Database attachment are UNSUPPORTED.
 
-Explicit import supports Application and Environment identity adoption into local state only. Environment variables are not importable.
+Explicit import supports Application, Environment, Database Cluster, and logical Database identity adoption into local state only. Environment variables and Database attachments are not importable.
 
 Commands:
 
 - lcb init
 - lcb validate
+- lcb cloud:inspect
 - lcb plan
 - lcb apply
 - lcb import
@@ -144,7 +147,6 @@ Do not add:
 - drift detection
 - remote state
 - provider plugins
-- database
 - cache
 
 unless explicitly requested.
