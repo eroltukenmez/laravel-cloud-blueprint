@@ -131,7 +131,11 @@ final class CreateImportProposalTest extends TestCase
 
     public function testEnvironmentWithIncompatibleManagedParentConflicts(): void
     {
-        $state = self::state(self::applicationState(), self::environmentState(parentName: 'other'));
+        $state = self::state(
+            self::applicationState(),
+            new StateResource(self::address(ResourceType::APPLICATION, 'other'), ResourceType::APPLICATION, 'app-other'),
+            self::environmentState(parentName: 'other'),
+        );
 
         self::assertSame(
             ImportStatus::CONFLICT,

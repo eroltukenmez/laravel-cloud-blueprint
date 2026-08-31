@@ -44,8 +44,8 @@ final class StateDocumentTest extends TestCase
 
         $state = StateDocument::empty()
             ->withOrganization('my-organization')
-            ->withResource($environment)
-            ->withResource($application);
+            ->withResource($application)
+            ->withResource($environment);
 
         self::assertSame('app_123', $state->get($applicationAddress)->remoteId);
         self::assertSame('env_456', $state->get($environmentAddress)->remoteId);
@@ -90,6 +90,35 @@ final class StateDocumentTest extends TestCase
             new ResourceAddress(ResourceType::APPLICATION, 'my-api'),
             ResourceType::ENVIRONMENT,
             'env_123',
+        );
+    }
+
+    public function testEnvironmentRejectsWrongParentType(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new StateResource(
+            new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+            ResourceType::ENVIRONMENT,
+            'env_123',
+            new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+        );
+    }
+
+    public function testEnvironmentRejectsUnownedApplicationParent(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new StateDocument(
+            StateVersion::V1,
+            0,
+            'acme',
+            new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env_123',
+                new ResourceAddress(ResourceType::APPLICATION, 'my-api'),
+            ),
         );
     }
 

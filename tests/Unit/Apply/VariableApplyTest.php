@@ -89,7 +89,7 @@ final class VariableApplyTest extends TestCase
     {
         $events = new VariableApplyEvents();
         $cloud = new VariableApplyCloud($events);
-        $state = new VariableApplyState($events);
+        $state = new VariableApplyState($events, self::managedApplicationState());
         $blueprint = self::blueprint(
             production: [new VariableDefinition('APP_ENV', new LiteralVariableValue('production'), false)],
         );
@@ -223,7 +223,7 @@ final class VariableApplyTest extends TestCase
             self::action(ResourceType::VARIABLE, 'production.APP_ENV', PlanOperation::UPDATE),
         );
 
-        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events));
+        $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events, self::managedApplicationState()));
 
         self::assertSame(1, $result->updatedCount());
         self::assertSame(['APP_ENV' => 'updated'], $cloud->requestValues('env-created-production'));
@@ -401,7 +401,7 @@ final class VariableApplyTest extends TestCase
     {
         $events = new VariableApplyEvents();
         $cloud = new VariableApplyCloud($events, failEnvironmentId: 'env-created-production');
-        $state = new VariableApplyState($events);
+        $state = new VariableApplyState($events, self::managedApplicationState());
         $blueprint = self::blueprint(
             production: [new VariableDefinition('APP_KEY', new LiteralVariableValue('secret-value'), true)],
         );
@@ -505,6 +505,15 @@ final class VariableApplyTest extends TestCase
                 'env-production',
                 $application,
             ));
+    }
+
+    private static function managedApplicationState(): StateDocument
+    {
+        $application = self::address(ResourceType::APPLICATION, 'my-api');
+
+        return StateDocument::empty()->withOrganization('acme')->withResource(
+            new StateResource($application, ResourceType::APPLICATION, 'app-1'),
+        );
     }
 
     private static function address(ResourceType $type, string $name): ResourceAddress

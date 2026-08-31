@@ -267,12 +267,15 @@ final class CreateOnlyApplyTest extends TestCase
     public function testEnvironmentUpdateStateIdentityConflictAbortsBeforePatch(): void
     {
         $events = new ApplyEvents();
-        $state = StateDocument::empty()->withOrganization('acme')->withResource(new StateResource(
-            self::address(ResourceType::ENVIRONMENT, 'production'),
-            ResourceType::ENVIRONMENT,
-            'env-managed',
-            self::address(ResourceType::APPLICATION, 'my-api'),
-        ));
+        $application = self::address(ResourceType::APPLICATION, 'my-api');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-existing'))
+            ->withResource(new StateResource(
+                self::address(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'env-managed',
+                $application,
+            ));
         $plan = new ExecutionPlan(new PlanAction(
             self::address(ResourceType::ENVIRONMENT, 'production'),
             ResourceType::ENVIRONMENT,

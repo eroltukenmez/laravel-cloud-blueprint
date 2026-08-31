@@ -48,7 +48,7 @@ final readonly class StateDocument
                 ));
             }
             $remoteIds[$resource->remoteId] = [$address, $resource->type];
-            if ($resource->type === ResourceType::DATABASE
+            if (($resource->type === ResourceType::ENVIRONMENT || $resource->type === ResourceType::DATABASE)
                 && $resource->parent !== null
                 && !isset($indexed[(string) $resource->parent])) {
                 throw new InvalidArgumentException(sprintf(

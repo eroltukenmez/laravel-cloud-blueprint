@@ -83,6 +83,19 @@ final class CreatePlanTest extends TestCase
         self::assertSame(['organization', 'applications', 'environments:app-1'], $cloud->calls);
     }
 
+    public function testUnmanagedApplicationMustBeImportedBeforeCreatingOwnedEnvironments(): void
+    {
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [self::remoteApplication()]),
+            StateDocument::empty(),
+        );
+
+        self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'application.my-api')->operation);
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'environment.production')->operation);
+        self::assertStringContainsString('Import it before creating', self::action($plan, 'environment.production')->reason);
+    }
+
     public function testApplicationRegionDifferenceIsUnsupported(): void
     {
         $plan = $this->planWithApplication(self::remoteApplication(region: 'us-east-1'));
@@ -265,13 +278,15 @@ final class CreatePlanTest extends TestCase
     public function testManagedEnvironmentWrongStateParentIsNonActionable(): void
     {
         $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $otherApplication = new ResourceAddress(ResourceType::APPLICATION, 'other');
         $state = StateDocument::empty()->withOrganization('acme')
             ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource($otherApplication, ResourceType::APPLICATION, 'app-other'))
             ->withResource(new StateResource(
                 new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
                 ResourceType::ENVIRONMENT,
                 'env-prod',
-                new ResourceAddress(ResourceType::APPLICATION, 'other'),
+                $otherApplication,
             ));
         $plan = self::planner()->create(
             self::blueprint(),
@@ -503,39 +518,17 @@ final class CreatePlanTest extends TestCase
         self::assertStringContainsString('parent Application identity is missing', $environment->reason);
     }
 
-    public function testOwnedOnlyEnvironmentWithMissingParentIsVisibleAsStructurallyInvalid(): void
-    {
-        $state = StateDocument::empty()->withOrganization('acme')->withResource(new StateResource(
-            new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
-            ResourceType::ENVIRONMENT,
-            'env-preview',
-            new ResourceAddress(ResourceType::APPLICATION, 'missing'),
-        ));
-        $plan = self::planner()->create(
-            self::blueprint(),
-            new PlanningCloudClient(applications: [self::remoteApplication()]),
-            $state,
-        );
-
-        $action = self::action($plan, 'environment.preview');
-        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertSame(
-            'Owned Environment state has an unresolvable parent ownership relationship and is absent from the blueprint.',
-            $action->reason,
-        );
-    }
-
     public function testRemovedApplicationSubtreeIsParentFirstAndEnvironmentsAreSorted(): void
     {
         $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
         $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($oldApplication, ResourceType::APPLICATION, 'app-old'))
             ->withResource(new StateResource(
                 new ResourceAddress(ResourceType::ENVIRONMENT, 'zeta'),
                 ResourceType::ENVIRONMENT,
                 'env-zeta',
                 $oldApplication,
             ))
-            ->withResource(new StateResource($oldApplication, ResourceType::APPLICATION, 'app-old'))
             ->withResource(new StateResource(
                 new ResourceAddress(ResourceType::ENVIRONMENT, 'alpha'),
                 ResourceType::ENVIRONMENT,
@@ -567,7 +560,7 @@ final class CreatePlanTest extends TestCase
             'environment.alpha',
             'environment.zeta',
         ], self::addresses($plan));
-        self::assertSame(3, $plan->countByOperation(PlanOperation::UNSUPPORTED));
+        self::assertSame(5, $plan->countByOperation(PlanOperation::UNSUPPORTED));
     }
 
     public function testAddressChangeDoesNotInferRename(): void

@@ -106,12 +106,15 @@ final class ImportCommandTest extends TestCase
 
     public function testConflictRefusesEntireImportWithoutPromptOrStateTransaction(): void
     {
-        $state = StateDocument::empty()->withOrganization('acme')->withResource(new StateResource(
-            new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
-            ResourceType::ENVIRONMENT,
-            'different-environment-id',
-            new ResourceAddress(ResourceType::APPLICATION, 'my-api'),
-        ));
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-secret-id'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::ENVIRONMENT, 'production'),
+                ResourceType::ENVIRONMENT,
+                'different-environment-id',
+                $application,
+            ));
         [$tester, $cloud, $states] = self::tester($state);
 
         self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--auto-approve' => true]));

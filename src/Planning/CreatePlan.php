@@ -372,6 +372,7 @@ final readonly class CreatePlan
                 $blueprint,
                 $state,
                 $application,
+                $applicationIsManaged,
                 $remoteEnvironments,
                 $applications,
                 $cloud,
@@ -483,6 +484,7 @@ final readonly class CreatePlan
         Blueprint $blueprint,
         StateDocument $state,
         CloudApplication $application,
+        bool $applicationIsManaged,
         array $remoteEnvironments,
         array $applications,
         LaravelCloudClient $cloud,
@@ -538,6 +540,13 @@ final readonly class CreatePlan
             throw new AmbiguousResourceMatchException('environment', $desired->name);
         }
         if ($matches === []) {
+            if (!$applicationIsManaged) {
+                return [$this->environmentAction(
+                    $desired->name,
+                    PlanOperation::UNSUPPORTED,
+                    'Matching remote application is unmanaged. Import it before creating owned environments.',
+                ), null];
+            }
             return [$this->environmentAction($desired->name, PlanOperation::CREATE, 'Environment does not exist.'), null];
         }
 

@@ -95,8 +95,8 @@ final class LocalFileStateStoreTest extends TestCase
 
         $store->save(StateDocument::empty()
             ->withOrganization('acme')
-            ->withResource($environment)
-            ->withResource($application));
+            ->withResource($application)
+            ->withResource($environment));
 
         $json = file_get_contents($this->path);
         self::assertNotFalse($json);
@@ -157,6 +157,14 @@ final class LocalFileStateStoreTest extends TestCase
     public function testMissingRequiredResourceFieldFailsSafely(): void
     {
         $this->writeRaw('{"version":1,"serial":1,"organization":"acme","resources":{"application.api":{"type":"application"}}}');
+
+        $this->expectException(StateCorruptedException::class);
+        (new LocalFileStateStore($this->path))->load();
+    }
+
+    public function testEnvironmentWithUnownedApplicationParentIsMalformedState(): void
+    {
+        $this->writeRaw('{"version":1,"serial":1,"organization":"acme","resources":{"environment.production":{"type":"environment","remote_id":"env_123","parent":"application.my-api"}}}');
 
         $this->expectException(StateCorruptedException::class);
         (new LocalFileStateStore($this->path))->load();

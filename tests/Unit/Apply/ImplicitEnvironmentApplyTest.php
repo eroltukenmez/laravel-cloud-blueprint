@@ -195,7 +195,13 @@ final class ImplicitEnvironmentApplyTest extends TestCase
     {
         $events = new ImplicitApplyEvents();
         $cloud = new ImplicitApplyCloud($events);
-        $state = new ImplicitApplyState($events);
+        $state = new ImplicitApplyState($events, StateDocument::empty()->withOrganization('acme')->withResource(
+            new StateResource(
+                self::address(ResourceType::APPLICATION, 'lcb-e2e-test'),
+                ResourceType::APPLICATION,
+                'app-existing',
+            ),
+        ));
         $plan = new ExecutionPlan(
             self::action(ResourceType::APPLICATION, 'lcb-e2e-test', PlanOperation::NO_CHANGE, 'app-existing'),
             self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
