@@ -4,8 +4,11 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] - 2026-08-31
+
 ### Changed
 
+- Hardened CLI help and recovery guidance and made command-owned JSON errors valid standalone JSON for machine-readable plan, inspect, import, and apply workflows.
 - Completed the Database feature safety review: pagination now rejects repeated next URLs in addition to foreign URLs and duplicate resource IDs, and locked Database revalidation refuses newly appearing actionable work that was not present in the approved plan.
 - Added safe Database Cluster and logical Database creation with typed provider payloads, locked Cloud/state revalidation, immediate identity checkpoints, bounded GET-only Cluster readiness observation, and no automatic POST retry.
 - Missing logical Databases may be created only under a newly created or already state-owned Cluster; unmanaged matches still require explicit import, while stale identities, replacements, configuration changes, attachments, and deletion remain unsupported.
@@ -26,6 +29,8 @@ This project uses a Keep a Changelog-inspired format.
 - Stale, replaced, wrongly parented, or multiply owned state identities produce non-actionable plans instead of implicit reassignment, recreation, or mutation.
 - Removing a managed Application or Environment cannot trigger deletion, automatic state cleanup, replacement adoption, or inferred rename behavior.
 - Database connection and credential material is discarded at parsing boundaries and never enters plans, apply output, import proposals, or State.
+- Any unsupported lifecycle or Environment Database attachment action blocks the complete apply, and uncertain Database POST outcomes are not blindly retried; confirmed identities are checkpointed before dependent work continues.
+- Environment Database attachment remains non-actionable because authoritative injected-variable reconciliation and safe attachment lifecycle semantics are not yet available.
 
 ### Verified
 
