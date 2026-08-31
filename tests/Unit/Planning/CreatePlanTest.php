@@ -162,6 +162,30 @@ final class CreatePlanTest extends TestCase
         );
     }
 
+    public function testReleasedEnvironmentUsesUnmanagedPlanningSemantics(): void
+    {
+        $address = new ResourceAddress(ResourceType::ENVIRONMENT, 'production');
+        $released = self::managedState()->withoutResource($address);
+
+        $existing = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [new CloudEnvironment('env-prod', 'app-1', 'production', 'other')],
+            ),
+            $released,
+        );
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($existing, 'environment.production')->operation);
+        self::assertStringContainsString('Import', self::action($existing, 'environment.production')->reason);
+
+        $missing = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [self::remoteApplication()]),
+            $released,
+        );
+        self::assertSame(PlanOperation::CREATE, self::action($missing, 'environment.production')->operation);
+    }
+
     public function testMissingRemoteBranchIsUnsupported(): void
     {
         $cloud = new PlanningCloudClient(

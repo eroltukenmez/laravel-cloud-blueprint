@@ -85,6 +85,34 @@ final readonly class StateDocument
         return new self($this->version, $this->serial, $this->organization, ...array_values($resources));
     }
 
+    /** @return list<StateResource> */
+    public function childrenOf(ResourceAddress $address): array
+    {
+        return array_values(array_filter(
+            $this->resources,
+            static fn (StateResource $resource): bool => $resource->parent !== null
+                && (string) $resource->parent === (string) $address,
+        ));
+    }
+
+    public function withoutResource(ResourceAddress $address): self
+    {
+        if (!isset($this->resources[(string) $address])) {
+            return $this;
+        }
+        if ($this->childrenOf($address) !== []) {
+            throw new InvalidArgumentException(sprintf(
+                'State resource "%s" cannot be removed while it has owned children.',
+                (string) $address,
+            ));
+        }
+
+        $resources = $this->resources;
+        unset($resources[(string) $address]);
+
+        return new self($this->version, $this->serial, $this->organization, ...array_values($resources));
+    }
+
     public function withOrganization(string $organization): self
     {
         if (trim($organization) === '') {
