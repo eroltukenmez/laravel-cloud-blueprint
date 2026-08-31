@@ -1,0 +1,7 @@
+/.agents export-ignore
+/.codex export-ignore
+/.lcb export-ignore
+/.phpstan.cache export-ignore
+/.phpunit.cache export-ignore
+/cloud.e2e.database.yaml export-ignore
+/vendor export-ignore
