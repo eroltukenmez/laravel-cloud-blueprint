@@ -185,9 +185,9 @@ Import requires explicit confirmation unless `--auto-approve` is supplied. Any c
 
 ### `state:unmanage`
 
-Releases local LCB ownership of one exact State address, for example `environment.production` or `database.primary.application`. It never calls Laravel Cloud and does not require `LCB_TOKEN`. The command previews the change and defaults to no; use `--auto-approve` for automation, with optional `--non-interactive` or `--json`.
+Releases local LCB ownership of one exact State address. Supported address types are `application`, `environment`, `database_cluster`, and `database`; examples include `environment.production` and `database.primary.application`. It never calls Laravel Cloud and does not require `LCB_TOKEN`. The command previews the change and defaults to no; use `--auto-approve` for automation, with optional `--non-interactive` or `--json`.
 
-Ownership release is deliberately non-recursive. An Application or Database Cluster cannot be unmanaged while it has owned children; release those children explicitly first. Missing addresses are successful no-ops. If the resource remains in the blueprint, the next plan evaluates the still-existing Cloud resource as unmanaged; it can later follow the normal explicit `lcb import` workflow. This command is not delete, destroy, detach, or Cloud mutation.
+Ownership release is deliberately non-recursive. An Application or Database Cluster cannot be unmanaged while it has owned children; release those children explicitly first. Missing addresses are successful no-ops. If the resource remains in the blueprint, the next plan uses normal unmanaged discovery semantics; depending on Cloud reality, that can mean an unmanaged match or a supported CREATE. This command does not determine whether the remote resource exists. An existing resource can later follow the normal explicit `lcb import` workflow. This command is not delete, destroy, detach, or Cloud mutation.
 
 Run `lcb <command> --help` for exact usage.
 

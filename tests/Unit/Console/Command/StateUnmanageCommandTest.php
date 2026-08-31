@@ -6,6 +6,7 @@ namespace LaravelCloudBlueprint\Tests\Unit\Console\Command;
 
 use JsonException;
 use LaravelCloudBlueprint\Application\State\ReleaseStateOwnership;
+use LaravelCloudBlueprint\Application\State\StateOwnershipReleaseRefusedException;
 use LaravelCloudBlueprint\Console\Command\StateUnmanageCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Infrastructure\State\LocalFileStateStore;
@@ -161,6 +162,27 @@ final class StateUnmanageCommandTest extends TestCase
         ]));
         self::assertStringContainsString('requires --auto-approve', $refused->getDisplay());
         self::assertSame($before, file_get_contents($this->path));
+    }
+
+    public function testConcurrentRevalidationRefusalPreservesPersistedStateBytes(): void
+    {
+        $this->saveState();
+        $service = new ReleaseStateOwnership();
+        $proposal = $service->preview(
+            ResourceAddress::fromString('environment.production'),
+            $this->states,
+        );
+        $this->states->save(
+            $this->states->load()->withoutResource(ResourceAddress::fromString('environment.production')),
+        );
+        $before = file_get_contents($this->path);
+
+        try {
+            $service->execute($proposal, $this->states);
+            self::fail('Expected stale ownership proposal refusal.');
+        } catch (StateOwnershipReleaseRefusedException) {
+            self::assertSame($before, file_get_contents($this->path));
+        }
     }
 
     public function testNonInteractiveAutoApproveSucceedsWithoutToken(): void

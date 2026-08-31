@@ -90,6 +90,11 @@ final class ReleaseStateOwnershipTest extends TestCase
                 self::applicationAddress(),
             )),
         ];
+        yield 'child removed' => [
+            self::applicationAddress(),
+            self::state(),
+            static fn (StateDocument $state): StateDocument => $state->withoutResource(self::environmentAddress()),
+        ];
     }
 
     /** @param callable(StateDocument): StateDocument $change */
