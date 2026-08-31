@@ -7,7 +7,15 @@ namespace LaravelCloudBlueprint\Apply;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
 use LaravelCloudBlueprint\Apply\Exception\StateIdentityConflictException;
 use LaravelCloudBlueprint\Blueprint\Blueprint;
+use LaravelCloudBlueprint\Blueprint\LaravelMySqlConfiguration;
+use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateLaravelMySqlConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CreateNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
@@ -16,8 +24,10 @@ use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
+use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
@@ -25,14 +35,17 @@ use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\Contract\StateStore;
+use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
 use LaravelCloudBlueprint\State\StateResource;
 
 final readonly class CreateOnlyApply
 {
-    public function __construct(private VariableValueResolver $values)
-    {
+    public function __construct(
+        private VariableValueResolver $values,
+        private DatabaseClusterReadiness $databaseReadiness = new DatabaseClusterReadiness(),
+    ) {
     }
 
     public function execute(
@@ -42,22 +55,60 @@ final readonly class CreateOnlyApply
         StateStore $states,
     ): ApplyResult {
         $this->assertSupported($plan);
-
         $variableGroups = $this->variableGroups($blueprint, $plan);
 
         $transaction = $states->begin();
 
         try {
             $state = $transaction->load();
+            if ($this->hasDatabaseCreate($plan)) {
+                if (!$cloud instanceof LaravelCloudDatabaseMutationClient) {
+                    throw new ApplyRefusedException('The configured Cloud client cannot create Database resources. No resources were modified.');
+                }
+                $plannedDatabaseCreates = $this->databaseCreateActions($plan);
+                try {
+                    $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                } catch (CloudException $exception) {
+                    $action = $this->firstDatabaseCreate($plan);
+                    return new ApplyResult(
+                        $exception instanceof CloudTransportException ? ApplyStatus::PARTIAL_FAILURE : ApplyStatus::FAILED,
+                        new ApplyResourceOutcome(
+                            $action->address,
+                            ApplyOutcomeOperation::FAILED,
+                            'Locked Database revalidation failed before mutation: ' . $exception->getMessage(),
+                            $exception instanceof CloudValidationException ? $exception : null,
+                        ),
+                    );
+                }
+                foreach ($plannedDatabaseCreates as $plannedCreate) {
+                    $fresh = $this->actionAt($freshPlan, $plannedCreate->address);
+                    if ($state->find($plannedCreate->address) === null
+                        && ($fresh === null || $fresh->operation !== PlanOperation::CREATE)) {
+                        return new ApplyResult(
+                            ApplyStatus::FAILED,
+                            new ApplyResourceOutcome(
+                                $plannedCreate->address,
+                                ApplyOutcomeOperation::FAILED,
+                                'Database CREATE assumptions changed during locked revalidation; no POST was sent. Import any newly discovered resource before retrying.',
+                            ),
+                        );
+                    }
+                }
+                $plan = $freshPlan;
+                $this->assertSupported($plan);
+            }
             $this->verifyState($blueprint, $plan, $state);
+            $variableGroups = $this->variableGroups($blueprint, $plan);
             $outcomes = [];
             $applicationId = null;
             $environmentIds = [];
+            $databaseClusterIds = [];
             /** @var array<string, CloudEnvironment> $implicitEnvironments */
             $implicitEnvironments = [];
 
             foreach ($plan as $action) {
-                if ($action->resourceType === ResourceType::VARIABLE || $this->isDatabaseResource($action->resourceType)) {
+                if ($action->resourceType === ResourceType::VARIABLE
+                    || $action->resourceType === ResourceType::DATABASE_ATTACHMENT) {
                     continue;
                 }
 
@@ -68,10 +119,16 @@ final readonly class CreateOnlyApply
                     } elseif ($action->remoteId !== null) {
                         $environmentIds[$action->address->name] = $action->remoteId;
                     }
+                    if ($action->resourceType === ResourceType::DATABASE_CLUSTER) {
+                        $databaseClusterIds[$action->address->name] = $state->get($action->address)->remoteId;
+                    }
                     continue;
                 }
 
                 if ($action->operation === PlanOperation::UPDATE) {
+                    if ($this->isDatabaseResource($action->resourceType)) {
+                        throw new ApplyRefusedException('Database UPDATE apply is not supported. No resources were modified.');
+                    }
                     if ($action->resourceType === ResourceType::APPLICATION) {
                         throw new ApplyRefusedException('Application UPDATE apply is not supported. No resources were modified.');
                     }
@@ -93,6 +150,29 @@ final readonly class CreateOnlyApply
                     }
 
                     $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UPDATED);
+                    continue;
+                }
+
+                if ($action->resourceType === ResourceType::DATABASE_CLUSTER
+                    || $action->resourceType === ResourceType::DATABASE) {
+                    if (!$cloud instanceof LaravelCloudDatabaseMutationClient) {
+                        throw new ApplyRefusedException('The configured Cloud client cannot create Database resources.');
+                    }
+                    $databaseResult = $this->createDatabaseResource(
+                        $blueprint,
+                        $action,
+                        $cloud,
+                        $transaction,
+                        $state,
+                        $databaseClusterIds,
+                        $outcomes,
+                    );
+                    $state = $databaseResult['state'];
+                    $databaseClusterIds = $databaseResult['cluster_ids'];
+                    $outcomes = $databaseResult['outcomes'];
+                    if ($databaseResult['failure'] !== null) {
+                        return $databaseResult['failure'];
+                    }
                     continue;
                 }
 
@@ -299,9 +379,15 @@ final readonly class CreateOnlyApply
         }
 
         foreach ($plan as $action) {
-            if ($this->isDatabaseResource($action->resourceType)
+            if ($action->resourceType === ResourceType::DATABASE_ATTACHMENT
                 && $action->operation !== PlanOperation::NO_CHANGE) {
-                throw new ApplyRefusedException('Database plan actions are read-only. No resources were modified.');
+                throw new ApplyRefusedException('Database attachment mutation is not supported. No resources were modified.');
+            }
+            if (($action->resourceType === ResourceType::DATABASE_CLUSTER
+                    || $action->resourceType === ResourceType::DATABASE)
+                && $action->operation !== PlanOperation::NO_CHANGE
+                && $action->operation !== PlanOperation::CREATE) {
+                throw new ApplyRefusedException('Only Database CREATE actions are supported. No resources were modified.');
             }
 
             if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::APPLICATION) {
@@ -325,6 +411,312 @@ final readonly class CreateOnlyApply
         }
 
         $this->assertNoCreateAndUpdateForSameEnvironment($plan);
+    }
+
+    private function hasDatabaseCreate(ExecutionPlan $plan): bool
+    {
+        foreach ($plan as $action) {
+            if (($action->resourceType === ResourceType::DATABASE_CLUSTER
+                    || $action->resourceType === ResourceType::DATABASE)
+                && $action->operation === PlanOperation::CREATE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function firstDatabaseCreate(ExecutionPlan $plan): PlanAction
+    {
+        foreach ($plan as $action) {
+            if (($action->resourceType === ResourceType::DATABASE_CLUSTER
+                    || $action->resourceType === ResourceType::DATABASE)
+                && $action->operation === PlanOperation::CREATE) {
+                return $action;
+            }
+        }
+        throw new \LogicException('Database CREATE plan contains no Database CREATE action.');
+    }
+
+    /** @return list<PlanAction> */
+    private function databaseCreateActions(ExecutionPlan $plan): array
+    {
+        return array_values(array_filter(
+            iterator_to_array($plan, false),
+            static fn (PlanAction $action): bool => ($action->resourceType === ResourceType::DATABASE_CLUSTER
+                    || $action->resourceType === ResourceType::DATABASE)
+                && $action->operation === PlanOperation::CREATE,
+        ));
+    }
+
+    private function actionAt(ExecutionPlan $plan, ResourceAddress $address): ?PlanAction
+    {
+        foreach ($plan as $action) {
+            if ((string) $action->address === (string) $address) {
+                return $action;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param array<string, string> $clusterIds
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{
+     *   state: StateDocument,
+     *   cluster_ids: array<string, string>,
+     *   outcomes: list<ApplyResourceOutcome>,
+     *   failure: ApplyResult|null
+     * }
+     */
+    private function createDatabaseResource(
+        Blueprint $blueprint,
+        PlanAction $action,
+        LaravelCloudDatabaseMutationClient $cloud,
+        StateTransaction $transaction,
+        StateDocument $state,
+        array $clusterIds,
+        array $outcomes,
+    ): array {
+        if ($state->find($action->address) !== null) {
+            return $this->databaseCreateFailure(
+                $action,
+                'Local state began owning this Database address after planning; no create request was sent.',
+                $state,
+                $clusterIds,
+                $outcomes,
+            );
+        }
+
+        if ($action->resourceType === ResourceType::DATABASE_CLUSTER) {
+            $desired = $blueprint->databaseClusters->get($action->address->name);
+            try {
+                foreach ($cloud->databaseClusters() as $remote) {
+                    if ($remote->name === $desired->name) {
+                        return $this->databaseCreateFailure(
+                            $action,
+                            'A matching unmanaged Database Cluster appeared during locked revalidation; import is required.',
+                            $state,
+                            $clusterIds,
+                            $outcomes,
+                        );
+                    }
+                }
+                $created = $cloud->createDatabaseCluster(new CreateDatabaseClusterRequest(
+                    $desired->name,
+                    $desired->type->value,
+                    $desired->region,
+                    $this->databaseCreateConfiguration($desired->configuration),
+                ));
+            } catch (CloudException $exception) {
+                return $this->databaseCloudFailure($action, $exception, $state, $clusterIds, $outcomes);
+            }
+
+            if ($created->name !== $desired->name
+                || $created->type !== $desired->type->value
+                || $created->region !== $desired->region) {
+                return $this->databaseCreateFailure(
+                    $action,
+                    'Database Cluster create returned an incompatible identity; the remote outcome requires inspection and explicit import.',
+                    $state,
+                    $clusterIds,
+                    $outcomes,
+                    true,
+                );
+            }
+
+            try {
+                $state = $this->checkpointDatabaseResource(
+                    $blueprint,
+                    $transaction,
+                    $state,
+                    new StateResource($action->address, ResourceType::DATABASE_CLUSTER, $created->id),
+                );
+            } catch (StateStorageException $exception) {
+                return $this->databaseCreateFailure(
+                    $action,
+                    'Remote Database Cluster was created but its local ownership checkpoint failed; inspect Cloud and use import before retrying.',
+                    $state,
+                    $clusterIds,
+                    $outcomes,
+                    true,
+                );
+            }
+
+            $clusterIds[$desired->name] = $created->id;
+            $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
+            try {
+                $this->databaseReadiness->wait($cloud, $created);
+            } catch (CloudException $exception) {
+                $next = $this->firstDatabaseCreateForCluster($blueprint, $desired->name);
+                if ($next !== null) {
+                    $outcomes[] = new ApplyResourceOutcome($next, ApplyOutcomeOperation::FAILED, $exception->getMessage());
+                }
+                return [
+                    'state' => $state,
+                    'cluster_ids' => $clusterIds,
+                    'outcomes' => $outcomes,
+                    'failure' => new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes),
+                ];
+            }
+
+            return ['state' => $state, 'cluster_ids' => $clusterIds, 'outcomes' => $outcomes, 'failure' => null];
+        }
+
+        [$clusterName, $databaseName] = explode('.', $action->address->name, 2);
+        $clusterId = $clusterIds[$clusterName] ?? null;
+        if ($clusterId === null) {
+            return $this->databaseCreateFailure(
+                $action,
+                'Authoritative parent Database Cluster identity is unavailable; no create request was sent.',
+                $state,
+                $clusterIds,
+                $outcomes,
+            );
+        }
+
+        try {
+            foreach ($cloud->databases($clusterId) as $remote) {
+                if ($remote->name === $databaseName) {
+                    return $this->databaseCreateFailure(
+                        $action,
+                        'A matching unmanaged logical Database appeared during locked revalidation; import is required.',
+                        $state,
+                        $clusterIds,
+                        $outcomes,
+                    );
+                }
+            }
+            $created = $cloud->createDatabase($clusterId, new CreateDatabaseRequest($databaseName));
+        } catch (CloudException $exception) {
+            return $this->databaseCloudFailure($action, $exception, $state, $clusterIds, $outcomes);
+        }
+
+        if ($created->clusterId !== $clusterId || $created->name !== $databaseName) {
+            return $this->databaseCreateFailure(
+                $action,
+                'Logical Database create returned an incompatible identity; the remote outcome requires inspection and explicit import.',
+                $state,
+                $clusterIds,
+                $outcomes,
+                true,
+            );
+        }
+
+        try {
+            $state = $this->checkpointDatabaseResource(
+                $blueprint,
+                $transaction,
+                $state,
+                new StateResource(
+                    $action->address,
+                    ResourceType::DATABASE,
+                    $created->id,
+                    new ResourceAddress(ResourceType::DATABASE_CLUSTER, $clusterName),
+                ),
+            );
+        } catch (StateStorageException) {
+            return $this->databaseCreateFailure(
+                $action,
+                'Remote logical Database was created but its local ownership checkpoint failed; inspect Cloud and use import before retrying.',
+                $state,
+                $clusterIds,
+                $outcomes,
+                true,
+            );
+        }
+
+        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
+        return ['state' => $state, 'cluster_ids' => $clusterIds, 'outcomes' => $outcomes, 'failure' => null];
+    }
+
+    private function databaseCreateConfiguration(
+        \LaravelCloudBlueprint\Blueprint\DatabaseClusterConfiguration $configuration,
+    ): \LaravelCloudBlueprint\Cloud\DTO\DatabaseClusterCreateConfiguration {
+        return match (true) {
+            $configuration instanceof LaravelMySqlConfiguration => new CreateLaravelMySqlConfiguration(
+                $configuration->size,
+                $configuration->storage,
+                $configuration->retentionDays,
+                $configuration->usesScheduledSnapshots,
+                $configuration->isPublic,
+            ),
+            $configuration instanceof NeonPostgresConfiguration => new CreateNeonPostgresConfiguration(
+                $configuration->minimumComputeUnits,
+                $configuration->maximumComputeUnits,
+                $configuration->suspendSeconds,
+                $configuration->retentionDays,
+            ),
+            default => throw new \LogicException('Unsupported Database Cluster create configuration.'),
+        };
+    }
+
+    private function checkpointDatabaseResource(
+        Blueprint $blueprint,
+        StateTransaction $transaction,
+        StateDocument $state,
+        StateResource $resource,
+    ): StateDocument {
+        if ($state->organization === null) {
+            $state = $state->withOrganization($blueprint->organization);
+        }
+        return $transaction->save($state->withResource($resource));
+    }
+
+    private function firstDatabaseCreateForCluster(Blueprint $blueprint, string $cluster): ?ResourceAddress
+    {
+        foreach ($blueprint->databaseClusters->get($cluster)->databases as $database) {
+            return new ResourceAddress(ResourceType::DATABASE, $cluster . '.' . $database->name);
+        }
+        return null;
+    }
+
+    /**
+     * @param array<string, string> $clusterIds
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{state: StateDocument, cluster_ids: array<string, string>, outcomes: list<ApplyResourceOutcome>, failure: ApplyResult}
+     */
+    private function databaseCloudFailure(
+        PlanAction $action,
+        CloudException $exception,
+        StateDocument $state,
+        array $clusterIds,
+        array $outcomes,
+    ): array {
+        return $this->databaseCreateFailure(
+            $action,
+            $exception->getMessage(),
+            $state,
+            $clusterIds,
+            $outcomes,
+            $exception instanceof CloudTransportException || $exception instanceof CloudResponseException,
+            $exception instanceof CloudValidationException ? $exception : null,
+        );
+    }
+
+    /**
+     * @param array<string, string> $clusterIds
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{state: StateDocument, cluster_ids: array<string, string>, outcomes: list<ApplyResourceOutcome>, failure: ApplyResult}
+     */
+    private function databaseCreateFailure(
+        PlanAction $action,
+        string $message,
+        StateDocument $state,
+        array $clusterIds,
+        array $outcomes,
+        bool $uncertain = false,
+        ?CloudValidationException $validation = null,
+    ): array {
+        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $message, $validation);
+        $status = $this->confirmedMutationCount($outcomes) === 0 && !$uncertain
+            ? ApplyStatus::FAILED
+            : ApplyStatus::PARTIAL_FAILURE;
+        return [
+            'state' => $state,
+            'cluster_ids' => $clusterIds,
+            'outcomes' => $outcomes,
+            'failure' => new ApplyResult($status, ...$outcomes),
+        ];
     }
 
     private function assertNoCreateAndUpdateForSameEnvironment(ExecutionPlan $plan): void

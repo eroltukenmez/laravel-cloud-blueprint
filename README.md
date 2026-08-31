@@ -169,7 +169,7 @@ Text plans use `+` for create, `~` for update, `=` for no change, and `!` for un
 
 Planning is read-only and deterministic. Extra remote resources are not deleted. Application repository and region differences are reported as unsupported, so they cannot be accidentally applied.
 
-Planning loads local state and treats stored Application, Environment, Database Cluster, and logical Database remote IDs as authoritative ownership. A missing managed identity or a same-name replacement is reported as unsupported and is never automatically recreated or adopted. Exact-name resources without state ownership may still be inspected read-only; an unmanaged Environment must be explicitly adopted with `lcb import` before LCB can update its branch. Imported Database resources remain read-only: differences and removal from the blueprint stay visible as unsupported operations. A genuinely missing Application or Environment with no state ownership remains eligible for `CREATE`.
+Planning loads local state and treats stored Application, Environment, Database Cluster, and logical Database remote IDs as authoritative ownership. A missing managed identity or a same-name replacement is reported as unsupported and is never automatically recreated or adopted. Exact-name resources without state ownership may still be inspected read-only; existing unmanaged resources must be explicitly adopted with `lcb import` before LCB can mutate them or create owned children. Genuinely absent Database Clusters and logical Databases under new or already-owned Clusters are eligible for `CREATE`. Database configuration differences and removal from the blueprint remain unsupported.
 
 Removing a managed Application or Environment from the blueprint does not delete the Laravel Cloud resource or remove its identity from local state. The owned resource remains visible in the plan as `UNSUPPORTED`, and apply refuses the entire plan until the lifecycle condition is resolved. LCB does not currently provide destroy, automatic state cleanup, rename inference, or a state-removal command.
 
@@ -179,13 +179,17 @@ Environment variables remain desired-only and are not recorded as owned state re
 
 Apply always creates a fresh plan, refuses the entire plan before Cloud mutation when any unsupported action is present, and requests approval unless auto-approved. Interactive approval defaults to no. After approval and preflight checks it acquires the state lock for managed mutation and state work. Potentially duplicate-creating POST requests are never automatically retried.
 
-Supported work is processed in dependency order: application, environments, then environment-variable groups. Environment branch updates use Laravel Cloud's environment PATCH endpoint and accept a confirmed success response without requiring an `attributes.branch` string. Variables are sent per environment with Laravel Cloud's `method=set` mode for both create and update.
+Supported work is processed in dependency order: application, environments, Database Clusters, logical Databases, then environment-variable groups. Environment branch updates use Laravel Cloud's environment PATCH endpoint and accept a confirmed success response without requiring an `attributes.branch` string. Variables are sent per environment with Laravel Cloud's `method=set` mode for both create and update.
+
+Database Cluster and logical Database creation use typed provider-specific requests. Each confirmed remote identity is checkpointed immediately before dependent work continues. Cluster readiness uses bounded, deterministic GET-only observation; neither Cluster nor logical Database POST requests are automatically retried. An uncertain POST outcome or failed state checkpoint stops dependent creation and directs the operator to inspect Laravel Cloud and use explicit import. Database connection and credential fields are discarded at the HTTP parsing boundary.
+
+Environment Database attachment remains unsupported. Because `UNSUPPORTED` retains its global apply-blocking meaning, a desired attachment prevents the same plan from creating its Database resources. Temporarily omit the Environment `database` reference, create and checkpoint the Database resources, then restore the reference for read-only visibility until attachment support is implemented. No Environment Database PATCH or injected-variable handling occurs in this release.
 
 Successful application and environment creations are checkpointed as work progresses. Environment branch updates retain their remote identity and do not cause a state save or serial increment solely because of the update. Variables remain outside state, so variable updates likewise do not save or increment state. A pure supported UPDATE apply leaves `.lcb/state.json` unchanged; a mixed CREATE + UPDATE apply can change it when a successful CREATE identity is checkpointed. A later failure is reported as partial, with completed checkpoints retained, and confirmed remote mutations are not rolled back.
 
 ## State
 
-Local state is stored in `.lcb/state.json`. It contains remote IDs for LCB-managed application and environment resources. Variables are not state resources, and their values are never stored.
+Local state is stored in `.lcb/state.json`. It contains remote IDs for LCB-managed Application, Environment, Database Cluster, and logical Database resources. Variables and Database attachments are not state resources, and secret values are never stored.
 
 State uses local locking and atomic replacement and should not be edited manually. `init --from-cloud` neither creates state nor adopts remote resources into existing state.
 
@@ -206,7 +210,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 ## Known Limitations
 
 - This is early alpha software with a limited mutation model.
-- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references. `lcb plan` compares them with Laravel Cloud read-only: missing, differing, ambiguous, unknown, or attachment-changing resources are reported as unsupported. Exact matches may be explicitly adopted with `lcb import`; afterward, stored Cluster and logical Database IDs are authoritative. Database creation, update, deletion, and attachment mutation remain unsupported. Apply and import never mutate Database resources.
+- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references. Discovery, planning, explicit import, Database Cluster CREATE, and logical Database CREATE are supported. Existing resources require import before owned mutation. Database configuration UPDATE, Environment attachment, detach, DELETE, and destroy remain unsupported.
 - Environment branch and variable value updates are supported; other updates and renames are not. A variable-key change is not an in-place rename and cannot remove the old remote key.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
@@ -214,7 +218,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 - Managed Applications and Environments removed from the blueprint are reported as unsupported and retained in state; they are not deleted. Rename/state-move semantics are not supported.
 - Removed environment-variable keys are not reported because variables do not yet have state ownership; remote variables remain untouched.
 - DELETE, destroy, drift repair, and remote state are not supported.
-- Database mutation, Database attachment ownership, caches, storage, domains, and Secrets Manager are not supported.
+- Database configuration mutation, Database attachment ownership/mutation, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.
 - Source-provider metadata may be absent from API responses and require `--provider`.
 - Environment-variable mutation uses Laravel Cloud's `method=set` request mode for both creates and updates.
@@ -224,7 +228,8 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 
 ## Roadmap
 
-- Database and cache resources
+- Database attachment and configuration updates; attachment work must define safe handling for automatically injected `DB_*` variables before enabling PATCH
+- Cache resources
 - Richer planning and update semantics
 - Broader import workflows and conflict repair
 - Destroy and drift detection

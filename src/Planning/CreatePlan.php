@@ -714,15 +714,25 @@ final readonly class CreatePlan
             if ($matches === []) {
                 $clusterActions[] = $this->databaseClusterAction(
                     $desiredCluster->name,
-                    PlanOperation::UNSUPPORTED,
+                    $managedCluster === null ? PlanOperation::CREATE : PlanOperation::UNSUPPORTED,
                     $managedCluster === null
-                        ? 'Matching Database Cluster does not exist. Database Cluster creation is not supported yet.'
+                        ? 'Database Cluster does not exist and will be created and state-owned.'
                         : ($this->hasClusterNamed($remoteClusters, $desiredCluster->name)
                             ? 'Owned Database Cluster remote identity is missing and a same-name unmanaged replacement exists. Automatic adoption or creation is not supported.'
                             : 'Owned Database Cluster remote identity is missing. State repair is required; replacement creation is not supported.'),
                 );
-                $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
-                    'Logical Database cannot be resolved because its parent Database Cluster does not exist.');
+                if ($managedCluster === null) {
+                    foreach ($desiredCluster->databases as $desiredDatabase) {
+                        $databaseActions[] = $this->databaseAction(
+                            $desiredCluster->name . '.' . $desiredDatabase->name,
+                            PlanOperation::CREATE,
+                            'Logical Database will be created after its new parent Database Cluster is checkpointed.',
+                        );
+                    }
+                } else {
+                    $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
+                        'Logical Database cannot be resolved because its owned parent Database Cluster does not exist.');
+                }
                 continue;
             }
             if (count($matches) > 1) {
@@ -770,11 +780,14 @@ final readonly class CreatePlan
                         static fn (CloudDatabase $database): bool => $database->id === $managedDatabase->remoteId,
                     ));
                 if ($databaseMatches === []) {
+                    $createAllowed = $managedDatabase === null && $managedCluster !== null;
                     $databaseActions[] = $this->databaseAction(
                         $name,
-                        PlanOperation::UNSUPPORTED,
+                        $createAllowed ? PlanOperation::CREATE : PlanOperation::UNSUPPORTED,
                         $managedDatabase === null
-                            ? 'Matching logical Database does not exist. Logical Database creation is not supported yet.'
+                            ? ($managedCluster === null
+                                ? 'Logical Database is missing under an unmanaged Cluster. Import the parent Cluster before creating children.'
+                                : 'Logical Database does not exist and will be created in its owned parent Cluster.')
                             : ($this->hasDatabaseNamed($remoteDatabases, $desiredDatabase->name)
                                 ? 'Owned logical Database remote identity is missing and a same-name unmanaged replacement exists. Automatic adoption or creation is not supported.'
                                 : 'Owned logical Database remote identity is missing from its expected Cluster. State repair is required.'),

@@ -8,16 +8,169 @@ use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudUnknownDatabaseConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateLaravelMySqlConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CreateNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Infrastructure\Http\SymfonyLaravelCloudClient;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpClient\MockHttpClient;
 use Symfony\Component\HttpClient\Response\MockResponse;
+use Symfony\Component\HttpClient\Exception\TransportException;
 
 final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
 {
     private const string SECRET = 'DATABASE-SENTINEL-MUST-NEVER-LEAK';
+
+    public function testCreatesLaravelMysqlClusterWithVerifiedPayloadAndDiscardsCredentials(): void
+    {
+        $resource = self::mysqlResource('created-cluster');
+        $response = new MockResponse(self::detail($resource), ['http_code' => 201]);
+        $created = $this->client([$response])->createDatabaseCluster(new CreateDatabaseClusterRequest(
+            'Primary',
+            'laravel_mysql_8',
+            'eu-central-1',
+            new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+        ));
+
+        self::assertSame('created-cluster', $created->id);
+        self::assertSame('/api/databases/clusters', parse_url($response->getRequestUrl(), PHP_URL_PATH));
+        self::assertSame([
+            'type' => 'laravel_mysql_8',
+            'name' => 'Primary',
+            'region' => 'eu-central-1',
+            'config' => [
+                'size' => 'db-flex.m-1vcpu-512mb',
+                'storage' => 5,
+                'retention_days' => 1,
+                'uses_scheduled_snapshots' => false,
+                'is_public' => false,
+            ],
+        ], self::requestBody($response));
+        self::assertStringNotContainsString(self::SECRET, serialize($created));
+    }
+
+    public function testCreatesNeonClusterWithVerifiedPayload(): void
+    {
+        $response = new MockResponse(self::detail(self::neonResource('created-neon')), ['http_code' => 201]);
+        $this->client([$response])->createDatabaseCluster(new CreateDatabaseClusterRequest(
+            'Primary',
+            'neon_serverless_postgres_18',
+            'eu-central-1',
+            new CreateNeonPostgresConfiguration(0.25, 1.0, 300, 7),
+        ));
+
+        $body = self::requestBody($response);
+        self::assertSame([
+            'cu_min' => 0.25,
+            'cu_max' => 1.0,
+            'suspend_seconds' => 300,
+            'retention_days' => 7,
+        ], $body['config']);
+
+        $neon17 = self::withAttribute(self::neonResource('created-neon-17'), 'type', 'neon_serverless_postgres_17');
+        $response17 = new MockResponse(self::detail($neon17), ['http_code' => 201]);
+        $this->client([$response17])->createDatabaseCluster(new CreateDatabaseClusterRequest(
+            'Primary',
+            'neon_serverless_postgres_17',
+            'eu-central-1',
+            new CreateNeonPostgresConfiguration(0.25, 1.0, 300, 7),
+        ));
+        self::assertSame(
+            'neon_serverless_postgres_17',
+            self::requestBody($response17)['type'],
+        );
+    }
+
+    public function testCreatesLogicalDatabaseWithVerifiedEndpointPayloadAndSafeResponse(): void
+    {
+        $resource = self::databaseResource('created-database', 'application');
+        $resource = self::withAttribute($resource, 'connection', ['password' => self::SECRET]);
+        $response = new MockResponse(self::detail($resource), ['http_code' => 201]);
+        $created = $this->client([$response])->createDatabase('cluster-1', new CreateDatabaseRequest('application'));
+
+        self::assertSame('created-database', $created->id);
+        self::assertSame('cluster-1', $created->clusterId);
+        self::assertSame('/api/databases/clusters/cluster-1/databases', parse_url($response->getRequestUrl(), PHP_URL_PATH));
+        self::assertSame(['name' => 'application'], self::requestBody($response));
+        self::assertStringNotContainsString(self::SECRET, serialize($created));
+    }
+
+    public function testDatabaseCreateApiErrorsAreSanitizedAndNeverRetried(): void
+    {
+        foreach ([401, 403, 404, 409, 422, 429, 500] as $status) {
+            try {
+                $this->client([new MockResponse(
+                    '{"message":"' . self::SECRET . '"}',
+                    ['http_code' => $status],
+                )])->createDatabase('cluster-1', new CreateDatabaseRequest('application'));
+                self::fail('Expected Database create failure for HTTP ' . $status);
+            } catch (CloudException $exception) {
+                self::assertStringNotContainsString(self::SECRET, serialize($exception));
+            }
+        }
+
+        $attempts = 0;
+        $http = new MockHttpClient(static function () use (&$attempts): never {
+            ++$attempts;
+            throw new TransportException('timeout after send');
+        });
+        try {
+            (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))
+                ->createDatabase('cluster-1', new CreateDatabaseRequest('application'));
+            self::fail('Expected uncertain Database create failure.');
+        } catch (CloudTransportException $exception) {
+            self::assertSame(1, $attempts);
+            self::assertStringContainsString('uncertain', $exception->getMessage());
+        }
+    }
+
+    public function testMalformedDatabaseCreateSuccessIsUncertainAndSecretFree(): void
+    {
+        try {
+            $this->client([new MockResponse(
+                '{"data":{"id":"database-1","attributes":{"password":"' . self::SECRET . '"}}}',
+                ['http_code' => 201],
+            )])->createDatabase('cluster-1', new CreateDatabaseRequest('application'));
+            self::fail('Expected malformed Database create response.');
+        } catch (CloudResponseException $exception) {
+            self::assertStringNotContainsString(self::SECRET, serialize($exception));
+        }
+    }
+
+    public function testDatabaseCreateEndpointsAcceptExactlyHttp201(): void
+    {
+        foreach ([200, 202, 204] as $unexpectedStatus) {
+            try {
+                $this->client([new MockResponse(
+                    self::detail(self::mysqlResource('cluster-1')),
+                    ['http_code' => $unexpectedStatus],
+                )])->createDatabaseCluster(new CreateDatabaseClusterRequest(
+                    'Primary',
+                    'laravel_mysql_8',
+                    'eu-central-1',
+                    new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+                ));
+                self::fail('Expected Cluster create status rejection.');
+            } catch (CloudResponseException $exception) {
+                self::assertSame($unexpectedStatus, $exception->statusCode);
+            }
+
+            try {
+                $this->client([new MockResponse(
+                    self::detail(self::databaseResource('database-1', 'application')),
+                    ['http_code' => $unexpectedStatus],
+                )])->createDatabase('cluster-1', new CreateDatabaseRequest('application'));
+                self::fail('Expected logical Database create status rejection.');
+            } catch (CloudResponseException $exception) {
+                self::assertSame($unexpectedStatus, $exception->statusCode);
+            }
+        }
+    }
 
     public function testLaravelMysqlClusterMapsOnlyTypedSafeFields(): void
     {
@@ -218,6 +371,21 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
     private function client(array $responses): SymfonyLaravelCloudClient
     {
         return new SymfonyLaravelCloudClient(new MockHttpClient($responses), new CloudApiToken('test-token'));
+    }
+
+    /** @return array<string, mixed> */
+    private static function requestBody(MockResponse $response): array
+    {
+        $body = $response->getRequestOptions()['body'] ?? null;
+        self::assertIsString($body);
+        $decoded = json_decode($body, true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        $mapping = [];
+        foreach ($decoded as $key => $value) {
+            self::assertIsString($key);
+            $mapping[$key] = $value;
+        }
+        return $mapping;
     }
 
     /** @return array<string, mixed> */

@@ -6,7 +6,7 @@ namespace LaravelCloudBlueprint\Infrastructure\Http;
 
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
-use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
@@ -21,6 +21,8 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudUnknownDatabaseConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
@@ -37,7 +39,7 @@ use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
-final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseClient
+final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient
 {
     private const string BASE_URL = 'https://cloud.laravel.com/api';
     private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.4';
@@ -195,6 +197,27 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseCl
         }
 
         return $database;
+    }
+
+    public function createDatabaseCluster(CreateDatabaseClusterRequest $request): CloudDatabaseCluster
+    {
+        $path = '/databases/clusters';
+        $document = $this->post($path, [
+            'type' => $request->type,
+            'name' => $request->name,
+            'region' => $request->region,
+            'config' => $request->configuration->payload(),
+        ]);
+
+        return $this->databaseClusterFromResource($this->mappingAt($document, 'data', $path), $path);
+    }
+
+    public function createDatabase(string $clusterId, CreateDatabaseRequest $request): CloudDatabase
+    {
+        $path = sprintf('/databases/clusters/%s/databases', rawurlencode($clusterId));
+        $document = $this->post($path, ['name' => $request->name]);
+
+        return $this->databaseFromResource($this->mappingAt($document, 'data', $path), $clusterId, $path);
     }
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication
@@ -389,7 +412,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseCl
     }
 
     /**
-     * @param array<string, string> $payload
+     * @param array<string, mixed> $payload
      * @return array<string, mixed>
      */
     private function post(string $path, array $payload): array
@@ -414,7 +437,8 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseCl
             );
         }
 
-        $this->guardStatus($status, $path, $requestId, 'POST', $response, array_values($payload));
+        $sensitiveValues = array_values(array_filter($payload, is_string(...)));
+        $this->guardStatus($status, $path, $requestId, 'POST', $response, $sensitiveValues);
 
         if ($status !== 201) {
             throw new CloudResponseException('Laravel Cloud create response did not return HTTP 201.', 'POST', $path, $status, $requestId);
@@ -436,7 +460,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseCl
     }
 
     /**
-     * @param array<string, string> $payload
+     * @param array<string, mixed> $payload
      * @return array<string, mixed>
      */
     private function patch(string $path, array $payload): array

@@ -66,14 +66,14 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame([], $cloud->databaseCalls);
     }
 
-    public function testMissingClusterAndItsDependentsAreUnsupported(): void
+    public function testMissingClusterAndItsLogicalDatabasesAreCreatedWhileAttachmentRemainsUnsupported(): void
     {
         $plan = self::plan(self::blueprint(), new DatabasePlanningCloud(clusters: []));
 
-        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database_cluster.primary')->operation);
-        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database.primary.application')->operation);
+        self::assertSame(PlanOperation::CREATE, self::action($plan, 'database_cluster.primary')->operation);
+        self::assertSame(PlanOperation::CREATE, self::action($plan, 'database.primary.application')->operation);
         self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database_attachment.production')->operation);
-        self::assertSame(3, $plan->countByOperation(PlanOperation::UNSUPPORTED));
+        self::assertSame(1, $plan->countByOperation(PlanOperation::UNSUPPORTED));
     }
 
     public function testExactMysqlClusterDatabaseAndAttachmentAreReadOnlyNoChange(): void
@@ -204,10 +204,14 @@ final class DatabasePlanningTest extends TestCase
     /** @return iterable<string, array{string, string}> */
     public static function unsafeStatuses(): iterable
     {
-        yield 'transitional' => ['creating', 'transitional'];
-        yield 'failed' => ['failed', 'usable'];
-        yield 'unavailable' => ['unavailable', 'usable'];
-        yield 'unknown' => ['future-status', 'unknown'];
+        yield 'creating' => ['creating', 'transitional'];
+        yield 'updating' => ['updating', 'transitional'];
+        yield 'restoring' => ['restoring', 'transitional'];
+        yield 'archiving' => ['archiving', 'transitional'];
+        yield 'restore failed' => ['restore_failed', 'usable'];
+        yield 'disabled' => ['disabled', 'usable'];
+        yield 'official unknown' => ['unknown', 'usable'];
+        yield 'unrecognized' => ['future-status', 'unknown'];
     }
 
     #[DataProvider('unsafeStatuses')]
@@ -250,6 +254,25 @@ final class DatabasePlanningTest extends TestCase
         $action = self::action(self::plan(self::blueprint(), $duplicate), 'database.primary.application');
         self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
         self::assertStringContainsString('ambiguous', $action->reason);
+    }
+
+    public function testMissingLogicalDatabaseUnderOwnedClusterIsCreate(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(
+            StateVersion::V1,
+            1,
+            'acme',
+            new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+        );
+        $action = self::action(self::plan(
+            self::blueprint(),
+            self::matchingCloud(databases: []),
+            $state,
+        ), 'database.primary.application');
+
+        self::assertSame(PlanOperation::CREATE, $action->operation);
+        self::assertStringContainsString('owned parent', $action->reason);
     }
 
     public function testSameDatabaseNameInUnrelatedClusterIsIgnored(): void
@@ -325,20 +348,11 @@ final class DatabasePlanningTest extends TestCase
         self::assertStringNotContainsString('password', serialize($databaseActions));
     }
 
-    /** @return iterable<string, array{ResourceType}> */
-    public static function databaseResourceTypes(): iterable
-    {
-        yield 'Cluster' => [ResourceType::DATABASE_CLUSTER];
-        yield 'logical Database' => [ResourceType::DATABASE];
-        yield 'attachment' => [ResourceType::DATABASE_ATTACHMENT];
-    }
-
-    #[DataProvider('databaseResourceTypes')]
-    public function testApplyRefusesAnyActionableDatabaseOperation(ResourceType $type): void
+    public function testApplyRefusesActionableDatabaseAttachmentOperation(): void
     {
         $plan = new ExecutionPlan(new PlanAction(
-            new ResourceAddress($type, 'test'),
-            $type,
+            new ResourceAddress(ResourceType::DATABASE_ATTACHMENT, 'test'),
+            ResourceType::DATABASE_ATTACHMENT,
             PlanOperation::CREATE,
             'Must remain read-only.',
         ));

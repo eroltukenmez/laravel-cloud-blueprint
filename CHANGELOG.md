@@ -6,6 +6,8 @@ This project uses a Keep a Changelog-inspired format.
 
 ### Changed
 
+- Added safe Database Cluster and logical Database creation with typed provider payloads, locked Cloud/state revalidation, immediate identity checkpoints, bounded GET-only Cluster readiness observation, and no automatic POST retry.
+- Missing logical Databases may be created only under a newly created or already state-owned Cluster; unmanaged matches still require explicit import, while stale identities, replacements, configuration changes, attachments, and deletion remain unsupported.
 - Extended atomic `lcb import` state adoption to Database Clusters and logical Databases, with exact scoped matching, parent-first dependencies, locked rediscovery, and no Database mutations or attachment ownership.
 - State schema v1 now persists Database Cluster and logical Database identities, and planning resolves imported resources by stored IDs while safely reporting stale identities, same-name replacements, configuration differences, and owned resources absent from the blueprint.
 - Planning now compares desired Database Clusters, logical Databases, and Environment attachments with safe Cloud discovery while classifying every required Database change as unsupported and exact unmanaged matches as read-only no-change actions.

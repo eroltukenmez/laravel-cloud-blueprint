@@ -10,9 +10,10 @@ final readonly class DatabaseClusterStatusPolicy
     {
         return match ($status) {
             'available' => null,
-            'pending', 'creating', 'updating', 'provisioning' =>
+            'creating', 'updating', 'restarting', 'upgrading', 'moving', 'restoring',
+            'snapshotting_before_archiving', 'archiving', 'deleting' =>
                 'Remote Database Cluster is in a transitional status; planning cannot compare it safely yet.',
-            'failed', 'deleting', 'unavailable' =>
+            'stopped', 'restore_failed', 'disabled', 'archived', 'deleted', 'unknown' =>
                 'Remote Database Cluster is not in a usable status and cannot be reconciled safely.',
             default => 'Remote Database Cluster status is unknown and cannot be reconciled safely.',
         };
