@@ -51,7 +51,18 @@ Composer's global bin directory must be available in `PATH` for the `lcb` comman
 
 Current version: `0.1.0-alpha.4`.
 
-This release can discover and compare applications, environments, and environment variables. It can create missing applications, environments, and variables; update an environment's branch; update an existing variable's value; and explicitly adopt existing Application and Environment identities into local state. Application repository and region changes remain unsupported.
+The current development branch can discover and compare applications, environments, environment variables, Database Clusters, and logical Databases. It can create missing resources in that supported set, update an environment's branch or an existing variable's value, and explicitly adopt identity-bearing resources into local state. Application repository and region changes and all Database update, attachment, replacement, and deletion lifecycles remain unsupported.
+
+| Database capability | Status |
+| --- | --- |
+| Blueprint definitions | Supported |
+| Cloud discovery and planning | Supported |
+| Import and state ownership | Supported |
+| Database Cluster CREATE | Supported |
+| Logical Database CREATE | Supported |
+| Environment attachment | Unsupported |
+| Database UPDATE or replacement | Unsupported |
+| Database DELETE or destroy | Unsupported |
 
 ## Requirements
 
@@ -120,6 +131,18 @@ environments:
       APP_KEY:
         from_env: APP_KEY
         sensitive: true
+
+database_clusters:
+  primary:
+    type: neon_serverless_postgres_18
+    region: eu-central-1
+    config:
+      cu_min: 0.25
+      cu_max: 1
+      suspend_seconds: 300
+      retention_days: 7
+    databases:
+      application: {}
 ```
 
 `value` supplies a literal string. `from_env` resolves a value from the local process environment when needed for reconciliation, including the fresh plan performed by apply. `sensitive: true` marks intent but does not weaken or strengthen output redaction; it does not create or use a Laravel Cloud Secrets Manager secret.
@@ -152,7 +175,7 @@ Creates and updates supported resources after producing a fresh plan. Supports `
 
 ### `import`
 
-Adopts existing Application and Environment identities into local LCB state without modifying Laravel Cloud resources. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
+Adopts existing Application, Environment, Database Cluster, and logical Database identities into local LCB state without modifying Laravel Cloud resources. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
 
 Import requires explicit confirmation unless `--auto-approve` is supplied. Any conflict or unsupported candidate blocks the entire import. Database Clusters are matched by exact name, type, and region; mutable configuration is deliberately not an import-compatibility gate. Logical Databases are matched by exact name within their resolved parent Cluster. Parent resources are proposed before children, and a parent failure blocks its children. Environment variables, Database attachments, credentials, and connection data are never imported into state. Import performs fresh Cloud discovery after acquiring the state lock so that stale preview identities are not persisted. The lock protects local state writers only; it does not lock or freeze Laravel Cloud resources.
 
@@ -177,13 +200,17 @@ Environment variables remain desired-only and are not recorded as owned state re
 
 ## Apply Semantics
 
-Apply always creates a fresh plan, refuses the entire plan before Cloud mutation when any unsupported action is present, and requests approval unless auto-approved. Interactive approval defaults to no. After approval and preflight checks it acquires the state lock for managed mutation and state work. Potentially duplicate-creating POST requests are never automatically retried.
+Apply always creates a fresh plan, refuses the entire plan before Cloud mutation when any unsupported action is present, and requests approval unless auto-approved. Interactive approval defaults to no. After approval and preflight checks it acquires the state lock for managed mutation and state work. Database CREATE plans are revalidated under that lock; revalidation may remove stale work but refuses any newly appearing actionable change until it has been shown in another plan. Potentially duplicate-creating POST requests are never automatically retried.
 
 Supported work is processed in dependency order: application, environments, Database Clusters, logical Databases, then environment-variable groups. Environment branch updates use Laravel Cloud's environment PATCH endpoint and accept a confirmed success response without requiring an `attributes.branch` string. Variables are sent per environment with Laravel Cloud's `method=set` mode for both create and update.
 
 Database Cluster and logical Database creation use typed provider-specific requests. Each confirmed remote identity is checkpointed immediately before dependent work continues. Cluster readiness uses bounded, deterministic GET-only observation; neither Cluster nor logical Database POST requests are automatically retried. An uncertain POST outcome or failed state checkpoint stops dependent creation and directs the operator to inspect Laravel Cloud and use explicit import. Database connection and credential fields are discarded at the HTTP parsing boundary.
 
+The safe Database workflow is: define a Cluster and its logical Databases, validate, review the read-only plan, apply, checkpoint each confirmed identity, then verify that the next plan is `NO_CHANGE`. An exact remote match without local ownership remains read-only until explicitly adopted with `lcb import`.
+
 Environment Database attachment remains unsupported. Because `UNSUPPORTED` retains its global apply-blocking meaning, a desired attachment prevents the same plan from creating its Database resources. Temporarily omit the Environment `database` reference, create and checkpoint the Database resources, then restore the reference for read-only visibility until attachment support is implemented. No Environment Database PATCH or injected-variable handling occurs in this release.
+
+Database Cluster and logical Database creation were verified in a controlled real Laravel Cloud E2E using `neon_serverless_postgres_18` with a Dev-sized configuration. Both identities were checkpointed, the post-create plan reconciled to `NO_CHANGE`, and repeat apply returned `No changes` without rewriting state. No credential material appeared in visible output or state. Environment attachment was neither tested nor enabled, and the CLI output did not expose the internal readiness status sequence or raw create HTTP status.
 
 Successful application and environment creations are checkpointed as work progresses. Environment branch updates retain their remote identity and do not cause a state save or serial increment solely because of the update. Variables remain outside state, so variable updates likewise do not save or increment state. A pure supported UPDATE apply leaves `.lcb/state.json` unchanged; a mixed CREATE + UPDATE apply can change it when a successful CREATE identity is checkpointed. A later failure is reported as partial, with completed checkpoints retained, and confirmed remote mutations are not rolled back.
 
@@ -228,7 +255,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 
 ## Roadmap
 
-- Database attachment and configuration updates; attachment work must define safe handling for automatically injected `DB_*` variables before enabling PATCH
+- Database attachment and configuration updates; attachment work must define safe handling for automatically injected resource variables before enabling PATCH
 - Cache resources
 - Richer planning and update semantics
 - Broader import workflows and conflict repair

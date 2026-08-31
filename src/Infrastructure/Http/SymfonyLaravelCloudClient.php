@@ -347,8 +347,14 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
     private function pages(string $initialPath): iterable
     {
         $path = $initialPath;
+        $visited = [];
 
         while (true) {
+            if (isset($visited[$path])) {
+                throw $this->malformed($path, 'Pagination response contains a repeated next URL.');
+            }
+            $visited[$path] = true;
+
             $document = $this->get($path);
             yield [$document, $path];
 

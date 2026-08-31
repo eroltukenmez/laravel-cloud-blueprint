@@ -94,6 +94,23 @@ final readonly class CreateOnlyApply
                         );
                     }
                 }
+                foreach ($freshPlan as $freshAction) {
+                    if ($freshAction->operation !== PlanOperation::CREATE
+                        && $freshAction->operation !== PlanOperation::UPDATE) {
+                        continue;
+                    }
+                    $approvedAction = $this->actionAt($plan, $freshAction->address);
+                    if ($approvedAction === null || $approvedAction->operation !== $freshAction->operation) {
+                        return new ApplyResult(
+                            ApplyStatus::FAILED,
+                            new ApplyResourceOutcome(
+                                $freshAction->address,
+                                ApplyOutcomeOperation::FAILED,
+                                'A new actionable change appeared during locked Database revalidation; no mutation was sent. Run plan again for review.',
+                            ),
+                        );
+                    }
+                }
                 $plan = $freshPlan;
                 $this->assertSupported($plan);
             }

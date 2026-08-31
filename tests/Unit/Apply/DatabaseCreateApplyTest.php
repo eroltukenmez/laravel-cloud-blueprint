@@ -226,6 +226,28 @@ final class DatabaseCreateApplyTest extends TestCase
         self::assertSame(0, $cloud->clusterCreateCalls);
     }
 
+    public function testLockedDatabaseRevalidationRefusesNewUnapprovedEnvironmentMutation(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $environment = new ResourceAddress(ResourceType::ENVIRONMENT, 'production');
+        $state = new StateDocument(
+            StateVersion::V1,
+            1,
+            'acme',
+            new StateResource($application, ResourceType::APPLICATION, 'app-1'),
+            new StateResource($environment, ResourceType::ENVIRONMENT, 'env-1', $application),
+        );
+        $cloud = new DatabaseMutationCloud(environmentBranches: ['main', 'externally-changed']);
+        $states = new DatabaseMutationStateStore($state);
+
+        $result = self::apply(self::blueprint('application'), $cloud, $states);
+
+        self::assertSame(ApplyStatus::FAILED, $result->status);
+        self::assertSame([], $cloud->mutations);
+        self::assertSame(0, $states->saveCount);
+        self::assertStringContainsString('new actionable change', serialize($result));
+    }
+
     private static function apply(
         Blueprint $blueprint,
         DatabaseMutationCloud $cloud,
@@ -282,6 +304,7 @@ final class DatabaseMutationCloud implements LaravelCloudDatabaseMutationClient
     /**
      * @param list<CloudDatabaseCluster> $clusters
      * @param list<string> $detailStatuses
+     * @param list<string> $environmentBranches
      */
     public function __construct(
         private array $clusters = [],
@@ -290,6 +313,7 @@ final class DatabaseMutationCloud implements LaravelCloudDatabaseMutationClient
         private readonly string $createdClusterStatus = 'available',
         private array $detailStatuses = [],
         private readonly ?int $clusterAppearsOnRead = null,
+        private array $environmentBranches = ['main'],
     ) {
     }
 
@@ -306,7 +330,13 @@ final class DatabaseMutationCloud implements LaravelCloudDatabaseMutationClient
 
     public function organization(): CloudOrganization { return new CloudOrganization('org-1', 'Acme', 'acme'); }
     public function applications(): array { return [new CloudApplication('app-1', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')]; }
-    public function environments(string $applicationId): array { return [new CloudEnvironment('env-1', $applicationId, 'production', 'main')]; }
+    public function environments(string $applicationId): array
+    {
+        $branch = count($this->environmentBranches) > 1
+            ? array_shift($this->environmentBranches)
+            : $this->environmentBranches[0];
+        return [new CloudEnvironment('env-1', $applicationId, 'production', $branch)];
+    }
     public function environment(string $environmentId): CloudEnvironmentDetails { throw new \LogicException('Unexpected.'); }
     public function databaseClusters(): array
     {

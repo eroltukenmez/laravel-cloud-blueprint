@@ -271,6 +271,21 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         }
     }
 
+    public function testClusterPaginationRejectsForeignAndRepeatedNextUrls(): void
+    {
+        foreach ([
+            'foreign' => 'https://example.test/api/databases/clusters?page=2',
+            'repeated' => '/databases/clusters',
+        ] as $case => $next) {
+            try {
+                $this->client([new MockResponse(self::page([], $next))])->databaseClusters();
+                self::fail(sprintf('Expected %s pagination URL failure.', $case));
+            } catch (CloudResponseException $exception) {
+                self::assertStringNotContainsString(self::SECRET, serialize($exception));
+            }
+        }
+    }
+
     public function testLogicalDatabaseListPaginatesSortsAndUsesRequestedParentIdentity(): void
     {
         $next = 'https://cloud.laravel.com/api/databases/clusters/cluster-1/databases?page=2';
@@ -282,6 +297,15 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         self::assertSame(['database-a', 'database-z'], array_map(static fn ($database): string => $database->id, $databases));
         self::assertSame('cluster-1', $databases[0]->clusterId);
         self::assertSame('application', $databases[0]->name);
+    }
+
+    public function testDuplicateLogicalDatabaseIdsAreRejected(): void
+    {
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse(self::page([
+            self::databaseResource('duplicate', 'application'),
+            self::databaseResource('duplicate', 'reporting'),
+        ]))])->databases('cluster-1');
     }
 
     public function testLogicalDatabaseDetailValidatesIdentityAndDiscardsAttributes(): void
