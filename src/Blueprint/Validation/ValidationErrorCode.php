@@ -13,4 +13,6 @@ enum ValidationErrorCode: string
     case UNSUPPORTED_PROVIDER = 'unsupported_provider';
     case INVALID_VARIABLE_SOURCE = 'invalid_variable_source';
     case EMPTY_VALUE = 'empty_value';
+    case UNSUPPORTED_DATABASE_TYPE = 'unsupported_database_type';
+    case INVALID_DATABASE_REFERENCE = 'invalid_database_reference';
 }

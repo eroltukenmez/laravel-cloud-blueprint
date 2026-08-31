@@ -11,6 +11,7 @@ final readonly class Blueprint
         public string $organization,
         public ApplicationDefinition $application,
         public EnvironmentDefinitionCollection $environments,
+        public DatabaseClusterDefinitionCollection $databaseClusters = new DatabaseClusterDefinitionCollection(),
     ) {
     }
 }

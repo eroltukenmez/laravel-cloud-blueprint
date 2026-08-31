@@ -110,6 +110,29 @@ final class LocalFileStateStoreTest extends TestCase
         self::assertStringNotContainsString('secret', $json);
     }
 
+    public function testDatabaseOwnershipGraphRoundTripsInStateVersionOne(): void
+    {
+        $cluster = new StateResource(
+            new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+            ResourceType::DATABASE_CLUSTER,
+            'cluster_123',
+        );
+        $database = new StateResource(
+            new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+            ResourceType::DATABASE,
+            'database_456',
+            $cluster->address,
+        );
+        $store = new LocalFileStateStore($this->path);
+
+        $store->save(StateDocument::empty()->withOrganization('acme')->withResource($cluster)->withResource($database));
+        $loaded = $store->load();
+
+        self::assertSame(1, $loaded->version->value);
+        self::assertSame('cluster_123', $loaded->get($cluster->address)->remoteId);
+        self::assertSame('database_cluster.primary', (string) $loaded->get($database->address)->parent);
+    }
+
     public function testCorruptJsonFailsWithoutBeingOverwritten(): void
     {
         $this->writeRaw('{broken');

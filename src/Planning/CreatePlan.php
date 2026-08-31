@@ -5,12 +5,21 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\Planning;
 
 use LaravelCloudBlueprint\Blueprint\Blueprint;
+use LaravelCloudBlueprint\Blueprint\DatabaseClusterDefinition;
 use LaravelCloudBlueprint\Blueprint\EnvironmentDefinition;
+use LaravelCloudBlueprint\Blueprint\LaravelMySqlConfiguration;
+use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Blueprint\VariableDefinition;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
+use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\State\StateDocument;
@@ -18,11 +27,40 @@ use LaravelCloudBlueprint\State\StateResource;
 
 final readonly class CreatePlan
 {
-    public function __construct(private VariableValueResolver $values)
-    {
+    public function __construct(
+        private VariableValueResolver $values,
+        private DatabaseClusterStatusPolicy $databaseStatuses = new DatabaseClusterStatusPolicy(),
+    ) {
     }
 
     public function create(Blueprint $blueprint, LaravelCloudClient $cloud, StateDocument $state): ExecutionPlan
+    {
+        $base = $this->createBasePlan($blueprint, $cloud, $state);
+        if (count($blueprint->databaseClusters) === 0 && !$this->hasOwnedDatabaseResources($state)) {
+            return $base;
+        }
+        if (!$cloud instanceof LaravelCloudDatabaseClient) {
+            throw new CloudResponseException(
+                'The configured Laravel Cloud client does not support Database discovery.',
+                'GET',
+                '/databases/clusters',
+            );
+        }
+
+        return $this->withDatabaseActions($base, $blueprint, $cloud, $state);
+    }
+
+    private function hasOwnedDatabaseResources(StateDocument $state): bool
+    {
+        foreach ($state->resources() as $resource) {
+            if ($resource->type === ResourceType::DATABASE_CLUSTER || $resource->type === ResourceType::DATABASE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function createBasePlan(Blueprint $blueprint, LaravelCloudClient $cloud, StateDocument $state): ExecutionPlan
     {
         $organization = $cloud->organization();
         if ($organization->slug !== $blueprint->organization) {
@@ -145,6 +183,9 @@ final readonly class CreatePlan
                 ResourceType::APPLICATION => $applicationActions[] = $action,
                 ResourceType::ENVIRONMENT => $environmentActions[] = $action,
                 ResourceType::VARIABLE => $variableActions[] = $action,
+                ResourceType::DATABASE_CLUSTER,
+                ResourceType::DATABASE,
+                ResourceType::DATABASE_ATTACHMENT => null,
             };
         }
 
@@ -629,6 +670,459 @@ final readonly class CreatePlan
     {
         return array_values(array_filter($environments,
             static fn (CloudEnvironment $environment): bool => $environment->name === $name));
+    }
+
+    private function withDatabaseActions(
+        ExecutionPlan $base,
+        Blueprint $blueprint,
+        LaravelCloudDatabaseClient $cloud,
+        StateDocument $state,
+    ): ExecutionPlan {
+        $applicationActions = [];
+        $environmentActions = [];
+        $variableActions = [];
+        foreach ($base as $action) {
+            match ($action->resourceType) {
+                ResourceType::APPLICATION => $applicationActions[] = $action,
+                ResourceType::ENVIRONMENT => $environmentActions[] = $action,
+                ResourceType::VARIABLE => $variableActions[] = $action,
+                ResourceType::DATABASE_CLUSTER,
+                ResourceType::DATABASE,
+                ResourceType::DATABASE_ATTACHMENT => null,
+            };
+        }
+
+        $remoteClusters = $cloud->databaseClusters();
+        $clusterActions = [];
+        $databaseActions = [];
+        /** @var array<string, array<string, CloudDatabase>> $resolvedDatabases */
+        $resolvedDatabases = [];
+
+        foreach ($blueprint->databaseClusters as $desiredCluster) {
+            $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, $desiredCluster->name);
+            $managedCluster = $state->find($clusterAddress);
+            $matches = $managedCluster === null
+                ? array_values(array_filter(
+                    $remoteClusters,
+                    static fn (CloudDatabaseCluster $cluster): bool => $cluster->name === $desiredCluster->name,
+                ))
+                : array_values(array_filter(
+                    $remoteClusters,
+                    static fn (CloudDatabaseCluster $cluster): bool => $cluster->id === $managedCluster->remoteId,
+                ));
+
+            if ($matches === []) {
+                $clusterActions[] = $this->databaseClusterAction(
+                    $desiredCluster->name,
+                    $managedCluster === null ? PlanOperation::CREATE : PlanOperation::UNSUPPORTED,
+                    $managedCluster === null
+                        ? 'Database Cluster does not exist and will be created and state-owned.'
+                        : ($this->hasClusterNamed($remoteClusters, $desiredCluster->name)
+                            ? 'Owned Database Cluster remote identity is missing and a same-name unmanaged replacement exists. Automatic adoption or creation is not supported.'
+                            : 'Owned Database Cluster remote identity is missing. State repair is required; replacement creation is not supported.'),
+                );
+                if ($managedCluster === null) {
+                    foreach ($desiredCluster->databases as $desiredDatabase) {
+                        $databaseActions[] = $this->databaseAction(
+                            $desiredCluster->name . '.' . $desiredDatabase->name,
+                            PlanOperation::CREATE,
+                            'Logical Database will be created after its new parent Database Cluster is checkpointed.',
+                        );
+                    }
+                } else {
+                    $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
+                        'Logical Database cannot be resolved because its owned parent Database Cluster does not exist.');
+                }
+                continue;
+            }
+            if (count($matches) > 1) {
+                $clusterActions[] = $this->databaseClusterAction(
+                    $desiredCluster->name,
+                    PlanOperation::UNSUPPORTED,
+                    'Multiple matching remote Database Clusters exist; selection would be ambiguous.',
+                );
+                $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
+                    'Logical Database cannot be resolved because its parent Database Cluster match is ambiguous.');
+                continue;
+            }
+
+            $remoteCluster = $matches[0];
+            if ($remoteCluster->name !== $desiredCluster->name) {
+                $clusterActions[] = $this->databaseClusterAction(
+                    $desiredCluster->name,
+                    PlanOperation::UNSUPPORTED,
+                    'Owned Database Cluster name differs from its blueprint address. Rename or state-move reconciliation is not supported.',
+                );
+                $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
+                    'Logical Database cannot be compared while its owned parent Database Cluster identity conflicts.');
+                continue;
+            }
+            $clusterAction = $this->compareDatabaseCluster($desiredCluster, $remoteCluster, $managedCluster !== null);
+            $clusterActions[] = $clusterAction;
+            if ($clusterAction->operation !== PlanOperation::NO_CHANGE) {
+                $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
+                    'Logical Database cannot be compared while its parent Database Cluster is unresolved or unsupported.');
+                continue;
+            }
+
+            $remoteDatabases = $cloud->databases($remoteCluster->id);
+            foreach ($desiredCluster->databases as $desiredDatabase) {
+                $name = $desiredCluster->name . '.' . $desiredDatabase->name;
+                $databaseAddress = new ResourceAddress(ResourceType::DATABASE, $name);
+                $managedDatabase = $state->find($databaseAddress);
+                $databaseMatches = $managedDatabase === null
+                    ? array_values(array_filter(
+                        $remoteDatabases,
+                        static fn (CloudDatabase $database): bool => $database->name === $desiredDatabase->name,
+                    ))
+                    : array_values(array_filter(
+                        $remoteDatabases,
+                        static fn (CloudDatabase $database): bool => $database->id === $managedDatabase->remoteId,
+                    ));
+                if ($databaseMatches === []) {
+                    $createAllowed = $managedDatabase === null && $managedCluster !== null;
+                    $databaseActions[] = $this->databaseAction(
+                        $name,
+                        $createAllowed ? PlanOperation::CREATE : PlanOperation::UNSUPPORTED,
+                        $managedDatabase === null
+                            ? ($managedCluster === null
+                                ? 'Logical Database is missing under an unmanaged Cluster. Import the parent Cluster before creating children.'
+                                : 'Logical Database does not exist and will be created in its owned parent Cluster.')
+                            : ($this->hasDatabaseNamed($remoteDatabases, $desiredDatabase->name)
+                                ? 'Owned logical Database remote identity is missing and a same-name unmanaged replacement exists. Automatic adoption or creation is not supported.'
+                                : 'Owned logical Database remote identity is missing from its expected Cluster. State repair is required.'),
+                    );
+                    continue;
+                }
+                if (count($databaseMatches) > 1) {
+                    $databaseActions[] = $this->databaseAction($name, PlanOperation::UNSUPPORTED,
+                        'Multiple matching logical Databases exist within the Cluster; selection would be ambiguous.');
+                    continue;
+                }
+
+                if ($databaseMatches[0]->name !== $desiredDatabase->name) {
+                    $databaseActions[] = $this->databaseAction($name, PlanOperation::UNSUPPORTED,
+                        'Owned logical Database name differs from its blueprint address. Rename or state-move reconciliation is not supported.');
+                    continue;
+                }
+
+                $databaseActions[] = $this->databaseAction(
+                    $name,
+                    PlanOperation::NO_CHANGE,
+                    $managedDatabase === null
+                        ? 'Matching remote logical Database exists but is unmanaged; future mutation requires import and state ownership.'
+                        : 'Owned remote logical Database matches desired identity.',
+                );
+                $resolvedDatabases[$desiredCluster->name][$desiredDatabase->name] = $databaseMatches[0];
+            }
+        }
+
+        $this->ownedOnlyDatabaseActions($clusterActions, $databaseActions, $blueprint, $state);
+
+        $attachmentActions = $this->databaseAttachmentActions(
+            $blueprint,
+            $cloud,
+            $applicationActions,
+            $environmentActions,
+            $resolvedDatabases,
+        );
+
+        return new ExecutionPlan(
+            ...$applicationActions,
+            ...$environmentActions,
+            ...$clusterActions,
+            ...$databaseActions,
+            ...$attachmentActions,
+            ...$variableActions,
+        );
+    }
+
+    /** @param list<CloudDatabaseCluster> $clusters */
+    private function hasClusterNamed(array $clusters, string $name): bool
+    {
+        foreach ($clusters as $cluster) {
+            if ($cluster->name === $name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** @param list<CloudDatabase> $databases */
+    private function hasDatabaseNamed(array $databases, string $name): bool
+    {
+        foreach ($databases as $database) {
+            if ($database->name === $name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param list<PlanAction> $clusterActions
+     * @param list<PlanAction> $databaseActions
+     */
+    private function ownedOnlyDatabaseActions(
+        array &$clusterActions,
+        array &$databaseActions,
+        Blueprint $blueprint,
+        StateDocument $state,
+    ): void {
+        $desiredClusters = [];
+        $desiredDatabases = [];
+        foreach ($blueprint->databaseClusters as $cluster) {
+            $desiredClusters[(string) new ResourceAddress(ResourceType::DATABASE_CLUSTER, $cluster->name)] = true;
+            foreach ($cluster->databases as $database) {
+                $desiredDatabases[(string) new ResourceAddress(
+                    ResourceType::DATABASE,
+                    $cluster->name . '.' . $database->name,
+                )] = true;
+            }
+        }
+
+        foreach ($state->resources() as $resource) {
+            $address = (string) $resource->address;
+            if ($resource->type === ResourceType::DATABASE_CLUSTER && !isset($desiredClusters[$address])) {
+                $clusterActions[] = $this->databaseClusterAction(
+                    $resource->address->name,
+                    PlanOperation::UNSUPPORTED,
+                    'This Database Cluster is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+                );
+            }
+            if ($resource->type === ResourceType::DATABASE && !isset($desiredDatabases[$address])) {
+                $databaseActions[] = $this->databaseAction(
+                    $resource->address->name,
+                    PlanOperation::UNSUPPORTED,
+                    'This logical Database is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+                );
+            }
+        }
+    }
+
+    private function compareDatabaseCluster(
+        DatabaseClusterDefinition $desired,
+        CloudDatabaseCluster $remote,
+        bool $managed,
+    ): PlanAction {
+        $statusReason = $this->databaseStatuses->unsupportedReason($remote->status);
+        if ($statusReason !== null) {
+            return $this->databaseClusterAction($desired->name, PlanOperation::UNSUPPORTED, $statusReason);
+        }
+        if ($remote->type !== $desired->type->value) {
+            return $this->databaseClusterAction(
+                $desired->name,
+                PlanOperation::UNSUPPORTED,
+                'Remote Database Cluster type differs or is not safely supported.',
+                new PlanChange('type', $remote->type, $desired->type->value),
+            );
+        }
+        if ($remote->region !== $desired->region) {
+            return $this->databaseClusterAction(
+                $desired->name,
+                PlanOperation::UNSUPPORTED,
+                'Remote Database Cluster region differs. Database Cluster updates are not supported yet.',
+                new PlanChange('region', $remote->region, $desired->region),
+            );
+        }
+
+        $changes = $this->databaseConfigurationChanges($desired, $remote);
+        if ($changes === null) {
+            return $this->databaseClusterAction(
+                $desired->name,
+                PlanOperation::UNSUPPORTED,
+                'Remote Database Cluster configuration is not safely comparable for this supported provider.',
+            );
+        }
+        if ($changes !== []) {
+            return $this->databaseClusterAction(
+                $desired->name,
+                PlanOperation::UNSUPPORTED,
+                'Remote Database Cluster configuration differs. Database Cluster updates are not supported yet.',
+                ...$changes,
+            );
+        }
+
+        return $this->databaseClusterAction(
+            $desired->name,
+            PlanOperation::NO_CHANGE,
+            $managed
+                ? 'Owned remote Database Cluster matches desired state.'
+                : 'Matching remote Database Cluster exists but is unmanaged; future mutation requires import and state ownership.',
+        );
+    }
+
+    /** @return list<PlanChange>|null */
+    private function databaseConfigurationChanges(
+        DatabaseClusterDefinition $desired,
+        CloudDatabaseCluster $remote,
+    ): ?array {
+        if ($desired->configuration instanceof LaravelMySqlConfiguration) {
+            if (!$remote->configuration instanceof CloudLaravelMySqlConfiguration) {
+                return null;
+            }
+            return $this->configurationChanges([
+                'size' => [$remote->configuration->size, $desired->configuration->size],
+                'storage' => [$remote->configuration->storage, $desired->configuration->storage],
+                'retention_days' => [$remote->configuration->retentionDays, $desired->configuration->retentionDays],
+                'uses_scheduled_snapshots' => [$remote->configuration->usesScheduledSnapshots, $desired->configuration->usesScheduledSnapshots],
+                'is_public' => [$remote->configuration->isPublic, $desired->configuration->isPublic],
+            ]);
+        }
+        if ($desired->configuration instanceof NeonPostgresConfiguration) {
+            if (!$remote->configuration instanceof CloudNeonPostgresConfiguration) {
+                return null;
+            }
+            return $this->configurationChanges([
+                'cu_min' => [$remote->configuration->minimumComputeUnits, $desired->configuration->minimumComputeUnits],
+                'cu_max' => [$remote->configuration->maximumComputeUnits, $desired->configuration->maximumComputeUnits],
+                'suspend_seconds' => [$remote->configuration->suspendSeconds, $desired->configuration->suspendSeconds],
+                'retention_days' => [$remote->configuration->retentionDays, $desired->configuration->retentionDays],
+            ]);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, array{string|int|float|bool, string|int|float|bool}> $values
+     * @return list<PlanChange>
+     */
+    private function configurationChanges(array $values): array
+    {
+        $changes = [];
+        foreach ($values as $field => [$before, $after]) {
+            if ($before === $after || (is_float($before) && is_float($after) && $before == $after)) {
+                continue;
+            }
+            $changes[] = new PlanChange($field, $this->displayValue($before), $this->displayValue($after));
+        }
+        return $changes;
+    }
+
+    private function displayValue(string|int|float|bool $value): string
+    {
+        return is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
+    }
+
+    /** @param list<PlanAction> $actions */
+    private function unresolvedLogicalDatabaseActions(
+        array &$actions,
+        DatabaseClusterDefinition $cluster,
+        string $reason,
+    ): void {
+        foreach ($cluster->databases as $database) {
+            $actions[] = $this->databaseAction(
+                $cluster->name . '.' . $database->name,
+                PlanOperation::UNSUPPORTED,
+                $reason,
+            );
+        }
+    }
+
+    /**
+     * @param list<PlanAction> $applicationActions
+     * @param list<PlanAction> $environmentActions
+     * @param array<string, array<string, CloudDatabase>> $resolvedDatabases
+     * @return list<PlanAction>
+     */
+    private function databaseAttachmentActions(
+        Blueprint $blueprint,
+        LaravelCloudDatabaseClient $cloud,
+        array $applicationActions,
+        array $environmentActions,
+        array $resolvedDatabases,
+    ): array {
+        $requiresAttachments = false;
+        foreach ($blueprint->environments as $environment) {
+            $requiresAttachments = $requiresAttachments || $environment->database !== null;
+        }
+        if (!$requiresAttachments) {
+            return [];
+        }
+
+        $applicationId = $applicationActions[0]->remoteId ?? null;
+        $remoteEnvironments = $applicationId === null ? [] : $cloud->environments($applicationId);
+        $environmentActionsByName = [];
+        foreach ($environmentActions as $action) {
+            $environmentActionsByName[$action->address->name] = $action;
+        }
+
+        $actions = [];
+        foreach ($blueprint->environments as $environment) {
+            $reference = $environment->database;
+            if ($reference === null) {
+                continue;
+            }
+            $database = $resolvedDatabases[$reference->cluster][$reference->database] ?? null;
+            if ($database === null) {
+                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UNSUPPORTED,
+                    'Environment Database attachment cannot be resolved because the desired logical Database is unresolved.');
+                continue;
+            }
+
+            $environmentAction = $environmentActionsByName[$environment->name] ?? null;
+            $environmentId = $environmentAction?->remoteId;
+            $remoteEnvironment = $environmentId === null
+                ? null
+                : $this->findEnvironmentById($remoteEnvironments, $environmentId);
+            if ($remoteEnvironment === null) {
+                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UNSUPPORTED,
+                    'Environment Database attachment cannot be compared while the Environment identity is unresolved.');
+                continue;
+            }
+            if ($remoteEnvironment->databaseId === $database->id) {
+                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::NO_CHANGE,
+                    'Environment is attached to the desired logical Database.');
+                continue;
+            }
+
+            $actions[] = $this->databaseAttachmentAction(
+                $environment->name,
+                PlanOperation::UNSUPPORTED,
+                $remoteEnvironment->databaseId === null
+                    ? 'Environment has no Database attachment. Attachment updates are not supported yet.'
+                    : 'Environment Database attachment differs. Attachment updates are not supported yet.',
+            );
+        }
+
+        return $actions;
+    }
+
+    private function databaseClusterAction(
+        string $name,
+        PlanOperation $operation,
+        string $reason,
+        PlanChange ...$changes,
+    ): PlanAction {
+        return new PlanAction(
+            new ResourceAddress(ResourceType::DATABASE_CLUSTER, $name),
+            ResourceType::DATABASE_CLUSTER,
+            $operation,
+            $reason,
+            null,
+            ...$changes,
+        );
+    }
+
+    private function databaseAction(string $name, PlanOperation $operation, string $reason): PlanAction
+    {
+        return new PlanAction(
+            new ResourceAddress(ResourceType::DATABASE, $name),
+            ResourceType::DATABASE,
+            $operation,
+            $reason,
+        );
+    }
+
+    private function databaseAttachmentAction(string $name, PlanOperation $operation, string $reason): PlanAction
+    {
+        return new PlanAction(
+            new ResourceAddress(ResourceType::DATABASE_ATTACHMENT, $name),
+            ResourceType::DATABASE_ATTACHMENT,
+            $operation,
+            $reason,
+        );
     }
 
     private function applicationAction(

@@ -12,12 +12,16 @@ use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariable;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
@@ -249,6 +253,34 @@ final class PlanCommandTest extends TestCase
         }
     }
 
+    public function testDatabasePlanUsesExistingTextAndJsonContractsWithoutRemoteIds(): void
+    {
+        $text = $this->tester(self::databaseBlueprint(), cloud: new PlanDatabaseCloudClient());
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('= database_cluster.primary', $text->getDisplay());
+        self::assertStringContainsString('= database.primary.application', $text->getDisplay());
+        self::assertStringContainsString('= database_attachment.production', $text->getDisplay());
+        self::assertStringNotContainsString('cluster-secret-id', $text->getDisplay());
+        self::assertStringNotContainsString('database-secret-id', $text->getDisplay());
+
+        $json = $this->tester(self::databaseBlueprint(), cloud: new PlanDatabaseCloudClient());
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['summary']);
+        self::assertSame(5, $decoded['summary']['no_change']);
+        self::assertSame(0, $decoded['summary']['unsupported']);
+        self::assertIsArray($decoded['actions']);
+        self::assertIsArray($decoded['actions'][2]);
+        self::assertIsArray($decoded['actions'][3]);
+        self::assertIsArray($decoded['actions'][4]);
+        self::assertSame('database_cluster', $decoded['actions'][2]['type']);
+        self::assertSame('database', $decoded['actions'][3]['type']);
+        self::assertSame('database_attachment', $decoded['actions'][4]['type']);
+        self::assertStringNotContainsString('cluster-secret-id', $json->getDisplay());
+        self::assertStringNotContainsString('database-secret-id', $json->getDisplay());
+    }
+
     private function tester(
         string $blueprint,
         ?CloudApiToken $token = new CloudApiToken('super-secret-token'),
@@ -348,6 +380,36 @@ environments:
       APP_KEY:
         value: desired-variable-secret
         sensitive: true
+YAML;
+    }
+
+    private static function databaseBlueprint(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: API
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/api
+database_clusters:
+  primary:
+    type: laravel_mysql_8
+    region: eu-central-1
+    config:
+      size: db-flex.m-1vcpu-512mb
+      storage: 5
+      retention_days: 1
+      uses_scheduled_snapshots: false
+      is_public: false
+    databases:
+      application: {}
+environments:
+  production:
+    branch: main
+    database: primary.application
 YAML;
     }
 }
@@ -498,5 +560,40 @@ final class PlanInvalidUtf8CloudClient extends PlanCommandCloudClient
     public function environments(string $applicationId): array
     {
         return [new CloudEnvironment('env-1', $applicationId, 'production', "invalid-\xB1")];
+    }
+}
+
+final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements LaravelCloudDatabaseClient
+{
+    public function environments(string $applicationId): array
+    {
+        return [new CloudEnvironment('env-1', $applicationId, 'production', 'main', 'database-secret-id')];
+    }
+
+    public function databaseClusters(): array
+    {
+        return [new CloudDatabaseCluster(
+            'cluster-secret-id',
+            'primary',
+            'laravel_mysql_8',
+            'available',
+            'eu-central-1',
+            new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+        )];
+    }
+
+    public function databaseCluster(string $clusterId): CloudDatabaseCluster
+    {
+        throw new LogicException('Unexpected detail read.');
+    }
+
+    public function databases(string $clusterId): array
+    {
+        return [new CloudDatabase('database-secret-id', $clusterId, 'application')];
+    }
+
+    public function database(string $clusterId, string $databaseId): CloudDatabase
+    {
+        throw new LogicException('Unexpected detail read.');
     }
 }

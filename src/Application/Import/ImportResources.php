@@ -6,7 +6,11 @@ namespace LaravelCloudBlueprint\Application\Import;
 
 use LaravelCloudBlueprint\Blueprint\Blueprint;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
+use LaravelCloudBlueprint\Planning\ResourceAddress;
+use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\StateDocument;
@@ -110,6 +114,48 @@ final readonly class ImportResources
             }
         }
 
-        return $this->proposals->create($blueprint, $state, $applications, $environments);
+        $databaseClusters = [];
+        $databasesByCluster = [];
+        if (count($blueprint->databaseClusters) > 0) {
+            if (!$cloud instanceof LaravelCloudDatabaseClient) {
+                throw new CloudResponseException(
+                    'The configured Laravel Cloud client does not support Database discovery.',
+                    'GET',
+                    '/databases/clusters',
+                );
+            }
+            $databaseClusters = $cloud->databaseClusters();
+            $requiredClusterIds = [];
+            foreach ($blueprint->databaseClusters as $desiredCluster) {
+                $address = new ResourceAddress(ResourceType::DATABASE_CLUSTER, $desiredCluster->name);
+                $managed = $state->find($address);
+                if ($managed !== null) {
+                    $requiredClusterIds[$managed->remoteId] = true;
+                    continue;
+                }
+
+                $matchingClusterIds = [];
+                foreach ($databaseClusters as $remoteCluster) {
+                    if ($remoteCluster->name === $desiredCluster->name) {
+                        $matchingClusterIds[] = $remoteCluster->id;
+                    }
+                }
+                if (count($matchingClusterIds) === 1) {
+                    $requiredClusterIds[$matchingClusterIds[0]] = true;
+                }
+            }
+            foreach (array_keys($requiredClusterIds) as $clusterId) {
+                $databasesByCluster[$clusterId] = $cloud->databases($clusterId);
+            }
+        }
+
+        return $this->proposals->create(
+            $blueprint,
+            $state,
+            $applications,
+            $environments,
+            $databaseClusters,
+            $databasesByCluster,
+        );
     }
 }

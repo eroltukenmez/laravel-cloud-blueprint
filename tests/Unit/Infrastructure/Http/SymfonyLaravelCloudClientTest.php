@@ -104,7 +104,7 @@ JSON);
         self::assertSame('production', $details->variables->find('APP_ENV')?->value);
         self::assertSame('remote-secret', $details->variables->find('APP_KEY')?->value);
         self::assertSame('GET', $response->getRequestMethod());
-        self::assertSame('https://cloud.laravel.com/api/environments/env-1', $response->getRequestUrl());
+        self::assertSame('https://cloud.laravel.com/api/environments/env-1?include=database', $response->getRequestUrl());
     }
 
     public function testMissingEnvironmentVariableDataRemainsUnavailable(): void
@@ -128,7 +128,7 @@ JSON);
             self::fail('Expected malformed variable response failure.');
         } catch (CloudResponseException $exception) {
             self::assertStringNotContainsString($secret, $exception->getMessage());
-            self::assertSame('/environments/env-1', $exception->path);
+            self::assertSame('/environments/env-1?include=database', $exception->path);
         }
     }
 

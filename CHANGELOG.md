@@ -6,6 +6,15 @@ This project uses a Keep a Changelog-inspired format.
 
 ### Changed
 
+- Completed the Database feature safety review: pagination now rejects repeated next URLs in addition to foreign URLs and duplicate resource IDs, and locked Database revalidation refuses newly appearing actionable work that was not present in the approved plan.
+- Added safe Database Cluster and logical Database creation with typed provider payloads, locked Cloud/state revalidation, immediate identity checkpoints, bounded GET-only Cluster readiness observation, and no automatic POST retry.
+- Missing logical Databases may be created only under a newly created or already state-owned Cluster; unmanaged matches still require explicit import, while stale identities, replacements, configuration changes, attachments, and deletion remain unsupported.
+- Extended atomic `lcb import` state adoption to Database Clusters and logical Databases, with exact scoped matching, parent-first dependencies, locked rediscovery, and no Database mutations or attachment ownership.
+- State schema v1 now persists Database Cluster and logical Database identities, and planning resolves imported resources by stored IDs while safely reporting stale identities, same-name replacements, configuration differences, and owned resources absent from the blueprint.
+- Planning now compares desired Database Clusters, logical Databases, and Environment attachments with safe Cloud discovery; supported missing resources plan as CREATE, exact unmanaged matches remain read-only no-change/import boundaries, and update, replacement, attachment, and deletion lifecycles remain unsupported.
+- Added a typed, read-only Laravel Cloud discovery boundary for Database Clusters, logical Databases, and Environment Database attachment identities; connection and credential data is discarded during response parsing.
+- Blueprint schema v1 now accepts typed top-level Laravel MySQL and Neon Serverless Postgres Cluster definitions, logical Databases, and optional Environment Database references as a read-only foundation for future reconciliation.
+- Database configuration validation is provider-specific and rejects unknown, incompatible, RDS, connection, and credential properties.
 - Planning now resolves state-managed Application and Environment resources by their stored remote IDs before name-based discovery.
 - Matching unmanaged Environments require explicit import before branch reconciliation, while genuinely missing resources remain eligible for creation.
 - Planning now considers desired resources together with state-owned Applications and Environments, reporting owned resources absent from the blueprint as unsupported without deleting them or removing state ownership.
@@ -16,6 +25,12 @@ This project uses a Keep a Changelog-inspired format.
 
 - Stale, replaced, wrongly parented, or multiply owned state identities produce non-actionable plans instead of implicit reassignment, recreation, or mutation.
 - Removing a managed Application or Environment cannot trigger deletion, automatic state cleanup, replacement adoption, or inferred rename behavior.
+- Database connection and credential material is discarded at parsing boundaries and never enters plans, apply output, import proposals, or State.
+
+### Verified
+
+- A controlled real Laravel Cloud E2E using `neon_serverless_postgres_18` with a Dev-sized configuration verified Database Cluster CREATE, readiness-gated logical Database CREATE, immediate State V1 checkpoints, post-create `NO_CHANGE` reconciliation, and repeat-apply idempotency without a State rewrite.
+- No credential material appeared in visible E2E output or State. Environment attachment was not tested or enabled, and internal readiness statuses and raw create HTTP statuses were not exposed by the CLI output.
 
 ## [0.1.0-alpha.4] - 2026-08-28
 

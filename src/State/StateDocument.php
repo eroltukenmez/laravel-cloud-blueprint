@@ -6,6 +6,7 @@ namespace LaravelCloudBlueprint\State;
 
 use InvalidArgumentException;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
+use LaravelCloudBlueprint\Planning\ResourceType;
 use OutOfBoundsException;
 
 final readonly class StateDocument
@@ -30,6 +31,31 @@ final readonly class StateDocument
                 throw new InvalidArgumentException(sprintf('Duplicate state resource "%s".', $address));
             }
             $indexed[$address] = $resource;
+        }
+        /** @var array<string, array{string, ResourceType}> $remoteIds */
+        $remoteIds = [];
+        foreach ($indexed as $address => $resource) {
+            $previous = $remoteIds[$resource->remoteId] ?? null;
+            if ($previous !== null
+                && ($resource->type === ResourceType::DATABASE_CLUSTER
+                    || $resource->type === ResourceType::DATABASE
+                    || $previous[1] === ResourceType::DATABASE_CLUSTER
+                    || $previous[1] === ResourceType::DATABASE)) {
+                throw new InvalidArgumentException(sprintf(
+                    'Remote identity is owned by both "%s" and "%s".',
+                    $previous[0],
+                    $address,
+                ));
+            }
+            $remoteIds[$resource->remoteId] = [$address, $resource->type];
+            if ($resource->type === ResourceType::DATABASE
+                && $resource->parent !== null
+                && !isset($indexed[(string) $resource->parent])) {
+                throw new InvalidArgumentException(sprintf(
+                    'State resource "%s" has an unowned parent.',
+                    $address,
+                ));
+            }
         }
         ksort($indexed, SORT_STRING);
         $this->resources = $indexed;

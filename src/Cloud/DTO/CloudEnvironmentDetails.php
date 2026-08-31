@@ -10,6 +10,7 @@ final readonly class CloudEnvironmentDetails
         public string $id,
         public string $name,
         public ?CloudEnvironmentVariableCollection $variables,
+        public ?string $databaseId = null,
     ) {
     }
 }

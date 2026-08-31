@@ -92,4 +92,92 @@ final class StateDocumentTest extends TestCase
             'env_123',
         );
     }
+
+    public function testDatabaseAttachmentResourceTypeCannotBePersisted(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new StateResource(
+            new ResourceAddress(ResourceType::DATABASE_ATTACHMENT, 'production'),
+            ResourceType::DATABASE_ATTACHMENT,
+            'attachment-1',
+        );
+    }
+
+    public function testDatabaseClusterAndLogicalDatabaseFormAValidStateGraph(): void
+    {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(
+            StateVersion::V1,
+            0,
+            'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-1',
+                $clusterAddress,
+            ),
+        );
+
+        self::assertCount(2, $state->resources());
+    }
+
+    public function testDatabaseClusterRejectsParent(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        new StateResource(
+            new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+            ResourceType::DATABASE_CLUSTER,
+            'cluster-1',
+            new ResourceAddress(ResourceType::APPLICATION, 'app'),
+        );
+    }
+
+    public function testLogicalDatabaseRejectsMissingOrWrongParentType(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        new StateResource(
+            new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+            ResourceType::DATABASE,
+            'database-1',
+            new ResourceAddress(ResourceType::APPLICATION, 'app'),
+        );
+    }
+
+    public function testLogicalDatabaseRejectsUnownedClusterParent(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        new StateDocument(
+            StateVersion::V1,
+            0,
+            'acme',
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-1',
+                new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+            ),
+        );
+    }
+
+    public function testDatabaseRemoteIdentityCannotBeOwnedTwice(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        new StateDocument(
+            StateVersion::V1,
+            0,
+            'acme',
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+                ResourceType::DATABASE_CLUSTER,
+                'duplicate-id',
+            ),
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'secondary'),
+                ResourceType::DATABASE_CLUSTER,
+                'duplicate-id',
+            ),
+        );
+    }
 }
