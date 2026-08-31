@@ -131,7 +131,11 @@ final class CreateImportProposalTest extends TestCase
 
     public function testEnvironmentWithIncompatibleManagedParentConflicts(): void
     {
-        $state = self::state(self::applicationState(), self::environmentState(parentName: 'other'));
+        $state = self::state(
+            self::applicationState(),
+            new StateResource(self::address(ResourceType::APPLICATION, 'other'), ResourceType::APPLICATION, 'app-other'),
+            self::environmentState(parentName: 'other'),
+        );
 
         self::assertSame(
             ImportStatus::CONFLICT,
@@ -218,6 +222,18 @@ final class CreateImportProposalTest extends TestCase
         ));
         self::assertSame($before, $state->resources());
         self::assertSame(0, $state->serial);
+    }
+
+    public function testReleasedEnvironmentCanBeProposedForImportAgain(): void
+    {
+        $state = self::state(self::applicationState(), self::environmentState())
+            ->withoutResource(new ResourceAddress(ResourceType::ENVIRONMENT, 'production'));
+
+        $proposal = self::create($state, [self::application()], [self::environment()]);
+        $environment = self::candidates($proposal)[1];
+
+        self::assertSame('environment.production', (string) $environment->address);
+        self::assertSame(ImportStatus::IMPORTABLE, $environment->status);
     }
 
     /**

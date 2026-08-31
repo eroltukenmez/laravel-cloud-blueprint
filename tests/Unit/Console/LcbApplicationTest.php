@@ -25,6 +25,8 @@ final class LcbApplicationTest extends TestCase
         self::assertStringContainsString('read-only', $application->find('cloud:inspect')->getDescription());
         self::assertStringContainsString('local state', $application->find('import')->getDescription());
         self::assertStringContainsString('without modifying Laravel Cloud', $application->find('import')->getDescription());
+        self::assertStringContainsString('Release local LCB ownership', $application->find('state:unmanage')->getDescription());
+        self::assertStringContainsString('without modifying Laravel Cloud', $application->find('state:unmanage')->getDescription());
         self::assertStringContainsString('may modify Laravel Cloud', $application->find('apply')->getDescription());
     }
 
@@ -43,6 +45,10 @@ final class LcbApplicationTest extends TestCase
         self::assertStringContainsString(
             'require --auto-approve',
             $application->find('import')->getDefinition()->getOption('non-interactive')->getDescription(),
+        );
+        self::assertStringContainsString(
+            'requires --auto-approve',
+            $application->find('state:unmanage')->getDefinition()->getOption('non-interactive')->getDescription(),
         );
     }
 }

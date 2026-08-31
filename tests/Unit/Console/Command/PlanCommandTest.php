@@ -207,13 +207,13 @@ final class PlanCommandTest extends TestCase
         $desiredApplication = new ResourceAddress(ResourceType::APPLICATION, 'API');
         $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
         $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($oldApplication, ResourceType::APPLICATION, 'app-old'))
             ->withResource(new StateResource(
                 new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
                 ResourceType::ENVIRONMENT,
                 'env-preview',
                 $oldApplication,
             ))
-            ->withResource(new StateResource($oldApplication, ResourceType::APPLICATION, 'app-old'))
             ->withResource(new StateResource($desiredApplication, ResourceType::APPLICATION, 'app-1'));
 
         $text = $this->tester(self::validBlueprint(), state: $state);

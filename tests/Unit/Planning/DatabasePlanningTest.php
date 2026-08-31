@@ -102,6 +102,29 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database_attachment.production')->operation);
     }
 
+    public function testReleasedLogicalDatabaseUsesUnmanagedPlanningSemantics(): void
+    {
+        $released = self::databaseState()->withoutResource(
+            new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+        );
+
+        $existing = self::action(
+            self::plan(self::blueprint(), self::matchingCloud(), $released),
+            'database.primary.application',
+        );
+        self::assertSame(PlanOperation::NO_CHANGE, $existing->operation);
+        self::assertStringContainsString('unmanaged', $existing->reason);
+
+        $missing = self::action(
+            self::plan(self::blueprint(), self::matchingCloud(databases: []), $released),
+            'database.primary.application',
+        );
+        self::assertSame(PlanOperation::CREATE, $missing->operation);
+
+        $withoutDatabaseBlueprint = self::plan(self::blueprint(database: false), self::matchingCloud(), $released);
+        self::assertNull(self::findAction($withoutDatabaseBlueprint, 'database.primary.application'));
+    }
+
     public function testOwnedClusterMissingIdentityAndSameNameReplacementAreUnsupported(): void
     {
         $missing = self::action(self::plan(

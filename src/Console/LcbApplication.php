@@ -8,12 +8,14 @@ use LaravelCloudBlueprint\Application\BlueprintLoader;
 use LaravelCloudBlueprint\Application\CloudBlueprintExporter;
 use LaravelCloudBlueprint\Application\Import\CreateImportProposal;
 use LaravelCloudBlueprint\Application\Import\ImportResources;
+use LaravelCloudBlueprint\Application\State\ReleaseStateOwnership;
 use LaravelCloudBlueprint\Blueprint\Normalization\BlueprintNormalizer;
 use LaravelCloudBlueprint\Blueprint\Validation\BlueprintValidator;
 use LaravelCloudBlueprint\Console\Command\InitCommand;
 use LaravelCloudBlueprint\Console\Command\ImportCommand;
 use LaravelCloudBlueprint\Console\Command\CloudInspectCommand;
 use LaravelCloudBlueprint\Console\Command\PlanCommand;
+use LaravelCloudBlueprint\Console\Command\StateUnmanageCommand;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
 use LaravelCloudBlueprint\Console\Command\ValidateCommand;
 use LaravelCloudBlueprint\Console\Template\StarterBlueprintTemplate;
@@ -84,5 +86,6 @@ final class LcbApplication extends Application
             new ImportResources(new CreateImportProposal()),
             $states,
         ));
+        $this->add(new StateUnmanageCommand(new ReleaseStateOwnership(), $states));
     }
 }

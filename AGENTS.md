@@ -140,6 +140,9 @@ Commands:
 - lcb plan
 - lcb apply
 - lcb import
+- lcb state:unmanage
+
+`lcb state:unmanage` mutates local ownership state only. It must never delete, detach, or otherwise mutate a Laravel Cloud resource.
 
 Do not add:
 

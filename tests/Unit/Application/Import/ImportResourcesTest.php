@@ -98,14 +98,15 @@ final class ImportResourcesTest extends TestCase
 
     public function testEnvironmentConflictBlocksEntireImportWithoutSave(): void
     {
-        $states = new ImportResourcesStateStore(StateDocument::empty()->withOrganization('acme')->withResource(
-            new StateResource(
+        $application = self::address(ResourceType::APPLICATION, 'my-api');
+        $states = new ImportResourcesStateStore(StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-other'))
+            ->withResource(new StateResource(
                 self::address(ResourceType::ENVIRONMENT, 'production'),
                 ResourceType::ENVIRONMENT,
                 'env-other',
-                self::address(ResourceType::APPLICATION, 'my-api'),
-            ),
-        ));
+                $application,
+            )));
 
         try {
             self::service()->execute(self::blueprint(), ImportResourcesCloud::matching(), $states);
@@ -114,7 +115,7 @@ final class ImportResourcesTest extends TestCase
             self::assertNotNull($exception->proposal);
         }
         self::assertSame(0, $states->saveCount);
-        self::assertCount(1, $states->state->resources());
+        self::assertCount(2, $states->state->resources());
     }
 
     public function testFreshConflictAfterImportablePreviewWritesNothing(): void
