@@ -190,6 +190,11 @@ final class PlanCommand extends Command
                         'operation' => $action->operation->value,
                         'reason' => $action->reason,
                         'parent' => $action->parent === null ? null : (string) $action->parent,
+                        'destructive_readiness' => $action->environmentDependencies?->readiness()->value,
+                        'dependencies' => $action->environmentDependencies === null ? null : array_map(
+                            static fn ($dependency): string => $dependency->value,
+                            $action->environmentDependencies->categories(),
+                        ),
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,

@@ -86,6 +86,8 @@ v0.1 supports:
 
 Cloud resource deletion is explicitly forbidden in v0.1. DELETE may represent destructive intent for State-owned resources absent from the Blueprint, but apply must refuse it before any Cloud or State mutation.
 
+Environment destructive dependency discovery is live and read-only. It must remain conservative when relationship data is missing, malformed, or unknown, and it must not imply ownership or enable DELETE execution.
+
 Do not implement destroy behavior.
 
 ## Apply

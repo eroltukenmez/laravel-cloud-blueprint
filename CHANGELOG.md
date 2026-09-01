@@ -7,10 +7,12 @@ This project uses a Keep a Changelog-inspired format.
 ### Added
 
 - Added an explicit, read-only `DELETE` plan operation for State-owned resources removed from the Blueprint, with deterministic child-first ordering and exact stored identity metadata.
+- Added typed, live Environment dependency discovery for database, cache, WebSocket, domain, instance, deployment, secret, filesystem, and default-environment signals, including conservative incomplete/unknown handling.
 
 ### Security
 
 - Destructive execution remains disabled: apply refuses every DELETE plan before confirmation, State locking, State mutation, or Cloud mutation, and no Cloud DELETE transport is implemented.
+- Environment dependency discovery retains only safe identities, counts, and categories; it never renders variable values, secret content, credentials, or internal dependency IDs.
 
 ## [0.1.0-alpha.6] - 2026-09-01
 

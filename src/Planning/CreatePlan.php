@@ -17,6 +17,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
@@ -317,13 +318,15 @@ final readonly class CreatePlan
         }
 
         $remoteEnvironments = $this->cachedEnvironments($cloud, $remoteParent->id, $environmentCache);
-        if ($this->findEnvironmentById($remoteEnvironments, $resource->remoteId) !== null) {
+        $remoteEnvironment = $this->findEnvironmentById($remoteEnvironments, $resource->remoteId);
+        if ($remoteEnvironment !== null) {
             return $this->environmentAction(
                 $resource->address->name,
                 PlanOperation::DELETE,
-                'This State-owned Environment is absent from the blueprint. Deletion is planned, but destructive execution is not enabled yet.',
+                $this->environmentDeleteReason($remoteEnvironment),
                 $resource->remoteId,
                 $resource->parent,
+                $remoteEnvironment->dependencies,
             );
         }
 
@@ -368,6 +371,23 @@ final readonly class CreatePlan
         }
 
         return null;
+    }
+
+    private function environmentDeleteReason(CloudEnvironment $environment): string
+    {
+        $base = 'This State-owned Environment is absent from the blueprint. Deletion is planned, but destructive execution is not enabled yet.';
+
+        return match ($environment->dependencies->readiness()) {
+            EnvironmentDestructiveReadiness::BLOCKED => $base . sprintf(
+                ' Dependency discovery found: %s.',
+                implode(', ', array_map(
+                    static fn ($category): string => $category->value,
+                    $environment->dependencies->categories(),
+                )),
+            ),
+            EnvironmentDestructiveReadiness::UNKNOWN => $base . ' Dependency discovery is incomplete or contains unknown relationships.',
+            EnvironmentDestructiveReadiness::SAFE => $base . ' Dependency discovery is complete and found no known blockers.',
+        };
     }
 
     /**
@@ -600,6 +620,7 @@ final readonly class CreatePlan
                 PlanOperation::UPDATE,
                 'Managed remote environment differs from desired state.',
                 $remote->id,
+                null,
                 null,
                 new PlanChange('branch', $remote->branch, $desired->branch),
             );
@@ -1208,10 +1229,15 @@ final readonly class CreatePlan
         string $reason,
         ?string $remoteId = null,
         ?ResourceAddress $parent = null,
+        ?\LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies $dependencies = null,
         PlanChange ...$changes,
     ): PlanAction {
         return new PlanAction(new ResourceAddress(ResourceType::ENVIRONMENT, $name), ResourceType::ENVIRONMENT,
-            $operation, $reason, $remoteId, ...($parent === null ? $changes : [$parent, ...$changes]));
+            $operation,
+            $reason,
+            $remoteId,
+            ...array_values(array_filter([$parent, $dependencies, ...$changes])),
+        );
     }
 
     private function variableAddress(string $environmentName, string $variableName): ResourceAddress

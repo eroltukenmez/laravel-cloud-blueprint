@@ -19,6 +19,8 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LogicException;
 use LaravelCloudBlueprint\Planning\CreatePlan;
@@ -467,6 +469,37 @@ final class CreatePlanTest extends TestCase
         self::assertStringContainsString('absent from the blueprint', $action->reason);
         self::assertSame('env-preview', $action->remoteId);
         self::assertSame('application.my-api', (string) $action->parent);
+    }
+
+    public function testOwnedOnlyEnvironmentDeleteCarriesConservativeDependencyReadiness(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $state = self::managedState()->withResource(
+            new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application),
+        );
+        $dependencies = new EnvironmentDependencies(
+            'database-1', null, null, 1, 0, 0, 1, 0, false, false, true,
+        );
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [
+                    new CloudEnvironment('env-prod', 'app-1', 'production', 'main'),
+                    new CloudEnvironment('env-preview', 'app-1', 'preview', 'feature', 'database-1', $dependencies),
+                ],
+            ),
+            $state,
+        );
+
+        $action = self::action($plan, 'environment.preview');
+        self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertSame($dependencies, $action->environmentDependencies);
+        self::assertSame(EnvironmentDestructiveReadiness::BLOCKED, $action->environmentDependencies->readiness());
+        self::assertStringContainsString('database_attachment', $action->reason);
+        self::assertStringContainsString('custom_domain', $action->reason);
+        self::assertStringContainsString('secret', $action->reason);
     }
 
     public function testOwnedOnlyEnvironmentMissingIdentityDiagnosesSameNameReplacement(): void

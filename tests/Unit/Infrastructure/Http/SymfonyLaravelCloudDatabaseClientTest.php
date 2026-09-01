@@ -363,7 +363,10 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         $environment = $this->client([$response])->environments('app-1')[0];
 
         self::assertSame('database-1', $environment->databaseId);
-        self::assertStringContainsString('include=branch,database', $response->getRequestUrl());
+        self::assertStringContainsString(
+            'include=application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets',
+            $response->getRequestUrl(),
+        );
     }
 
     public function testMalformedEnvironmentRelationshipIsRejectedSafely(): void

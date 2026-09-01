@@ -10,6 +10,8 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableMutationMethod;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencyType;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
@@ -87,6 +89,59 @@ final class SymfonyLaravelCloudClientTest extends TestCase
         self::assertSame('production', $environments[0]->name);
         self::assertSame('main', $environments[0]->branch);
         self::assertNull($environments[1]->branch);
+        self::assertSame(EnvironmentDestructiveReadiness::UNKNOWN, $environments[0]->dependencies->readiness());
+    }
+
+    public function testEnvironmentListMapsSafeDependencySignalsWithoutAdditionalRequests(): void
+    {
+        $response = new MockResponse(self::fixture('environment-dependencies.json'));
+        $environments = $this->client([$response])->environments('app-1');
+
+        self::assertCount(1, $environments);
+        $dependencies = $environments[0]->dependencies;
+        self::assertTrue($dependencies->complete);
+        self::assertSame(EnvironmentDestructiveReadiness::BLOCKED, $dependencies->readiness());
+        self::assertSame([
+            EnvironmentDependencyType::DATABASE_ATTACHMENT,
+            EnvironmentDependencyType::CACHE_ATTACHMENT,
+            EnvironmentDependencyType::WEBSOCKET_ATTACHMENT,
+            EnvironmentDependencyType::CUSTOM_DOMAIN,
+            EnvironmentDependencyType::INSTANCE,
+            EnvironmentDependencyType::DEPLOYMENT,
+            EnvironmentDependencyType::SECRET,
+            EnvironmentDependencyType::FILESYSTEM,
+            EnvironmentDependencyType::DEFAULT_ENVIRONMENT,
+        ], $dependencies->categories());
+        self::assertSame('GET', $response->getRequestMethod());
+        self::assertStringContainsString('include=application,branch,deployments', $response->getRequestUrl());
+    }
+
+    public function testCompleteEmptyRelationshipsAreSafeWhileUnknownRelationshipsRemainUnknown(): void
+    {
+        $empty = <<<'JSON'
+{"data":[{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"domains":{"data":[]},"primaryDomain":{"data":null},"instances":{"data":[]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}],"included":[{"id":"app-1","type":"applications","attributes":{"name":"API"},"relationships":{"defaultEnvironment":{"data":{"type":"environments","id":"env-other"}}}}],"links":{"next":null}}
+JSON;
+        $safe = $this->client([new MockResponse($empty)])->environments('app-1')[0]->dependencies;
+        self::assertTrue($safe->complete);
+        self::assertSame(EnvironmentDestructiveReadiness::SAFE, $safe->readiness());
+
+        $unknown = str_replace('"secrets":{"data":[]}', '"secrets":{"data":[]},"futureDependency":{"data":null}', $empty);
+        $incomplete = $this->client([new MockResponse($unknown)])->environments('app-1')[0]->dependencies;
+        self::assertFalse($incomplete->complete);
+        self::assertSame(['futureDependency'], $incomplete->unknownRelationships);
+        self::assertSame(EnvironmentDestructiveReadiness::UNKNOWN, $incomplete->readiness());
+    }
+
+    public function testMalformedSafetyRelationshipFailsInsteadOfBecomingSafe(): void
+    {
+        $payload = str_replace(
+            '"type": "caches", "id": "cache-1"',
+            '"type": "databaseSchemas", "id": "cache-1"',
+            self::fixture('environment-dependencies.json'),
+        );
+
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse($payload)])->environments('app-1');
     }
 
     public function testEnvironmentDetailsMapTypedVariablesFromTheOfficialResponseShape(): void
@@ -104,7 +159,7 @@ JSON);
         self::assertSame('production', $details->variables->find('APP_ENV')?->value);
         self::assertSame('remote-secret', $details->variables->find('APP_KEY')?->value);
         self::assertSame('GET', $response->getRequestMethod());
-        self::assertSame('https://cloud.laravel.com/api/environments/env-1?include=database', $response->getRequestUrl());
+        self::assertStringContainsString('/environments/env-1?include=application,branch,deployments', $response->getRequestUrl());
     }
 
     public function testMissingEnvironmentVariableDataRemainsUnavailable(): void
@@ -128,7 +183,7 @@ JSON);
             self::fail('Expected malformed variable response failure.');
         } catch (CloudResponseException $exception) {
             self::assertStringNotContainsString($secret, $exception->getMessage());
-            self::assertSame('/environments/env-1?include=database', $exception->path);
+            self::assertStringContainsString('/environments/env-1?include=application,branch,deployments', $exception->path);
         }
     }
 

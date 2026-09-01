@@ -24,6 +24,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
@@ -41,6 +42,7 @@ use Symfony\Contracts\HttpClient\ResponseInterface;
 
 final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient
 {
+    private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string BASE_URL = 'https://cloud.laravel.com/api';
     private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.6';
 
@@ -91,19 +93,25 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
     public function environments(string $applicationId): array
     {
         $environments = [];
-        $initialPath = sprintf('/applications/%s/environments?include=branch,database', rawurlencode($applicationId));
+        $initialPath = sprintf(
+            '/applications/%s/environments?include=%s',
+            rawurlencode($applicationId),
+            self::ENVIRONMENT_DEPENDENCY_INCLUDES,
+        );
 
         foreach ($this->pages($initialPath) as [$document, $path]) {
             foreach ($this->listAt($document, 'data', $path) as $resource) {
                 $resource = $this->valueAsMapping($resource, $path);
                 $attributes = $this->mappingAt($resource, 'attributes', $path);
 
+                $dependencies = $this->environmentDependencies($resource, $document, $path, $applicationId);
                 $environments[] = new CloudEnvironment(
                     $this->requiredString($resource, 'id', $path),
                     $applicationId,
                     $this->requiredString($attributes, 'name', $path),
                     $this->branch($resource, $document, $path),
-                    $this->databaseRelationshipId($resource, $path),
+                    $dependencies->databaseId,
+                    $dependencies,
                 );
             }
         }
@@ -113,7 +121,11 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
 
     public function environment(string $environmentId): CloudEnvironmentDetails
     {
-        $path = sprintf('/environments/%s?include=database', rawurlencode($environmentId));
+        $path = sprintf(
+            '/environments/%s?include=%s',
+            rawurlencode($environmentId),
+            self::ENVIRONMENT_DEPENDENCY_INCLUDES,
+        );
         $document = $this->get($path);
         $resource = $this->mappingAt($document, 'data', $path);
         $id = $this->requiredString($resource, 'id', $path);
@@ -122,11 +134,14 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         }
         $attributes = $this->mappingAt($resource, 'attributes', $path);
 
+        $dependencies = $this->environmentDependencies($resource, $document, $path);
+
         return new CloudEnvironmentDetails(
             $id,
             $this->requiredString($attributes, 'name', $path),
             $this->environmentVariables($attributes, $path),
-            $this->databaseRelationshipId($resource, $path),
+            $dependencies->databaseId,
+            $dependencies,
         );
     }
 
@@ -688,28 +703,171 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         );
     }
 
-    /** @param array<string, mixed> $resource */
-    private function databaseRelationshipId(array $resource, string $path): ?string
-    {
+    /**
+     * @param array<string, mixed> $resource
+     * @param array<string, mixed> $document
+     */
+    private function environmentDependencies(
+        array $resource,
+        array $document,
+        string $path,
+        ?string $expectedApplicationId = null,
+    ): EnvironmentDependencies {
         $relationships = $this->optionalMapping($resource, 'relationships', $path);
-        if ($relationships === null || !array_key_exists('database', $relationships)) {
-            return null;
+        if ($relationships === null) {
+            return EnvironmentDependencies::incomplete();
         }
 
-        $relationship = $this->valueAsMapping($relationships['database'], $path);
+        $complete = true;
+        $applicationId = $this->dependencyId($relationships, 'application', 'applications', $path, $complete);
+        if ($expectedApplicationId !== null && $applicationId !== null && $applicationId !== $expectedApplicationId) {
+            throw $this->malformed($path, 'Environment relationship belongs to an unexpected Application.');
+        }
+
+        $databaseId = $this->dependencyId($relationships, 'database', 'databaseSchemas', $path, $complete);
+        $cacheId = $this->dependencyId($relationships, 'cache', 'caches', $path, $complete);
+        $websocketId = $this->dependencyId(
+            $relationships,
+            'websocketApplication',
+            'websocketApplications',
+            $path,
+            $complete,
+        );
+        $domainCount = $this->dependencyCount($relationships, 'domains', 'domains', $path, $complete);
+        $instanceCount = $this->dependencyCount($relationships, 'instances', 'instances', $path, $complete);
+        $deploymentCount = $this->dependencyCount($relationships, 'deployments', 'deployments', $path, $complete);
+        $secretCount = $this->dependencyCount($relationships, 'secrets', 'secrets', $path, $complete);
+        $filesystemCount = $this->dependencyCount($relationships, 'buckets', 'filesystems', $path, $complete);
+        $currentDeployment = $this->dependencyId(
+            $relationships,
+            'currentDeployment',
+            'deployments',
+            $path,
+            $complete,
+        ) !== null;
+        $this->dependencyId($relationships, 'primaryDomain', 'domains', $path, $complete);
+        $this->dependencyId($relationships, 'branch', 'branches', $path, $complete);
+
+        $known = [
+            'application', 'branch', 'deployments', 'currentDeployment', 'domains', 'primaryDomain',
+            'instances', 'database', 'cache', 'buckets', 'websocketApplication', 'secrets',
+        ];
+        $unknown = array_values(array_diff(array_keys($relationships), $known));
+        sort($unknown, SORT_STRING);
+        if ($unknown !== []) {
+            $complete = false;
+        }
+
+        $isDefault = $this->defaultEnvironmentStatus($document, $applicationId, $resource, $path, $complete);
+
+        return new EnvironmentDependencies(
+            $databaseId,
+            $cacheId,
+            $websocketId,
+            $domainCount,
+            $instanceCount,
+            $deploymentCount,
+            $secretCount,
+            $filesystemCount,
+            $currentDeployment,
+            $isDefault,
+            $complete,
+            $unknown,
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $relationships
+     */
+    private function dependencyId(
+        array $relationships,
+        string $name,
+        string $type,
+        string $path,
+        bool &$complete,
+    ): ?string {
+        if (!array_key_exists($name, $relationships)) {
+            $complete = false;
+            return null;
+        }
+        $relationship = $this->valueAsMapping($relationships[$name], $path);
         if (!array_key_exists('data', $relationship)) {
-            throw $this->malformed($path, 'Database relationship is missing "data".');
+            throw $this->malformed($path, sprintf('Environment relationship "%s" is missing "data".', $name));
         }
         if ($relationship['data'] === null) {
             return null;
         }
-
         $identifier = $this->valueAsMapping($relationship['data'], $path);
-        if ($this->requiredNonEmptyString($identifier, 'type', $path) !== 'databaseSchemas') {
-            throw $this->malformed($path, 'Database relationship type must be "databaseSchemas".');
+        if ($this->requiredNonEmptyString($identifier, 'type', $path) !== $type) {
+            throw $this->malformed($path, sprintf('Environment relationship "%s" has an unexpected type.', $name));
         }
-
         return $this->requiredNonEmptyString($identifier, 'id', $path);
+    }
+
+    /** @param array<string, mixed> $relationships */
+    private function dependencyCount(
+        array $relationships,
+        string $name,
+        string $type,
+        string $path,
+        bool &$complete,
+    ): int {
+        if (!array_key_exists($name, $relationships)) {
+            $complete = false;
+            return 0;
+        }
+        $relationship = $this->valueAsMapping($relationships[$name], $path);
+        if (!array_key_exists('data', $relationship)) {
+            throw $this->malformed($path, sprintf('Environment relationship "%s" is missing "data".', $name));
+        }
+        $identifiers = $this->listAt($relationship, 'data', $path);
+        foreach ($identifiers as $value) {
+            $identifier = $this->valueAsMapping($value, $path);
+            if ($this->requiredNonEmptyString($identifier, 'type', $path) !== $type) {
+                throw $this->malformed($path, sprintf('Environment relationship "%s" has an unexpected type.', $name));
+            }
+            $this->requiredNonEmptyString($identifier, 'id', $path);
+        }
+        return count($identifiers);
+    }
+
+    /**
+     * @param array<string, mixed> $document
+     * @param array<string, mixed> $environment
+     */
+    private function defaultEnvironmentStatus(
+        array $document,
+        ?string $applicationId,
+        array $environment,
+        string $path,
+        bool &$complete,
+    ): ?bool {
+        if ($applicationId === null || !array_key_exists('included', $document)) {
+            $complete = false;
+            return null;
+        }
+        foreach ($this->listAt($document, 'included', $path) as $value) {
+            $included = $this->valueAsMapping($value, $path);
+            if ($this->optionalString($included, 'type', $path) !== 'applications'
+                || $this->optionalString($included, 'id', $path) !== $applicationId) {
+                continue;
+            }
+            $relationships = $this->optionalMapping($included, 'relationships', $path);
+            if ($relationships === null) {
+                $complete = false;
+                return null;
+            }
+            $defaultId = $this->dependencyId(
+                $relationships,
+                'defaultEnvironment',
+                'environments',
+                $path,
+                $complete,
+            );
+            return $defaultId !== null && $defaultId === $this->requiredNonEmptyString($environment, 'id', $path);
+        }
+        $complete = false;
+        return null;
     }
 
     /**

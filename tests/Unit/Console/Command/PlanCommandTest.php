@@ -24,6 +24,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Console\Command\PlanCommand;
@@ -252,6 +253,31 @@ final class PlanCommandTest extends TestCase
             self::assertArrayNotHasKey('ownership', $action);
             self::assertArrayNotHasKey('desired', $action);
         }
+    }
+
+    public function testEnvironmentDeleteRendersSafeDependencyReadinessInTextAndJson(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'API');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application));
+        $cloud = new PlanDependencyCloudClient();
+
+        $text = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('database_attachment, custom_domain', $text->getDisplay());
+        self::assertStringNotContainsString('database-internal-id', $text->getDisplay());
+
+        $json = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['actions']);
+        self::assertIsArray($decoded['actions'][0]);
+        self::assertSame('blocked', $decoded['actions'][0]['destructive_readiness']);
+        self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['dependencies']);
+        self::assertStringNotContainsString('database-internal-id', $json->getDisplay());
     }
 
     public function testDatabasePlanUsesExistingTextAndJsonContractsWithoutRemoteIds(): void
@@ -517,6 +543,26 @@ class PlanCommandCloudClient implements LaravelCloudClient
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
     {
         throw new LogicException('Plan fake must remain read-only.');
+    }
+}
+
+final class PlanDependencyCloudClient extends PlanCommandCloudClient
+{
+    public function environments(string $applicationId): array
+    {
+        return [
+            new CloudEnvironment('env-1', $applicationId, 'production', 'main'),
+            new CloudEnvironment(
+                'env-preview',
+                $applicationId,
+                'preview',
+                'feature',
+                'database-internal-id',
+                new EnvironmentDependencies(
+                    'database-internal-id', null, null, 1, 0, 0, 0, 0, false, false, true,
+                ),
+            ),
+        ];
     }
 }
 
