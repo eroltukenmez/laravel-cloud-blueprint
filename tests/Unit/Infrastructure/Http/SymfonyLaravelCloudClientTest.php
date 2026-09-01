@@ -128,12 +128,58 @@ JSON;
         $safe = $this->client([new MockResponse($empty)])->environments('app-1')[0]->dependencies;
         self::assertTrue($safe->complete);
         self::assertSame(EnvironmentDestructiveReadiness::SAFE, $safe->readiness());
+        self::assertNull($safe->databaseId);
+        self::assertSame(0, $safe->filesystemCount);
+        self::assertSame([], $safe->missingRelationships);
 
         $unknown = str_replace('"secrets":{"data":[]}', '"secrets":{"data":[]},"futureDependency":{"data":null}', $empty);
         $incomplete = $this->client([new MockResponse($unknown)])->environments('app-1')[0]->dependencies;
         self::assertFalse($incomplete->complete);
         self::assertSame(['futureDependency'], $incomplete->unknownRelationships);
         self::assertSame(EnvironmentDestructiveReadiness::UNKNOWN, $incomplete->readiness());
+    }
+
+    public function testOfficialNormalEnvironmentShapeWithOnlyInstanceIsCompleteAndSafe(): void
+    {
+        $payload = <<<'JSON'
+{"data":[{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"domains":{"data":[]},"primaryDomain":{"data":null},"instances":{"data":[{"type":"instances","id":"instance-1"}]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}],"included":[{"id":"app-1","type":"applications","attributes":{"name":"API"},"relationships":{"defaultEnvironment":{"data":{"type":"environments","id":"env-other"}}}}],"links":{"next":null}}
+JSON;
+
+        $dependencies = $this->client([new MockResponse($payload)])->environments('app-1')[0]->dependencies;
+
+        self::assertTrue($dependencies->complete);
+        self::assertSame(EnvironmentDestructiveReadiness::SAFE, $dependencies->readiness());
+        self::assertSame([EnvironmentDependencyType::INSTANCE], $dependencies->informationalCategories());
+        self::assertSame([], $dependencies->blockingCategories());
+    }
+
+    public function testMissingRequiredDependencyRelationshipIsDiagnosedAndUnknown(): void
+    {
+        $payload = str_replace(
+            ',"secrets":{"data":[]}',
+            '',
+            <<<'JSON'
+{"data":[{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"domains":{"data":[]},"primaryDomain":{"data":null},"instances":{"data":[]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}],"included":[{"id":"app-1","type":"applications","attributes":{"name":"API"},"relationships":{"defaultEnvironment":{"data":null}}}],"links":{"next":null}}
+JSON,
+        );
+
+        $dependencies = $this->client([new MockResponse($payload)])->environments('app-1')[0]->dependencies;
+
+        self::assertFalse($dependencies->complete);
+        self::assertSame(['secrets'], $dependencies->missingRelationships);
+        self::assertSame(EnvironmentDestructiveReadiness::UNKNOWN, $dependencies->readiness());
+    }
+
+    public function testMissingDefaultEnvironmentRelationshipIsDiagnosedAndUnknown(): void
+    {
+        $payload = <<<'JSON'
+{"data":[{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"domains":{"data":[]},"primaryDomain":{"data":null},"instances":{"data":[]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}],"included":[{"id":"app-1","type":"applications","attributes":{"name":"API"},"relationships":{}}],"links":{"next":null}}
+JSON;
+
+        $dependencies = $this->client([new MockResponse($payload)])->environments('app-1')[0]->dependencies;
+
+        self::assertSame(['application.defaultEnvironment'], $dependencies->missingRelationships);
+        self::assertSame(EnvironmentDestructiveReadiness::UNKNOWN, $dependencies->readiness());
     }
 
     public function testMalformedSafetyRelationshipFailsInsteadOfBecomingSafe(): void

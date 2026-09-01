@@ -759,6 +759,11 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         }
 
         $complete = true;
+        $known = [
+            'application', 'branch', 'deployments', 'currentDeployment', 'domains', 'primaryDomain',
+            'instances', 'database', 'cache', 'buckets', 'websocketApplication', 'secrets',
+        ];
+        $missing = array_values(array_diff($known, array_keys($relationships)));
         $applicationId = $this->dependencyId($relationships, 'application', 'applications', $path, $complete);
         if ($expectedApplicationId !== null && $applicationId !== null && $applicationId !== $expectedApplicationId) {
             throw $this->malformed($path, 'Environment relationship belongs to an unexpected Application.');
@@ -788,17 +793,20 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $this->dependencyId($relationships, 'primaryDomain', 'domains', $path, $complete);
         $this->dependencyId($relationships, 'branch', 'branches', $path, $complete);
 
-        $known = [
-            'application', 'branch', 'deployments', 'currentDeployment', 'domains', 'primaryDomain',
-            'instances', 'database', 'cache', 'buckets', 'websocketApplication', 'secrets',
-        ];
         $unknown = array_values(array_diff(array_keys($relationships), $known));
         sort($unknown, SORT_STRING);
         if ($unknown !== []) {
             $complete = false;
         }
 
-        $isDefault = $this->defaultEnvironmentStatus($document, $applicationId, $resource, $path, $complete);
+        $isDefault = $this->defaultEnvironmentStatus(
+            $document,
+            $applicationId,
+            $resource,
+            $path,
+            $complete,
+            $missing,
+        );
 
         return new EnvironmentDependencies(
             $databaseId,
@@ -813,6 +821,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             $isDefault,
             $complete,
             $unknown,
+            $missing,
         );
     }
 
@@ -874,6 +883,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
     /**
      * @param array<string, mixed> $document
      * @param array<string, mixed> $environment
+     * @param list<string> $missing
      */
     private function defaultEnvironmentStatus(
         array $document,
@@ -881,9 +891,11 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         array $environment,
         string $path,
         bool &$complete,
+        array &$missing,
     ): ?bool {
         if ($applicationId === null || !array_key_exists('included', $document)) {
             $complete = false;
+            $missing[] = 'included.application';
             return null;
         }
         foreach ($this->listAt($document, 'included', $path) as $value) {
@@ -895,7 +907,11 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             $relationships = $this->optionalMapping($included, 'relationships', $path);
             if ($relationships === null) {
                 $complete = false;
+                $missing[] = 'application.defaultEnvironment';
                 return null;
+            }
+            if (!array_key_exists('defaultEnvironment', $relationships)) {
+                $missing[] = 'application.defaultEnvironment';
             }
             $defaultId = $this->dependencyId(
                 $relationships,
@@ -907,6 +923,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             return $defaultId !== null && $defaultId === $this->requiredNonEmptyString($environment, 'id', $path);
         }
         $complete = false;
+        $missing[] = 'included.application';
         return null;
     }
 

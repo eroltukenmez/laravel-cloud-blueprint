@@ -6,7 +6,10 @@ namespace LaravelCloudBlueprint\Cloud\DTO;
 
 final readonly class EnvironmentDependencies
 {
-    /** @param list<string> $unknownRelationships */
+    /**
+     * @param list<string> $unknownRelationships
+     * @param list<string> $missingRelationships
+     */
     public function __construct(
         public ?string $databaseId,
         public ?string $cacheId,
@@ -20,6 +23,7 @@ final readonly class EnvironmentDependencies
         public ?bool $isDefaultEnvironment,
         public bool $complete,
         public array $unknownRelationships = [],
+        public array $missingRelationships = [],
     ) {
     }
 

@@ -10,6 +10,7 @@ This project uses a Keep a Changelog-inspired format.
 - Added typed, live Environment dependency discovery for database, cache, WebSocket, domain, instance, deployment, secret, filesystem, and default-environment signals, including conservative incomplete/unknown handling.
 - Added guarded Environment-only DELETE execution with explicit approval, locked identity and dependency revalidation, single-attempt mutation, bounded absence confirmation, and recoverable State checkpoint outcomes.
 - Classified discovered instances as informational expected Environment children, matching Laravel's official Environment DELETE client behavior, while retaining all other dependency blockers.
+- Added non-sensitive missing/unknown relationship diagnostics for incomplete Environment dependency discovery without weakening UNKNOWN refusal.
 
 ### Security
 

@@ -279,6 +279,8 @@ final class PlanCommandTest extends TestCase
         self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['dependencies']);
         self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['blocking_dependencies']);
         self::assertSame([], $decoded['actions'][0]['informational_dependencies']);
+        self::assertSame([], $decoded['actions'][0]['missing_dependency_relationships']);
+        self::assertSame([], $decoded['actions'][0]['unknown_dependency_relationships']);
         self::assertStringNotContainsString('database-internal-id', $json->getDisplay());
     }
 
@@ -301,6 +303,8 @@ final class PlanCommandTest extends TestCase
         self::assertSame(['instance'], $action['dependencies']);
         self::assertSame([], $action['blocking_dependencies']);
         self::assertSame(['instance'], $action['informational_dependencies']);
+        self::assertSame([], $action['missing_dependency_relationships']);
+        self::assertSame([], $action['unknown_dependency_relationships']);
         self::assertIsString($action['reason']);
         self::assertStringContainsString('Expected child dependencies: instance', $action['reason']);
     }

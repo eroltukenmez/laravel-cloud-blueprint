@@ -387,7 +387,19 @@ final readonly class CreatePlan
                     $environment->dependencies->blockingCategories(),
                 )),
             ),
-            EnvironmentDestructiveReadiness::UNKNOWN => $base . ' Dependency discovery is incomplete or contains unknown relationships.',
+            EnvironmentDestructiveReadiness::UNKNOWN => $base . ' Dependency discovery is incomplete or contains unknown relationships.'
+                . ($environment->dependencies->missingRelationships === []
+                    ? ''
+                    : sprintf(
+                        ' Missing dependency relationships: %s.',
+                        implode(', ', $environment->dependencies->missingRelationships),
+                    ))
+                . ($environment->dependencies->unknownRelationships === []
+                    ? ''
+                    : sprintf(
+                        ' Unknown dependency relationships: %s.',
+                        implode(', ', $environment->dependencies->unknownRelationships),
+                    )),
             EnvironmentDestructiveReadiness::SAFE => $base . ' Dependency discovery is complete and found no known blockers.'
                 . ($environment->dependencies->informationalCategories() === []
                     ? ''

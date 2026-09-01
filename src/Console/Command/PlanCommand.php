@@ -203,6 +203,8 @@ final class PlanCommand extends Command
                             static fn ($dependency): string => $dependency->value,
                             $action->environmentDependencies->informationalCategories(),
                         ),
+                        'missing_dependency_relationships' => $action->environmentDependencies?->missingRelationships,
+                        'unknown_dependency_relationships' => $action->environmentDependencies?->unknownRelationships,
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,
