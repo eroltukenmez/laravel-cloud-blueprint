@@ -56,7 +56,7 @@ final class SymfonyLaravelCloudClientTest extends TestCase
         self::assertIsArray($headers['user-agent']);
         self::assertContains('Authorization: Bearer secret-token', $headers['authorization']);
         self::assertContains('Accept: application/json', $headers['accept']);
-        self::assertContains('User-Agent: Laravel-Cloud-Blueprint/0.1.0-alpha.6', $headers['user-agent']);
+        self::assertContains('User-Agent: Laravel-Cloud-Blueprint/0.1.0-alpha.7', $headers['user-agent']);
     }
 
     public function testApplicationsMapNullableFieldsAndFollowPagination(): void
