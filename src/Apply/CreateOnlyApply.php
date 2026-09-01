@@ -277,7 +277,7 @@ final readonly class CreateOnlyApply
                         $exception->getMessage(),
                         $exception instanceof CloudValidationException ? $exception : null,
                     );
-                    $status = $this->createdCount($outcomes) === 0 && !$exception instanceof CloudTransportException
+                    $status = $this->confirmedMutationCount($outcomes) === 0 && !$exception instanceof CloudTransportException
                         ? ApplyStatus::FAILED
                         : ApplyStatus::PARTIAL_FAILURE;
                     return new ApplyResult($status, ...$outcomes);
@@ -1049,15 +1049,6 @@ final readonly class CreateOnlyApply
             : ApplyStatus::PARTIAL_FAILURE;
 
         return new ApplyResult($status, ...$outcomes);
-    }
-
-    /** @param list<ApplyResourceOutcome> $outcomes */
-    private function createdCount(array $outcomes): int
-    {
-        return count(array_filter(
-            $outcomes,
-            static fn (ApplyResourceOutcome $outcome): bool => $outcome->operation === ApplyOutcomeOperation::CREATED,
-        ));
     }
 
     /** @param list<ApplyResourceOutcome> $outcomes */

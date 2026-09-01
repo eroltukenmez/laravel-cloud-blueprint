@@ -12,7 +12,7 @@ This project uses a Keep a Changelog-inspired format.
 
 ### Security
 
-- Destructive execution remains disabled: apply refuses every DELETE plan before confirmation, State locking, State mutation, or Cloud mutation, and no Cloud DELETE transport is implemented.
+- Environment is the only executable DELETE resource. Apply requires explicit approval, exact State identity, locked Blueprint and Cloud revalidation, complete SAFE dependency readiness, and authoritative remote absence before removing State; all other DELETE resource types remain disabled.
 - Environment dependency discovery retains only safe identities, counts, and categories; it never renders variable values, secret content, credentials, or internal dependency IDs.
 
 ## [0.1.0-alpha.6] - 2026-09-01

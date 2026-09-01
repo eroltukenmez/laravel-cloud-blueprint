@@ -31,6 +31,7 @@ use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
@@ -53,7 +54,10 @@ final class EnvironmentDeleteApplyTest extends TestCase
     public function testSafeApprovedDeleteIsConfirmedBeforeStateCheckpoint(): void
     {
         $cloud = new DeleteCloud([[self::environment()], []]);
-        $states = new DeleteStateStore(self::state());
+        $unrelated = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'analytics');
+        $states = new DeleteStateStore(self::state()->withResource(
+            new StateResource($unrelated, ResourceType::DATABASE_CLUSTER, 'cluster-unrelated'),
+        ));
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
@@ -61,6 +65,8 @@ final class EnvironmentDeleteApplyTest extends TestCase
         self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
         self::assertSame(['env-old'], $cloud->deletedIds);
         self::assertNull($states->state->find(self::environmentAddress()));
+        self::assertSame('app-old', $states->state->get(self::applicationAddress())->remoteId);
+        self::assertSame('cluster-unrelated', $states->state->get($unrelated)->remoteId);
         self::assertSame(8, $states->state->serial);
         self::assertSame(1, $states->saveCount);
         self::assertSame(['lock', 'get:app-old', 'delete:env-old', 'get:app-old', 'save', 'release'], $states->eventsWith($cloud));
@@ -280,6 +286,38 @@ final class EnvironmentDeleteApplyTest extends TestCase
         self::assertSame(7, $states->state->serial);
     }
 
+    public function testCheckpointedDeletionSurvivesLaterCreateFailureAsPartialApply(): void
+    {
+        $createFailure = new CloudApiException('create failed', 'POST', '/applications/app-old/environments', 422);
+        $cloud = new DeleteCloud([[self::environment()], []], createFailure: $createFailure);
+        $states = new DeleteStateStore(self::state());
+        $application = self::applicationAddress();
+        $staging = new ResourceAddress(ResourceType::ENVIRONMENT, 'staging');
+        $plan = new ExecutionPlan(
+            new PlanAction(
+                self::environmentAddress(),
+                ResourceType::ENVIRONMENT,
+                PlanOperation::DELETE,
+                'delete',
+                'env-old',
+                $application,
+                self::dependencies(),
+            ),
+            new PlanAction($application, ResourceType::APPLICATION, PlanOperation::NO_CHANGE, 'owned', 'app-old'),
+            new PlanAction($staging, ResourceType::ENVIRONMENT, PlanOperation::CREATE, 'create'),
+        );
+
+        $result = self::apply()->execute(self::blueprint(includeEnvironment: true, environmentName: 'staging'), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertNull($states->state->find(self::environmentAddress()));
+        self::assertNull($states->state->find($staging));
+        self::assertSame(8, $states->state->serial);
+        self::assertSame(1, $states->saveCount);
+        self::assertSame(1, $cloud->deleteCalls);
+    }
+
     private static function apply(): CreateOnlyApply
     {
         return new CreateOnlyApply(
@@ -325,14 +363,14 @@ final class EnvironmentDeleteApplyTest extends TestCase
             ->withResource(new StateResource(self::environmentAddress(), ResourceType::ENVIRONMENT, 'env-old', $application));
     }
 
-    private static function blueprint(bool $includeEnvironment = false): Blueprint
+    private static function blueprint(bool $includeEnvironment = false, string $environmentName = 'preview'): Blueprint
     {
         return new Blueprint(
             BlueprintSchemaVersion::V1,
             'acme',
             new ApplicationDefinition('my-api', 'eu-central-1', new SourceDefinition(SourceProvider::GITHUB, 'acme/api')),
             $includeEnvironment
-                ? new EnvironmentDefinitionCollection(new EnvironmentDefinition('preview', 'main', new VariableDefinitionCollection()))
+                ? new EnvironmentDefinitionCollection(new EnvironmentDefinition($environmentName, 'main', new VariableDefinitionCollection()))
                 : new EnvironmentDefinitionCollection(),
         );
     }
@@ -398,7 +436,11 @@ final class DeleteCloud implements LaravelCloudEnvironmentMutationClient
     public int $deleteCalls = 0;
 
     /** @param list<list<CloudEnvironment>|CloudException> $discoveries */
-    public function __construct(array $discoveries, private readonly ?CloudException $deleteFailure = null)
+    public function __construct(
+        array $discoveries,
+        private readonly ?CloudException $deleteFailure = null,
+        private readonly ?CloudException $createFailure = null,
+    )
     {
         $this->discoveries = $discoveries;
     }
@@ -417,7 +459,14 @@ final class DeleteCloud implements LaravelCloudEnvironmentMutationClient
     }
     public function environment(string $environmentId): CloudEnvironmentDetails { return new CloudEnvironmentDetails($environmentId, 'preview', null); }
     public function createApplication(CreateApplicationRequest $request): CloudApplication { throw new \LogicException('Unexpected create.'); }
-    public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment { throw new \LogicException('Unexpected create.'); }
+    public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
+    {
+        if ($this->createFailure !== null) {
+            throw $this->createFailure;
+        }
+
+        throw new \LogicException('Unexpected create.');
+    }
     public function updateEnvironment(string $environmentId, UpdateEnvironmentRequest $request): UpdatedCloudEnvironment { throw new \LogicException('Unexpected update.'); }
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void { throw new \LogicException('Unexpected variables.'); }
     public function deleteEnvironment(string $environmentId): void
