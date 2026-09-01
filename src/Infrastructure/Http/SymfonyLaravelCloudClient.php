@@ -778,7 +778,16 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             $path,
             $complete,
         );
-        $domainCount = $this->dependencyCount($relationships, 'domains', 'domains', $path, $complete);
+        $environmentId = $this->requiredNonEmptyString($resource, 'id', $path);
+        if (array_key_exists('domains', $relationships)) {
+            $domainCount = $this->dependencyCount($relationships, 'domains', 'domains', $path, $complete);
+        } elseif (array_values(array_diff($missing, ['domains'])) === []) {
+            $domainCount = $this->environmentDomainCount($environmentId);
+            $missing = array_values(array_diff($missing, ['domains']));
+            $complete = true;
+        } else {
+            $domainCount = 0;
+        }
         $instanceCount = $this->dependencyCount($relationships, 'instances', 'instances', $path, $complete);
         $deploymentCount = $this->dependencyCount($relationships, 'deployments', 'deployments', $path, $complete);
         $secretCount = $this->dependencyCount($relationships, 'secrets', 'secrets', $path, $complete);
@@ -893,12 +902,12 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         bool &$complete,
         array &$missing,
     ): ?bool {
-        if ($applicationId === null || !array_key_exists('included', $document)) {
+        if ($applicationId === null) {
             $complete = false;
             $missing[] = 'included.application';
             return null;
         }
-        foreach ($this->listAt($document, 'included', $path) as $value) {
+        foreach (array_key_exists('included', $document) ? $this->listAt($document, 'included', $path) : [] as $value) {
             $included = $this->valueAsMapping($value, $path);
             if ($this->optionalString($included, 'type', $path) !== 'applications'
                 || $this->optionalString($included, 'id', $path) !== $applicationId) {
@@ -906,25 +915,78 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             }
             $relationships = $this->optionalMapping($included, 'relationships', $path);
             if ($relationships === null) {
-                $complete = false;
-                $missing[] = 'application.defaultEnvironment';
-                return null;
+                break;
             }
-            if (!array_key_exists('defaultEnvironment', $relationships)) {
-                $missing[] = 'application.defaultEnvironment';
+            if (array_key_exists('defaultEnvironment', $relationships)) {
+                $defaultId = $this->dependencyId(
+                    $relationships,
+                    'defaultEnvironment',
+                    'environments',
+                    $path,
+                    $complete,
+                );
+                return $defaultId !== null && $defaultId === $this->requiredNonEmptyString($environment, 'id', $path);
             }
-            $defaultId = $this->dependencyId(
-                $relationships,
-                'defaultEnvironment',
-                'environments',
-                $path,
-                $complete,
-            );
-            return $defaultId !== null && $defaultId === $this->requiredNonEmptyString($environment, 'id', $path);
+            break;
         }
-        $complete = false;
-        $missing[] = 'included.application';
-        return null;
+
+        if (!$complete) {
+            $missing[] = 'application.defaultEnvironment';
+            return null;
+        }
+
+        [$found, $defaultId] = $this->applicationDefaultEnvironmentId($applicationId);
+        if (!$found) {
+            $complete = false;
+            $missing[] = 'application.defaultEnvironment';
+            return null;
+        }
+        $missing = array_values(array_diff($missing, ['application.defaultEnvironment']));
+
+        return $defaultId !== null && $defaultId === $this->requiredNonEmptyString($environment, 'id', $path);
+    }
+
+    private function environmentDomainCount(string $environmentId): int
+    {
+        $count = 0;
+        $initialPath = sprintf('/environments/%s/domains', rawurlencode($environmentId));
+        foreach ($this->pages($initialPath) as [$document, $path]) {
+            foreach ($this->listAt($document, 'data', $path) as $value) {
+                $domain = $this->valueAsMapping($value, $path);
+                if ($this->requiredNonEmptyString($domain, 'type', $path) !== 'domains') {
+                    throw $this->malformed($path, 'Domain response has an unexpected resource type.');
+                }
+                $this->requiredNonEmptyString($domain, 'id', $path);
+                ++$count;
+            }
+        }
+
+        return $count;
+    }
+
+    /** @return array{bool, ?string} */
+    private function applicationDefaultEnvironmentId(string $applicationId): array
+    {
+        $path = sprintf('/applications/%s?include=defaultEnvironment', rawurlencode($applicationId));
+        $document = $this->get($path);
+        $application = $this->mappingAt($document, 'data', $path);
+        if ($this->requiredNonEmptyString($application, 'type', $path) !== 'applications'
+            || $this->requiredNonEmptyString($application, 'id', $path) !== $applicationId) {
+            throw $this->malformed($path, 'Application response identity does not match the Environment parent.');
+        }
+        $relationships = $this->mappingAt($application, 'relationships', $path);
+        if (!array_key_exists('defaultEnvironment', $relationships)) {
+            return [false, null];
+        }
+        $complete = true;
+
+        return [true, $this->dependencyId(
+            $relationships,
+            'defaultEnvironment',
+            'environments',
+            $path,
+            $complete,
+        )];
     }
 
     /**

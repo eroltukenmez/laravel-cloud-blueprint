@@ -163,7 +163,12 @@ final class EnvironmentDeleteApplyTest extends TestCase
 
     public function testLockedRediscoveryCanChangeSafeToBlockedOrUnknown(): void
     {
-        foreach ([self::dependencies(databaseId: 'db'), EnvironmentDependencies::incomplete()] as $dependencies) {
+        foreach ([
+            self::dependencies(databaseId: 'db'),
+            self::dependencies(domains: 1),
+            self::dependencies(isDefault: true),
+            EnvironmentDependencies::incomplete(),
+        ] as $dependencies) {
             $cloud = new DeleteCloud([[self::environment(dependencies: $dependencies)]]);
             $states = new DeleteStateStore(self::state());
 

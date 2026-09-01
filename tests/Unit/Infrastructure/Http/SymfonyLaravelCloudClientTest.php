@@ -170,16 +170,143 @@ JSON,
         self::assertSame(EnvironmentDestructiveReadiness::UNKNOWN, $dependencies->readiness());
     }
 
-    public function testMissingDefaultEnvironmentRelationshipIsDiagnosedAndUnknown(): void
+    public function testMissingIncludedDefaultEnvironmentUsesAuthoritativeApplicationLinkage(): void
     {
         $payload = <<<'JSON'
 {"data":[{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"domains":{"data":[]},"primaryDomain":{"data":null},"instances":{"data":[]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}],"included":[{"id":"app-1","type":"applications","attributes":{"name":"API"},"relationships":{}}],"links":{"next":null}}
 JSON;
 
-        $dependencies = $this->client([new MockResponse($payload)])->environments('app-1')[0]->dependencies;
+        $application = <<<'JSON'
+{"data":{"id":"app-1","type":"applications","relationships":{"defaultEnvironment":{"data":{"type":"environments","id":"env-other"}}}}}
+JSON;
+        $dependencies = $this->client([
+            new MockResponse($payload),
+            new MockResponse($application),
+        ])->environments('app-1')[0]->dependencies;
 
-        self::assertSame(['application.defaultEnvironment'], $dependencies->missingRelationships);
+        self::assertSame([], $dependencies->missingRelationships);
+        self::assertFalse($dependencies->isDefaultEnvironment);
+        self::assertSame(EnvironmentDestructiveReadiness::SAFE, $dependencies->readiness());
+    }
+
+    public function testMissingDomainLinkageUsesScopedDomainListAsAuthoritativeKnownEmpty(): void
+    {
+        $payload = <<<'JSON'
+{"data":[{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"primaryDomain":{"data":null},"instances":{"data":[{"type":"instances","id":"instance-1"}]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}],"included":[{"id":"app-1","type":"applications","relationships":{"defaultEnvironment":{"data":{"type":"environments","id":"env-other"}}}}],"links":{"next":null}}
+JSON;
+        $domains = new MockResponse('{"data":[],"links":{"next":null}}');
+
+        $dependencies = $this->client([
+            new MockResponse($payload),
+            $domains,
+        ])->environments('app-1')[0]->dependencies;
+
+        self::assertTrue($dependencies->complete);
+        self::assertSame(0, $dependencies->domainCount);
+        self::assertSame([], $dependencies->missingRelationships);
+        self::assertSame(EnvironmentDestructiveReadiness::SAFE, $dependencies->readiness());
+        self::assertStringContainsString('/environments/env-1/domains', $domains->getRequestUrl());
+    }
+
+    public function testMissingDomainLinkageUsesScopedDomainListAsAuthoritativeBlocker(): void
+    {
+        $payload = <<<'JSON'
+{"data":[{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"primaryDomain":{"data":null},"instances":{"data":[]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}],"included":[{"id":"app-1","type":"applications","relationships":{"defaultEnvironment":{"data":{"type":"environments","id":"env-other"}}}}],"links":{"next":null}}
+JSON;
+        $domains = '{"data":[{"id":"domain-1","type":"domains"}],"links":{"next":null}}';
+
+        $dependencies = $this->client([
+            new MockResponse($payload),
+            new MockResponse($domains),
+        ])->environments('app-1')[0]->dependencies;
+
+        self::assertSame(1, $dependencies->domainCount);
+        self::assertSame(EnvironmentDestructiveReadiness::BLOCKED, $dependencies->readiness());
+        self::assertContains(EnvironmentDependencyType::CUSTOM_DOMAIN, $dependencies->blockingCategories());
+    }
+
+    public function testApplicationFallbackExactDefaultIdentityAndNullAreAuthoritative(): void
+    {
+        $environment = <<<'JSON'
+{"data":{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"domains":{"data":[]},"primaryDomain":{"data":null},"instances":{"data":[]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}}
+JSON;
+        foreach ([
+            ['{"type":"environments","id":"env-1"}', true, EnvironmentDestructiveReadiness::BLOCKED],
+            ['null', false, EnvironmentDestructiveReadiness::SAFE],
+        ] as [$linkage, $expectedDefault, $readiness]) {
+            $application = sprintf(
+                '{"data":{"id":"app-1","type":"applications","relationships":{"defaultEnvironment":{"data":%s}}}}',
+                $linkage,
+            );
+            $dependencies = $this->client([
+                new MockResponse($environment),
+                new MockResponse($application),
+            ])->environment('env-1')->dependencies;
+
+            self::assertSame($expectedDefault, $dependencies->isDefaultEnvironment);
+            self::assertSame($readiness, $dependencies->readiness());
+        }
+    }
+
+    public function testRealCloudEquivalentMissingLinkagesUseScopedFallbacksAndBecomeSafe(): void
+    {
+        $environment = <<<'JSON'
+{"data":{"id":"env-1","type":"environments","attributes":{"name":"delete-e2e"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"primaryDomain":{"data":null},"instances":{"data":[{"type":"instances","id":"instance-1"}]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}},"included":[{"id":"app-1","type":"applications","relationships":{}}]}
+JSON;
+        $domains = new MockResponse('{"data":[],"links":{"next":null}}');
+        $application = new MockResponse(
+            '{"data":{"id":"app-1","type":"applications","relationships":{"defaultEnvironment":{"data":{"type":"environments","id":"env-production"}}}}}',
+        );
+
+        $dependencies = $this->client([
+            new MockResponse($environment),
+            $domains,
+            $application,
+        ])->environment('env-1')->dependencies;
+
+        self::assertTrue($dependencies->complete);
+        self::assertSame(EnvironmentDestructiveReadiness::SAFE, $dependencies->readiness());
+        self::assertSame([EnvironmentDependencyType::INSTANCE], $dependencies->informationalCategories());
+        self::assertSame([], $dependencies->blockingCategories());
+        self::assertSame([], $dependencies->missingRelationships);
+        self::assertStringContainsString('/environments/env-1/domains', $domains->getRequestUrl());
+        self::assertStringContainsString('/applications/app-1?include=defaultEnvironment', $application->getRequestUrl());
+    }
+
+    public function testMalformedDomainAndApplicationDefaultLinkageRemainNonExecutable(): void
+    {
+        $malformedDomain = str_replace(
+            '"domains":{"data":[]}',
+            '"domains":{"data":null}',
+            <<<'JSON'
+{"data":[{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"domains":{"data":[]},"primaryDomain":{"data":null},"instances":{"data":[]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}],"included":[{"id":"app-1","type":"applications","relationships":{"defaultEnvironment":{"data":null}}}],"links":{"next":null}}
+JSON,
+        );
+
+        try {
+            $this->client([new MockResponse($malformedDomain)])->environments('app-1');
+            self::fail('Expected malformed domains linkage failure.');
+        } catch (CloudResponseException) {
+        }
+
+        $missingDefault = <<<'JSON'
+{"data":{"id":"env-1","type":"environments","attributes":{"name":"preview"},"relationships":{"application":{"data":{"type":"applications","id":"app-1"}},"branch":{"data":null},"deployments":{"data":[]},"currentDeployment":{"data":null},"domains":{"data":[]},"primaryDomain":{"data":null},"instances":{"data":[]},"database":{"data":null},"cache":{"data":null},"buckets":{"data":[]},"websocketApplication":{"data":null},"secrets":{"data":[]}}}}
+JSON;
+        $dependencies = $this->client([
+            new MockResponse($missingDefault),
+            new MockResponse('{"data":{"id":"app-1","type":"applications","relationships":{}}}'),
+        ])->environment('env-1')->dependencies;
         self::assertSame(EnvironmentDestructiveReadiness::UNKNOWN, $dependencies->readiness());
+        self::assertSame(['application.defaultEnvironment'], $dependencies->missingRelationships);
+
+        try {
+            $this->client([
+                new MockResponse($missingDefault),
+                new MockResponse('{"data":{"id":"app-1","type":"applications","relationships":{"defaultEnvironment":{}}}}'),
+            ])->environment('env-1');
+            self::fail('Expected malformed default Environment linkage failure.');
+        } catch (CloudResponseException) {
+        }
     }
 
     public function testMalformedSafetyRelationshipFailsInsteadOfBecomingSafe(): void

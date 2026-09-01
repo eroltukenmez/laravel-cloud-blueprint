@@ -91,6 +91,8 @@ Environment destructive dependency discovery is live and read-only. It must rema
 
 Incomplete Environment dependency diagnostics may expose relationship names only. They must never expose dependency IDs, credentials, secret values, or other sensitive payload data.
 
+Environment destructive discovery should prefer relationship linkage. Missing domain linkage may be completed through the scoped Environment domains endpoint, and missing included Application default linkage through an exact Application GET; missing or malformed fallback data remains non-executable.
+
 Discovered instances are expected Environment children and remain observable but do not by themselves block Environment deletion. Default Environment, database, cache, WebSocket, custom-domain, filesystem, secret, and deployment relationships remain destructive blockers.
 
 Do not implement destroy behavior.
