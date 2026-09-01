@@ -80,13 +80,14 @@ v0.1 supports:
 
 - CREATE
 - UPDATE
-- DELETE planning only (non-executable)
+- Environment DELETE planning and guarded execution
+- DELETE planning only for other resource types (non-executable)
 - NO_CHANGE
 - UNSUPPORTED
 
-Cloud resource deletion is explicitly forbidden in v0.1. DELETE may represent destructive intent for State-owned resources absent from the Blueprint, but apply must refuse it before any Cloud or State mutation.
+Environment is the only Cloud resource whose DELETE may execute in v0.1. It requires explicit approval, exact State identity, locked live rediscovery, complete SAFE dependency readiness, and confirmed remote absence before State removal. Other DELETE resource types remain non-executable.
 
-Environment destructive dependency discovery is live and read-only. It must remain conservative when relationship data is missing, malformed, or unknown, and it must not imply ownership or enable DELETE execution.
+Environment destructive dependency discovery is live and read-only. It must remain conservative when relationship data is missing, malformed, or unknown, and it must not imply ownership. No force or recursive destroy behavior is permitted.
 
 Do not implement destroy behavior.
 
@@ -131,7 +132,7 @@ v0.1.0-alpha.6 supports only:
 - Database Cluster
 - logical Database
 
-Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, and no DELETE. Application repository and region changes, Database updates and replacements, and Environment Database attachment are UNSUPPORTED.
+Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, and guarded DELETE for Environment only. Application repository and region changes, Database updates and replacements/deletion, and Environment Database attachment are UNSUPPORTED.
 
 Explicit import supports Application, Environment, Database Cluster, and logical Database identity adoption into local state only. Environment variables and Database attachments are not importable.
 

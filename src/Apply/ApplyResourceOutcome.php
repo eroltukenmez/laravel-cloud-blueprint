@@ -14,6 +14,10 @@ final readonly class ApplyResourceOutcome
         public ApplyOutcomeOperation $operation,
         public ?string $message = null,
         public ?CloudValidationException $validation = null,
+        public ?DestructiveOutcome $destructiveOutcome = null,
+        public ?bool $deleted = null,
+        public ?bool $confirmed = null,
+        public ?bool $stateCheckpointed = null,
     ) {
     }
 }

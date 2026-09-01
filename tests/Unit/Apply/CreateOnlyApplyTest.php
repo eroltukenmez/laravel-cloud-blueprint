@@ -23,7 +23,6 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
-use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
@@ -111,7 +110,7 @@ final class CreateOnlyApplyTest extends TestCase
         }
     }
 
-    public function testDependencyCompleteEnvironmentDeleteStillRefusesBeforeLockOrMutation(): void
+    public function testEnvironmentDeleteWithoutDependencyDiscoveryRefusesBeforeLockOrMutation(): void
     {
         $events = new ApplyEvents();
         $application = self::address(ResourceType::APPLICATION, 'my-api');
@@ -119,10 +118,9 @@ final class CreateOnlyApplyTest extends TestCase
             self::address(ResourceType::ENVIRONMENT, 'preview'),
             ResourceType::ENVIRONMENT,
             PlanOperation::DELETE,
-            'Dependency discovery is complete and found no blockers.',
+            'Dependency discovery is unavailable.',
             'env-preview',
             $application,
-            new EnvironmentDependencies(null, null, null, 0, 0, 0, 0, 0, false, false, true),
         ));
         $states = new ApplyStateStore($events);
 
@@ -130,7 +128,7 @@ final class CreateOnlyApplyTest extends TestCase
             self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), $states);
             self::fail('Expected DELETE refusal.');
         } catch (ApplyRefusedException $exception) {
-            self::assertStringContainsString('destructive execution is not enabled', $exception->getMessage());
+            self::assertStringContainsString('dependency discovery is unavailable', $exception->getMessage());
         }
 
         self::assertSame([], $events->values);

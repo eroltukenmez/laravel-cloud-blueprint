@@ -541,6 +541,73 @@ JSON);
         }
     }
 
+    public function testEnvironmentDeleteTargetsExactEncodedIdWithNoBodyAndAcceptsOnly204(): void
+    {
+        $response = new MockResponse('', ['http_code' => 204]);
+        $request = new RecordedRequest();
+        $http = new MockHttpClient(function (string $method, string $url) use ($request, $response): MockResponse {
+            $request->method = $method;
+            $request->url = $url;
+
+            return $response;
+        });
+
+        (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))
+            ->deleteEnvironment('env/exact');
+
+        self::assertSame('DELETE', $request->method);
+        self::assertSame('https://cloud.laravel.com/api/environments/env%2Fexact', $request->url);
+        self::assertArrayNotHasKey('body', $response->getRequestOptions());
+    }
+
+    public function testEnvironmentDeleteRejectsUnexpectedSuccessfulStatus(): void
+    {
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse('{}', ['http_code' => 200])])->deleteEnvironment('env-1');
+    }
+
+    /** @return iterable<string, array{int, class-string<CloudApiException>}> */
+    public static function environmentDeleteErrorProvider(): iterable
+    {
+        yield 'forbidden' => [403, CloudAuthenticationException::class];
+        yield 'not found' => [404, CloudResourceNotFoundException::class];
+        yield 'validation failure' => [422, CloudValidationException::class];
+    }
+
+    /** @param class-string<CloudApiException> $expected */
+    #[DataProvider('environmentDeleteErrorProvider')]
+    public function testEnvironmentDeleteMapsDocumentedErrorsSafely(int $status, string $expected): void
+    {
+        try {
+            $this->client([new MockResponse('{"message":"safe failure"}', ['http_code' => $status])])
+                ->deleteEnvironment('env-1');
+            self::fail('Expected DELETE failure.');
+        } catch (CloudApiException $exception) {
+            self::assertInstanceOf($expected, $exception);
+            self::assertSame('DELETE', $exception->method);
+            self::assertSame('/environments/env-1', $exception->path);
+        }
+    }
+
+    public function testEnvironmentDeleteTransportFailureIsReportedAsUncertainAndNeverRetried(): void
+    {
+        $calls = 0;
+        $http = new MockHttpClient(static function () use (&$calls): never {
+            ++$calls;
+            throw new TransportException('connection reset');
+        });
+
+        try {
+            (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))->deleteEnvironment('env-1');
+            self::fail('Expected uncertain transport failure.');
+        } catch (CloudTransportException $exception) {
+            self::assertSame('DELETE', $exception->method);
+            self::assertStringContainsString('uncertain', $exception->getMessage());
+        }
+
+        self::assertSame(1, $calls);
+    }
+
     /** @param list<MockResponse> $responses */
     private function client(array $responses, string $token = 'test-token'): SymfonyLaravelCloudClient
     {

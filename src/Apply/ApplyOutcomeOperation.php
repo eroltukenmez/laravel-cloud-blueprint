@@ -9,5 +9,6 @@ enum ApplyOutcomeOperation: string
     case CREATED = 'created';
     case UPDATED = 'updated';
     case UNCHANGED = 'unchanged';
+    case DELETED = 'deleted';
     case FAILED = 'failed';
 }

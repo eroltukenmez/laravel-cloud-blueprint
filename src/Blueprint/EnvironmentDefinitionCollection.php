@@ -41,6 +41,11 @@ final readonly class EnvironmentDefinitionCollection implements Countable, Itera
         return count($this->environments);
     }
 
+    public function has(string $name): bool
+    {
+        return isset($this->environments[$name]);
+    }
+
     public function get(string $name): EnvironmentDefinition
     {
         return $this->environments[$name]

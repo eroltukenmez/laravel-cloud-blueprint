@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Apply;
 
+use Closure;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
 use LaravelCloudBlueprint\Apply\Exception\StateIdentityConflictException;
 use LaravelCloudBlueprint\Blueprint\Blueprint;
@@ -11,6 +12,7 @@ use LaravelCloudBlueprint\Blueprint\LaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
@@ -19,6 +21,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
@@ -45,6 +48,7 @@ final readonly class CreateOnlyApply
     public function __construct(
         private VariableValueResolver $values,
         private DatabaseClusterReadiness $databaseReadiness = new DatabaseClusterReadiness(),
+        private EnvironmentDeletionVerification $deletionVerification = new EnvironmentDeletionVerification(),
     ) {
     }
 
@@ -53,14 +57,28 @@ final readonly class CreateOnlyApply
         ExecutionPlan $plan,
         LaravelCloudClient $cloud,
         StateStore $states,
+        ?Closure $lockedBlueprintLoader = null,
     ): ApplyResult {
         $this->assertSupported($plan);
+        if ($plan->countByOperation(PlanOperation::DELETE) > 0
+            && !$cloud instanceof LaravelCloudEnvironmentMutationClient) {
+            throw new ApplyRefusedException(
+                'The configured Cloud client cannot delete Environment resources. No resources were modified.',
+            );
+        }
         $variableGroups = $this->variableGroups($blueprint, $plan);
 
         $transaction = $states->begin();
 
         try {
             $state = $transaction->load();
+            if ($lockedBlueprintLoader !== null) {
+                $lockedBlueprint = $lockedBlueprintLoader();
+                if (!$lockedBlueprint instanceof Blueprint) {
+                    throw new ApplyRefusedException('Locked Blueprint reload did not return a valid Blueprint. No resources were modified.');
+                }
+                $blueprint = $lockedBlueprint;
+            }
             if ($this->hasDatabaseCreate($plan)) {
                 if (!$cloud instanceof LaravelCloudDatabaseMutationClient) {
                     throw new ApplyRefusedException('The configured Cloud client cannot create Database resources. No resources were modified.');
@@ -126,6 +144,32 @@ final readonly class CreateOnlyApply
             foreach ($plan as $action) {
                 if ($action->resourceType === ResourceType::VARIABLE
                     || $action->resourceType === ResourceType::DATABASE_ATTACHMENT) {
+                    continue;
+                }
+
+                if ($action->operation === PlanOperation::DELETE) {
+                    if ($action->resourceType !== ResourceType::ENVIRONMENT) {
+                        throw new ApplyRefusedException(sprintf(
+                            '%s DELETE apply is not supported. No resources were modified.',
+                            ucfirst($action->resourceType->value),
+                        ));
+                    }
+                    if (!$cloud instanceof LaravelCloudEnvironmentMutationClient) {
+                        throw new ApplyRefusedException('Environment DELETE capability changed during apply.');
+                    }
+                    $deleteResult = $this->deleteEnvironmentResource(
+                        $blueprint,
+                        $action,
+                        $cloud,
+                        $transaction,
+                        $state,
+                        $outcomes,
+                    );
+                    $state = $deleteResult['state'];
+                    $outcomes = $deleteResult['outcomes'];
+                    if ($deleteResult['failure'] !== null) {
+                        return $deleteResult['failure'];
+                    }
                     continue;
                 }
 
@@ -391,17 +435,45 @@ final readonly class CreateOnlyApply
 
     public function assertSupported(ExecutionPlan $plan): void
     {
-        if ($plan->countByOperation(PlanOperation::DELETE) > 0) {
-            throw new ApplyRefusedException(
-                'DELETE is planned but destructive execution is not enabled yet. No resources were modified.',
-            );
-        }
-
         if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
             throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
         }
 
         foreach ($plan as $action) {
+            if ($action->operation === PlanOperation::DELETE) {
+                if ($action->resourceType !== ResourceType::ENVIRONMENT) {
+                    throw new ApplyRefusedException(sprintf(
+                        '%s DELETE apply is not supported because destructive execution is not enabled for this resource type. No resources were modified.',
+                        ucfirst($action->resourceType->value),
+                    ));
+                }
+
+                if ($action->environmentDependencies === null) {
+                    throw new ApplyRefusedException(sprintf(
+                        'Environment deletion "%s" is refused because dependency discovery is unavailable. No resources were modified.',
+                        (string) $action->address,
+                    ));
+                }
+
+                $readiness = $action->environmentDependencies->readiness();
+                if ($readiness === EnvironmentDestructiveReadiness::BLOCKED) {
+                    throw new ApplyRefusedException(sprintf(
+                        'Environment deletion "%s" is blocked by existing dependencies (%s). No resources were modified.',
+                        (string) $action->address,
+                        implode(', ', array_map(
+                            static fn ($cat): string => $cat->value,
+                            $action->environmentDependencies->categories(),
+                        )),
+                    ));
+                }
+                if ($readiness === EnvironmentDestructiveReadiness::UNKNOWN) {
+                    throw new ApplyRefusedException(sprintf(
+                        'Environment deletion "%s" is refused because dependency discovery is incomplete. No resources were modified.',
+                        (string) $action->address,
+                    ));
+                }
+            }
+
             if ($action->resourceType === ResourceType::DATABASE_ATTACHMENT
                 && $action->operation !== PlanOperation::NO_CHANGE) {
                 throw new ApplyRefusedException('Database attachment mutation is not supported. No resources were modified.');
@@ -803,7 +875,7 @@ final readonly class CreateOnlyApply
             $managed = $state->find($action->address);
             if ($managed === null) {
                 if ($action->resourceType === ResourceType::ENVIRONMENT
-                    && $action->operation === PlanOperation::UPDATE) {
+                    && ($action->operation === PlanOperation::UPDATE || $action->operation === PlanOperation::DELETE)) {
                     throw new StateIdentityConflictException(sprintf(
                         'Local state ownership for "%s" no longer exists.',
                         (string) $action->address,
@@ -825,13 +897,40 @@ final readonly class CreateOnlyApply
                 ));
             }
             if ($action->resourceType === ResourceType::ENVIRONMENT) {
-                $expectedParent = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
-                if ($managed->parent === null
-                    || (string) $managed->parent !== (string) $expectedParent) {
-                    throw new StateIdentityConflictException(sprintf(
-                        'Local state parent for "%s" is invalid.',
-                        (string) $action->address,
-                    ));
+                if ($action->operation === PlanOperation::DELETE) {
+                    if ($managed->parent === null
+                        || $managed->parent->type !== ResourceType::APPLICATION
+                        || $state->find($managed->parent) === null) {
+                        throw new StateIdentityConflictException(sprintf(
+                            'Local state parent for "%s" is invalid.',
+                            (string) $action->address,
+                        ));
+                    }
+                    if ($action->parent !== null && (string) $managed->parent !== (string) $action->parent) {
+                        throw new StateIdentityConflictException(sprintf(
+                            'Local state parent for "%s" is invalid.',
+                            (string) $action->address,
+                        ));
+                    }
+                    $approvedParent = $this->actionAt($plan, $managed->parent);
+                    $managedParent = $state->get($managed->parent);
+                    if ($approvedParent === null
+                        || $approvedParent->remoteId === null
+                        || $approvedParent->remoteId !== $managedParent->remoteId) {
+                        throw new StateIdentityConflictException(sprintf(
+                            'Parent Application identity for "%s" changed after approval.',
+                            (string) $action->address,
+                        ));
+                    }
+                } else {
+                    $expectedParent = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+                    if ($managed->parent === null
+                        || (string) $managed->parent !== (string) $expectedParent) {
+                        throw new StateIdentityConflictException(sprintf(
+                            'Local state parent for "%s" is invalid.',
+                            (string) $action->address,
+                        ));
+                    }
                 }
             }
             foreach ($state->resources() as $resource) {
@@ -967,7 +1066,407 @@ final readonly class CreateOnlyApply
         return count(array_filter(
             $outcomes,
             static fn (ApplyResourceOutcome $outcome): bool => $outcome->operation === ApplyOutcomeOperation::CREATED
-                || $outcome->operation === ApplyOutcomeOperation::UPDATED,
+                || $outcome->operation === ApplyOutcomeOperation::UPDATED
+                || $outcome->operation === ApplyOutcomeOperation::DELETED,
         ));
+    }
+
+    /**
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{
+     *   state: StateDocument,
+     *   outcomes: list<ApplyResourceOutcome>,
+     *   failure: ApplyResult|null
+     * }
+     */
+    private function deleteEnvironmentResource(
+        Blueprint $blueprint,
+        PlanAction $action,
+        LaravelCloudEnvironmentMutationClient $cloud,
+        StateTransaction $transaction,
+        StateDocument $state,
+        array $outcomes,
+    ): array {
+        $managed = $state->find($action->address);
+        if ($managed === null) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf('Local state ownership for "%s" no longer exists.', (string) $action->address),
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        if ($managed->type !== ResourceType::ENVIRONMENT) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf('Local state resource type for "%s" is invalid.', (string) $action->address),
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        if ($action->remoteId === null || $managed->remoteId !== $action->remoteId) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf('Local state remote identity for "%s" conflicts with approved plan.', (string) $action->address),
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        if ($managed->parent === null || $managed->parent->type !== ResourceType::APPLICATION) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf('Local state parent for "%s" is invalid.', (string) $action->address),
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        $parentManaged = $state->find($managed->parent);
+        if ($parentManaged === null || $parentManaged->type !== ResourceType::APPLICATION) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf('Parent Application "%s" is not owned in state.', (string) $managed->parent),
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        if ($action->parent !== null && (string) $managed->parent !== (string) $action->parent) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf('Parent address for "%s" changed after approval.', (string) $action->address),
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        $blueprintParent = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+        if ((string) $managed->parent !== (string) $blueprintParent) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                'Blueprint Application identity changed after approval.',
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        if ($blueprint->environments->has($action->address->name)) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf('Environment "%s" is declared in the blueprint and cannot be deleted.', $action->address->name),
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        if ($state->childrenOf($action->address) !== []) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf('State resource "%s" cannot be deleted while it has owned children.', (string) $action->address),
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        foreach ($state->resources() as $resource) {
+            if ((string) $resource->address !== (string) $managed->address && $resource->remoteId === $managed->remoteId) {
+                $outcomes[] = new ApplyResourceOutcome(
+                    $action->address,
+                    ApplyOutcomeOperation::FAILED,
+                    sprintf('Remote identity for "%s" is owned by multiple addresses.', (string) $action->address),
+                    destructiveOutcome: DestructiveOutcome::CONFLICT,
+                    deleted: false,
+                    confirmed: false,
+                    stateCheckpointed: false,
+                );
+                return [
+                    'state' => $state,
+                    'outcomes' => $outcomes,
+                    'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+                ];
+            }
+        }
+
+        try {
+            $remoteEnvironments = $cloud->environments($parentManaged->remoteId);
+        } catch (CloudException $exception) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                'Locked Cloud rediscovery failed before mutation: ' . $exception->getMessage(),
+                destructiveOutcome: DestructiveOutcome::UNCERTAIN,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        $remote = $this->findEnvironmentById($remoteEnvironments, $managed->remoteId);
+        if ($remote === null) {
+            try {
+                $state = $transaction->save($state->withoutResource($action->address));
+            } catch (StateStorageException $exception) {
+                $outcomes[] = new ApplyResourceOutcome(
+                    $action->address,
+                    ApplyOutcomeOperation::FAILED,
+                    'Environment was already absent remotely, but State checkpoint failed: ' . $exception->getMessage(),
+                    destructiveOutcome: DestructiveOutcome::STATE_CHECKPOINT_FAILED,
+                    deleted: false,
+                    confirmed: true,
+                    stateCheckpointed: false,
+                );
+                return [
+                    'state' => $state,
+                    'outcomes' => $outcomes,
+                    'failure' => new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes),
+                ];
+            }
+
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::DELETED,
+                'already absent; local State reconciled',
+                destructiveOutcome: DestructiveOutcome::ALREADY_ABSENT,
+                deleted: false,
+                confirmed: true,
+                stateCheckpointed: true,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => null,
+            ];
+        }
+
+        if ($remote->applicationId !== $parentManaged->remoteId) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                'Environment parent Application did not match the locked State identity.',
+                destructiveOutcome: DestructiveOutcome::CONFLICT,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        $dependencies = $remote->dependencies;
+        $readiness = $dependencies->readiness();
+        if ($readiness === EnvironmentDestructiveReadiness::BLOCKED) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                sprintf(
+                    'Environment deletion refused: dependency discovery found: %s.',
+                    implode(', ', array_map(
+                        static fn ($cat): string => $cat->value,
+                        $dependencies->categories(),
+                    )),
+                ),
+                destructiveOutcome: DestructiveOutcome::REFUSED,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        if ($readiness === EnvironmentDestructiveReadiness::UNKNOWN) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                'Environment deletion refused: dependency discovery is incomplete or contains unknown relationships.',
+                destructiveOutcome: DestructiveOutcome::REFUSED,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        $deleteException = null;
+        try {
+            $cloud->deleteEnvironment($remote->id);
+        } catch (CloudException $exception) {
+            $deleteException = $exception;
+        }
+
+        $verification = $this->deletionVerification->verifyAbsent($cloud, $parentManaged->remoteId, $remote->id);
+
+        if ($verification === 'absent') {
+            try {
+                $state = $transaction->save($state->withoutResource($action->address));
+            } catch (StateStorageException $exception) {
+                $outcomes[] = new ApplyResourceOutcome(
+                    $action->address,
+                    ApplyOutcomeOperation::FAILED,
+                    'Remote Environment was deleted but local State checkpoint failed: ' . $exception->getMessage(),
+                    destructiveOutcome: DestructiveOutcome::STATE_CHECKPOINT_FAILED,
+                    deleted: true,
+                    confirmed: true,
+                    stateCheckpointed: false,
+                );
+                return [
+                    'state' => $state,
+                    'outcomes' => $outcomes,
+                    'failure' => new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes),
+                ];
+            }
+
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::DELETED,
+                'deleted and confirmed',
+                destructiveOutcome: DestructiveOutcome::DELETE_CONFIRMED,
+                deleted: true,
+                confirmed: true,
+                stateCheckpointed: true,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => null,
+            ];
+        }
+
+        if ($verification === 'present') {
+            $message = $deleteException !== null
+                ? 'Environment deletion failed: ' . $deleteException->getMessage()
+                : 'Environment deletion was not confirmed: remote resource remains discoverable.';
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                $message,
+                $deleteException instanceof CloudValidationException ? $deleteException : null,
+                destructiveOutcome: DestructiveOutcome::UNCERTAIN,
+                deleted: false,
+                confirmed: false,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::FAILED, ...$outcomes),
+            ];
+        }
+
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::FAILED,
+            'Environment deletion outcome is uncertain: post-delete rediscovery failed.',
+            destructiveOutcome: DestructiveOutcome::UNCERTAIN,
+            deleted: null,
+            confirmed: false,
+            stateCheckpointed: false,
+        );
+        return [
+            'state' => $state,
+            'outcomes' => $outcomes,
+            'failure' => new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes),
+        ];
+    }
+
+    /** @param list<CloudEnvironment> $environments */
+    private function findEnvironmentById(array $environments, string $id): ?CloudEnvironment
+    {
+        foreach ($environments as $environment) {
+            if ($environment->id === $id) {
+                return $environment;
+            }
+        }
+        return null;
     }
 }

@@ -28,6 +28,11 @@ final readonly class EnvironmentDependencies
         return new self($databaseId, null, null, 0, 0, 0, 0, 0, false, null, false);
     }
 
+    public static function authoritativeAbsence(): self
+    {
+        return new self(null, null, null, 0, 0, 0, 0, 0, false, false, true);
+    }
+
     public function hasDatabaseAttachment(): bool
     {
         return $this->databaseId !== null;

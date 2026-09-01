@@ -7,6 +7,7 @@ namespace LaravelCloudBlueprint\Infrastructure\Http;
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
@@ -40,7 +41,7 @@ use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
-final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient
+final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudEnvironmentMutationClient
 {
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string BASE_URL = 'https://cloud.laravel.com/api';
@@ -356,6 +357,12 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         }
     }
 
+    public function deleteEnvironment(string $environmentId): void
+    {
+        $path = sprintf('/environments/%s', rawurlencode($environmentId));
+        $this->delete($path);
+    }
+
     /**
      * @return iterable<array{array<string, mixed>, string}>
      */
@@ -531,6 +538,39 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             throw new CloudTransportException(
                 'Laravel Cloud update response could not be read; the remote outcome is uncertain. Run plan before retrying.',
                 'PATCH',
+                $path,
+                $status,
+                $requestId,
+            );
+        }
+    }
+
+    private function delete(string $path): void
+    {
+        try {
+            $response = $this->http->request('DELETE', self::BASE_URL . $path, [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $this->token->value(),
+                    'Accept' => 'application/json',
+                    'User-Agent' => self::USER_AGENT,
+                ],
+            ]);
+            $status = $response->getStatusCode();
+            $requestId = $this->requestId($response);
+        } catch (TransportExceptionInterface) {
+            throw new CloudTransportException(
+                'Laravel Cloud delete request failed with an uncertain remote outcome. Run plan before retrying.',
+                'DELETE',
+                $path,
+            );
+        }
+
+        $this->guardStatus($status, $path, $requestId, 'DELETE', $response);
+
+        if ($status !== 204) {
+            throw new CloudResponseException(
+                'Laravel Cloud delete response did not return HTTP 204.',
+                'DELETE',
                 $path,
                 $status,
                 $requestId,

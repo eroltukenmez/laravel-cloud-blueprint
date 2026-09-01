@@ -21,6 +21,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
@@ -254,6 +255,40 @@ final class ApplyCommandTest extends TestCase
         self::assertSame(0, $cloud->mutationCount);
         self::assertSame(0, $state->beginCount);
         self::assertSame(0, $state->state->serial);
+    }
+
+    public function testEnvironmentDeleteRequiresExplicitApprovalInHumanJsonAndNonInteractiveModes(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $stateDocument = self::managedState()->withResource(
+            new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application),
+        );
+
+        [$human, $humanCloud, $humanState] = $this->tester(
+            ApplyCommandCloudClient::withSafePreview(),
+            stateDocument: $stateDocument,
+        );
+        $human->setInputs(['no']);
+        self::assertSame(ExitCode::SUCCESS->value, $human->execute([]));
+        self::assertSame(0, $humanCloud->mutationCount);
+        self::assertSame(0, $humanState->beginCount);
+        self::assertStringContainsString('permanently deletes a Laravel Cloud Environment', $human->getDisplay());
+        self::assertStringContainsString('state:unmanage', $human->getDisplay());
+
+        foreach ([['--json' => true], ['--non-interactive' => true]] as $options) {
+            [$tester, $cloud, $state] = $this->tester(
+                ApplyCommandCloudClient::withSafePreview(),
+                stateDocument: $stateDocument,
+            );
+            self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute($options));
+            self::assertSame(0, $cloud->mutationCount);
+            self::assertSame(0, $state->beginCount);
+            self::assertStringContainsString('requires --auto-approve', $tester->getDisplay());
+            if (isset($options['--json'])) {
+                self::assertIsArray(json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR));
+            }
+        }
     }
 
     public function testOwnedOnlyLifecycleActionBlocksVariableUpdateWithoutLeakingValues(): void
@@ -597,6 +632,19 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         return new self(
             [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
             [new CloudEnvironment('env-existing', 'app-existing', 'production', 'develop')],
+        );
+    }
+
+    public static function withSafePreview(): self
+    {
+        $safe = new EnvironmentDependencies(null, null, null, 0, 0, 0, 0, 0, false, false, true);
+
+        return new self(
+            [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
+            [
+                new CloudEnvironment('env-existing', 'app-existing', 'production', 'main', dependencies: $safe),
+                new CloudEnvironment('env-preview', 'app-existing', 'preview', 'feature', dependencies: $safe),
+            ],
         );
     }
 

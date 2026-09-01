@@ -127,6 +127,7 @@ final class ApplyCommand extends Command
 
         $autoApprove = $input->getOption('auto-approve') === true;
         $nonInteractive = $input->getOption('non-interactive') === true || !$input->isInteractive();
+        $hasDestructive = $plan->countByOperation(PlanOperation::DELETE) > 0;
 
         if (!$autoApprove && ($nonInteractive || $jsonOutput)) {
             return $this->error($output, 'Apply requires --auto-approve when running non-interactively.', ExitCode::GENERAL_ERROR, $jsonOutput);
@@ -138,15 +139,45 @@ final class ApplyCommand extends Command
 
         if (!$autoApprove) {
             $helper = $this->getHelper('question');
-            if (!$helper instanceof QuestionHelper
-                || !$helper->ask($input, $output, new ConfirmationQuestion('Apply these changes? [y/N] ', false))) {
+            if (!$helper instanceof QuestionHelper) {
+                $output->writeln('Apply cancelled. No resources were modified.');
+                return ExitCode::SUCCESS->value;
+            }
+
+            if ($hasDestructive) {
+                $output->writeln('');
+                $output->writeln('WARNING: This permanently deletes a Laravel Cloud Environment and cannot be undone.');
+                $output->writeln('This is Cloud deletion, not the local-only state:unmanage operation.');
+                $output->writeln('');
+                if (!$helper->ask($input, $output, new ConfirmationQuestion('Confirm destructive apply? [y/N] ', false))) {
+                    $output->writeln('Apply cancelled. No resources were modified.');
+                    return ExitCode::SUCCESS->value;
+                }
+            } elseif (!$helper->ask($input, $output, new ConfirmationQuestion('Apply these changes? [y/N] ', false))) {
                 $output->writeln('Apply cancelled. No resources were modified.');
                 return ExitCode::SUCCESS->value;
             }
         }
 
         try {
-            $result = $this->apply->execute($loaded->blueprint(), $plan, $cloud, $this->states);
+            $result = $this->apply->execute(
+                $loaded->blueprint(),
+                $plan,
+                $cloud,
+                $this->states,
+                function () use ($path): \LaravelCloudBlueprint\Blueprint\Blueprint {
+                    try {
+                        $locked = $this->blueprints->load($this->files->read($path));
+                    } catch (StructuredDataDecodingException|FileOperationException $exception) {
+                        throw new ApplyRefusedException('Blueprint changed or became unreadable after approval: ' . $exception->getMessage());
+                    }
+                    if (!$locked->isValid()) {
+                        throw new ApplyRefusedException('Blueprint changed and is invalid after approval. No resources were modified.');
+                    }
+
+                    return $locked->blueprint();
+                },
+            );
         } catch (ApplyRefusedException|StateIdentityConflictException|StateCorruptedException|StateLockedException|StateStorageException $exception) {
             return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
         }
@@ -189,6 +220,9 @@ final class ApplyCommand extends Command
     {
         foreach ($result as $outcome) {
             $output->writeln(sprintf('%s: %s', (string) $outcome->address, $outcome->operation->value));
+            if ($outcome->destructiveOutcome !== null) {
+                $output->writeln('  outcome: ' . $outcome->destructiveOutcome->value);
+            }
             if ($outcome->message !== null) {
                 $output->writeln('  ' . $outcome->message);
             }
@@ -196,13 +230,22 @@ final class ApplyCommand extends Command
                 $this->renderValidationDetails($outcome->validation, $output, '  ');
             }
         }
-        $output->writeln(sprintf(
-            'Apply %s: %d created, %d updated, %d unchanged.',
-            str_replace('_', ' ', $result->status->value),
-            $result->createdCount(),
-            $result->updatedCount(),
-            $result->unchangedCount(),
-        ));
+        $output->writeln($result->hasDestructiveOutcomes()
+            ? sprintf(
+                'Apply %s: %d created, %d updated, %d deleted, %d unchanged.',
+                str_replace('_', ' ', $result->status->value),
+                $result->createdCount(),
+                $result->updatedCount(),
+                $result->deletedCount(),
+                $result->unchangedCount(),
+            )
+            : sprintf(
+                'Apply %s: %d created, %d updated, %d unchanged.',
+                str_replace('_', ' ', $result->status->value),
+                $result->createdCount(),
+                $result->updatedCount(),
+                $result->unchangedCount(),
+            ));
     }
 
     private function renderResultJson(ApplyResult $result, OutputInterface $output): int
@@ -212,6 +255,7 @@ final class ApplyCommand extends Command
             'summary' => [
                 'created' => $result->createdCount(),
                 'updated' => $result->updatedCount(),
+                ...($result->hasDestructiveOutcomes() ? ['deleted' => $result->deletedCount()] : []),
                 'unchanged' => $result->unchangedCount(),
             ],
             'resources' => array_map($this->outcomeJson(...), iterator_to_array($result, false)),
@@ -221,7 +265,7 @@ final class ApplyCommand extends Command
     /** @return array<string, mixed> */
     private function outcomeJson(ApplyResourceOutcome $outcome): array
     {
-        return [
+        $base = [
             'resource' => (string) $outcome->address,
             'operation' => $outcome->operation->value,
             ...($outcome->message === null ? [] : ['message' => $outcome->message]),
@@ -232,6 +276,15 @@ final class ApplyCommand extends Command
                 ],
             ]),
         ];
+
+        if ($outcome->destructiveOutcome !== null) {
+            $base['outcome'] = $outcome->destructiveOutcome->value;
+            $base['deleted'] = $outcome->deleted;
+            $base['confirmed'] = $outcome->confirmed;
+            $base['state_checkpointed'] = $outcome->stateCheckpointed;
+        }
+
+        return $base;
     }
 
     private function renderCloudValidationFailure(

@@ -18,6 +18,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
@@ -311,7 +312,7 @@ final readonly class CreatePlan
             return $this->environmentAction(
                 $resource->address->name,
                 PlanOperation::DELETE,
-                'This State-owned Environment is absent from the blueprint and its exact parent Application identity is already missing. Deletion reconciliation is planned, but destructive execution is not enabled yet.',
+                'This State-owned Environment is absent from the blueprint and its exact parent Application identity is already missing. Deletion cannot execute without a valid owned parent.',
                 $resource->remoteId,
                 $resource->parent,
             );
@@ -352,10 +353,11 @@ final readonly class CreatePlan
             $resource->address->name,
             PlanOperation::DELETE,
             $replacement === []
-                ? 'This State-owned Environment is absent from the blueprint and its exact recorded remote identity is already missing. Deletion reconciliation is planned, but destructive execution is not enabled yet.'
-                : 'This State-owned Environment is absent from the blueprint and its exact recorded remote identity is missing. A same-name replacement is unmanaged and is not the deletion target; destructive execution is not enabled yet.',
+                ? 'This State-owned Environment is absent from the blueprint and its exact recorded remote identity is already missing. Approved apply can reconcile local State without a DELETE request.'
+                : 'This State-owned Environment is absent from the blueprint and its exact recorded remote identity is missing. A same-name replacement is unmanaged and will not be deleted; approved apply can reconcile only the stale State identity.',
             $resource->remoteId,
             $resource->parent,
+            EnvironmentDependencies::authoritativeAbsence(),
         );
     }
 
@@ -375,7 +377,7 @@ final readonly class CreatePlan
 
     private function environmentDeleteReason(CloudEnvironment $environment): string
     {
-        $base = 'This State-owned Environment is absent from the blueprint. Deletion is planned, but destructive execution is not enabled yet.';
+        $base = 'This State-owned Environment is absent from the blueprint. Guarded deletion requires explicit approval and locked rediscovery.';
 
         return match ($environment->dependencies->readiness()) {
             EnvironmentDestructiveReadiness::BLOCKED => $base . sprintf(
