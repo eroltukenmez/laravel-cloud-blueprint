@@ -169,6 +169,7 @@ final class ApplyCommand extends Command
             $symbol = match ($action->operation) {
                 PlanOperation::CREATE => '+',
                 PlanOperation::UPDATE => '~',
+                PlanOperation::DELETE => '-',
                 PlanOperation::NO_CHANGE => '=',
                 PlanOperation::UNSUPPORTED => '!',
             };

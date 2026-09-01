@@ -391,6 +391,12 @@ final readonly class CreateOnlyApply
 
     public function assertSupported(ExecutionPlan $plan): void
     {
+        if ($plan->countByOperation(PlanOperation::DELETE) > 0) {
+            throw new ApplyRefusedException(
+                'DELETE is planned but destructive execution is not enabled yet. No resources were modified.',
+            );
+        }
+
         if ($plan->countByOperation(PlanOperation::UNSUPPORTED) > 0) {
             throw new ApplyRefusedException('The plan contains unsupported changes. No resources were modified.');
         }

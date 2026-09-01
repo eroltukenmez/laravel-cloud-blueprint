@@ -234,7 +234,7 @@ final class ApplyCommandTest extends TestCase
         self::assertSame(0, $state->beginCount);
         self::assertSame(0, $state->state->serial);
         self::assertSame('app-old', $state->state->get($oldApplication)->remoteId);
-        self::assertStringContainsString('unsupported changes', $tester->getDisplay());
+        self::assertStringContainsString('destructive execution is not enabled', $tester->getDisplay());
         self::assertStringNotContainsString('Apply these changes?', $tester->getDisplay());
     }
 

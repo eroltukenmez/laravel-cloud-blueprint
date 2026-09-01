@@ -80,10 +80,11 @@ v0.1 supports:
 
 - CREATE
 - UPDATE
+- DELETE planning only (non-executable)
 - NO_CHANGE
 - UNSUPPORTED
 
-Resource deletion is explicitly forbidden in v0.1.
+Cloud resource deletion is explicitly forbidden in v0.1. DELETE may represent destructive intent for State-owned resources absent from the Blueprint, but apply must refuse it before any Cloud or State mutation.
 
 Do not implement destroy behavior.
 

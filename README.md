@@ -195,22 +195,23 @@ Run `lcb <command> --help` for exact usage.
 
 - `CREATE`: a supported desired resource is missing remotely.
 - `UPDATE`: a supported mutable field differs remotely (environment branch or variable value).
+- `DELETE`: a State-owned resource is absent from the blueprint. This is destructive intent only; execution is not enabled.
 - `NO_CHANGE`: the remote resource matches the blueprint.
 - `UNSUPPORTED`: satisfying the difference would require behavior unavailable in this release.
 
-Text plans use `+` for create, `~` for update, `=` for no change, and `!` for unsupported. The summary reports counts to create, update, leave unchanged, and treat as unsupported; JSON output exposes the same four counts.
+Text plans use `+` for create, `~` for update, `-` for delete intent, `=` for no change, and `!` for unsupported. When present, DELETE counts are included in text and JSON summaries.
 
-Planning is read-only and deterministic. Extra remote resources are not deleted. Application repository and region differences are reported as unsupported, so they cannot be accidentally applied.
+Planning is read-only and deterministic. State-owned resources absent from the Blueprint are represented child-first as DELETE intent using their exact stored identities; unmanaged same-name resources never become deletion targets. DELETE is not executable, and no remote resource is deleted.
 
-Planning loads local state and treats stored Application, Environment, Database Cluster, and logical Database remote IDs as authoritative ownership. A missing managed identity or a same-name replacement is reported as unsupported and is never automatically recreated or adopted. Exact-name resources without state ownership may still be inspected read-only; existing unmanaged resources must be explicitly adopted with `lcb import` before LCB can mutate them or create owned children. Genuinely absent Database Clusters and logical Databases under new or already-owned Clusters are eligible for `CREATE`. Database configuration differences and removal from the blueprint remain unsupported.
+Planning loads local state and treats stored Application, Environment, Database Cluster, and logical Database remote IDs as authoritative ownership. A missing managed identity or same-name replacement is never automatically recreated, adopted, or substituted for an owned deletion identity. Exact-name resources without state ownership may still be inspected read-only; existing unmanaged resources must be explicitly adopted with `lcb import` before LCB can mutate them or create owned children. Genuinely absent Database Clusters and logical Databases under new or already-owned Clusters are eligible for `CREATE`. Database configuration differences remain unsupported.
 
-Removing a managed Application or Environment from the blueprint does not delete the Laravel Cloud resource or automatically remove its identity from local state. The owned resource remains visible in the plan as `UNSUPPORTED`, and apply refuses the entire plan until the lifecycle condition is resolved. An operator may explicitly release ownership with `lcb state:unmanage`; LCB does not provide destroy, automatic state cleanup, or rename inference.
+Removing a managed Application, Environment, Database Cluster, or logical Database from the blueprint produces a non-executable DELETE plan. Apply refuses the entire plan before mutation, and neither Cloud nor local State is changed. An operator may explicitly release ownership with `lcb state:unmanage`; LCB does not provide destroy, automatic state cleanup, or rename inference.
 
 Environment variables remain desired-only and are not recorded as owned state resources. Removing a variable key from the blueprint therefore produces no removal action and leaves the remote variable untouched.
 
 ## Apply Semantics
 
-Apply always creates a fresh plan, refuses the entire plan before Cloud mutation when any unsupported action is present, and requests approval unless auto-approved. Interactive approval defaults to no. After approval and preflight checks it acquires the state lock for managed mutation and state work. Database CREATE plans are revalidated under that lock; revalidation may remove stale work but refuses any newly appearing actionable change until it has been shown in another plan. Potentially duplicate-creating POST requests are never automatically retried.
+Apply always creates a fresh plan and refuses the entire plan before Cloud mutation when any unsupported or DELETE action is present. DELETE refusal happens before confirmation or State transaction because destructive execution is not enabled. Supported changes request approval unless auto-approved. Interactive approval defaults to no. After approval and preflight checks apply acquires the state lock for managed mutation and state work. Database CREATE plans are revalidated under that lock; revalidation may remove stale work but refuses any newly appearing actionable change until it has been shown in another plan. Potentially duplicate-creating POST requests are never automatically retried.
 
 Supported work is processed in dependency order: application, environments, Database Clusters, logical Databases, then environment-variable groups. Environment branch updates use Laravel Cloud's environment PATCH endpoint and accept a confirmed success response without requiring an `attributes.branch` string. Variables are sent per environment with Laravel Cloud's `method=set` mode for both create and update.
 
@@ -254,9 +255,9 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
 - Explicit Application, Environment, Database Cluster, and logical Database identity adoption is supported through `lcb import`; variable and Database attachment adoption, automatic adoption, conflict repair, and repository migration or rebinding are not supported.
-- Managed resources removed from the blueprint are reported as unsupported and retained in state unless ownership is explicitly released with `lcb state:unmanage`; Cloud resources are never deleted. Rename/state-move semantics are not supported.
+- Managed resources removed from the blueprint produce non-executable DELETE plans and remain in State unless ownership is explicitly released with `lcb state:unmanage`; Cloud resources are never deleted. Rename/state-move semantics are not supported.
 - Removed environment-variable keys are not reported because variables do not yet have state ownership; remote variables remain untouched.
-- DELETE, destroy, drift repair, and remote state are not supported.
+- DELETE execution, destroy commands, drift repair, and remote state are not supported.
 - Database configuration mutation, Database attachment ownership/mutation, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.
 - Source-provider metadata may be absent from API responses and require `--provider`.

@@ -396,12 +396,9 @@ final class CreatePlanTest extends TestCase
         );
 
         $action = self::action($plan, 'application.old-api');
-        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertSame(
-            'This Application is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
-            $action->reason,
-        );
-        self::assertNull($action->remoteId);
+        self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertStringContainsString('destructive execution is not enabled', $action->reason);
+        self::assertSame('app-old', $action->remoteId);
         self::assertSame(1, count($state->resources()));
     }
 
@@ -421,10 +418,10 @@ final class CreatePlanTest extends TestCase
         );
 
         $action = self::action($plan, 'application.old-api');
-        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertStringContainsString('recorded remote identity is missing', $action->reason);
-        self::assertStringContainsString('same-name unmanaged replacement', $action->reason);
-        self::assertNull($action->remoteId);
+        self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertStringContainsString('exact recorded remote identity is missing', $action->reason);
+        self::assertStringContainsString('same-name replacement is unmanaged', $action->reason);
+        self::assertSame('app-missing', $action->remoteId);
     }
 
     public function testOwnedOnlyMissingApplicationRetainsStateAndNeverBecomesCreate(): void
@@ -440,8 +437,8 @@ final class CreatePlanTest extends TestCase
         );
 
         $action = self::action($plan, 'application.old-api');
-        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertStringContainsString('recorded remote identity is missing', $action->reason);
+        self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertStringContainsString('exact recorded remote identity is already missing', $action->reason);
         self::assertSame('app-missing', $state->get($oldApplication)->remoteId);
     }
 
@@ -465,10 +462,11 @@ final class CreatePlanTest extends TestCase
         );
 
         $action = self::action($plan, 'environment.preview');
-        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertStringContainsString('owned by LCB', $action->reason);
+        self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertStringContainsString('State-owned', $action->reason);
         self::assertStringContainsString('absent from the blueprint', $action->reason);
-        self::assertNull($action->remoteId);
+        self::assertSame('env-preview', $action->remoteId);
+        self::assertSame('application.my-api', (string) $action->parent);
     }
 
     public function testOwnedOnlyEnvironmentMissingIdentityDiagnosesSameNameReplacement(): void
@@ -493,9 +491,10 @@ final class CreatePlanTest extends TestCase
         );
 
         $action = self::action($plan, 'environment.preview');
-        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertStringContainsString('recorded remote identity is missing', $action->reason);
-        self::assertStringContainsString('same-name unmanaged replacement', $action->reason);
+        self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertStringContainsString('exact recorded remote identity is missing', $action->reason);
+        self::assertStringContainsString('same-name replacement is unmanaged', $action->reason);
+        self::assertSame('env-missing', $action->remoteId);
     }
 
     public function testOwnedOnlyEnvironmentMissingIdentityRemainsVisible(): void
@@ -517,8 +516,8 @@ final class CreatePlanTest extends TestCase
         );
 
         $action = self::action($plan, 'environment.preview');
-        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertStringContainsString('recorded remote identity is missing', $action->reason);
+        self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertStringContainsString('exact recorded remote identity is already missing', $action->reason);
         self::assertSame('env-missing', $state->get($action->address)->remoteId);
     }
 
@@ -538,11 +537,11 @@ final class CreatePlanTest extends TestCase
             self::action($plan, 'application.my-api')->operation,
         );
         $environment = self::action($plan, 'environment.preview');
-        self::assertSame(PlanOperation::UNSUPPORTED, $environment->operation);
-        self::assertStringContainsString('parent Application identity is missing', $environment->reason);
+        self::assertSame(PlanOperation::DELETE, $environment->operation);
+        self::assertStringContainsString('parent Application identity is already missing', $environment->reason);
     }
 
-    public function testRemovedApplicationSubtreeIsParentFirstAndEnvironmentsAreSorted(): void
+    public function testRemovedApplicationSubtreeIsChildFirstAndEnvironmentsAreSorted(): void
     {
         $oldApplication = new ResourceAddress(ResourceType::APPLICATION, 'old-api');
         $state = StateDocument::empty()->withOrganization('acme')
@@ -577,14 +576,15 @@ final class CreatePlanTest extends TestCase
         );
 
         self::assertSame([
-            'application.my-api',
-            'application.old-api',
-            'environment.production',
-            'environment.staging',
             'environment.alpha',
             'environment.zeta',
+            'application.old-api',
+            'application.my-api',
+            'environment.production',
+            'environment.staging',
         ], self::addresses($plan));
-        self::assertSame(5, $plan->countByOperation(PlanOperation::UNSUPPORTED));
+        self::assertSame(3, $plan->countByOperation(PlanOperation::DELETE));
+        self::assertSame(2, $plan->countByOperation(PlanOperation::UNSUPPORTED));
     }
 
     public function testAddressChangeDoesNotInferRename(): void
@@ -616,7 +616,7 @@ final class CreatePlanTest extends TestCase
         );
 
         self::assertSame(PlanOperation::CREATE, self::action($plan, 'environment.prod')->operation);
-        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'environment.production')->operation);
+        self::assertSame(PlanOperation::DELETE, self::action($plan, 'environment.production')->operation);
     }
 
     public function testOwnedOnlyEnvironmentFoundUnderUnexpectedApplicationIsUnsupported(): void

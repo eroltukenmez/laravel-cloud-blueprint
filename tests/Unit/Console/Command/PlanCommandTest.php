@@ -218,9 +218,9 @@ final class PlanCommandTest extends TestCase
 
         $text = $this->tester(self::validBlueprint(), state: $state);
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
-        self::assertStringContainsString('! application.old-api', $text->getDisplay());
-        self::assertStringContainsString('! environment.preview', $text->getDisplay());
-        self::assertStringContainsString('Plan: 0 to create, 0 to update, 2 unchanged, 2 unsupported.', $text->getDisplay());
+        self::assertStringContainsString('- application.old-api', $text->getDisplay());
+        self::assertStringContainsString('- environment.preview', $text->getDisplay());
+        self::assertStringContainsString('Plan: 0 to create, 0 to update, 2 to delete, 2 unchanged, 0 unsupported.', $text->getDisplay());
 
         $json = $this->tester(self::validBlueprint(), state: $state);
         self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
@@ -230,19 +230,20 @@ final class PlanCommandTest extends TestCase
         $actions = $decoded['actions'] ?? null;
         self::assertIsArray($summary);
         self::assertIsArray($actions);
-        self::assertSame(2, $summary['unsupported']);
+        self::assertSame(2, $summary['delete']);
+        self::assertSame(0, $summary['unsupported']);
         self::assertSame([
-            'application.API',
-            'application.old-api',
-            'environment.production',
             'environment.preview',
+            'application.old-api',
+            'application.API',
+            'environment.production',
         ], array_column($actions, 'resource'));
+        self::assertIsArray($actions[0]);
         self::assertIsArray($actions[1]);
-        self::assertSame('unsupported', $actions[1]['operation']);
-        self::assertSame(
-            'This Application is owned by LCB and absent from the blueprint, but its recorded remote identity is missing. State is retained and automatic removal is not supported.',
-            $actions[1]['reason'],
-        );
+        self::assertSame('delete', $actions[1]['operation']);
+        self::assertIsString($actions[1]['reason']);
+        self::assertStringContainsString('exact recorded remote identity is already missing', $actions[1]['reason']);
+        self::assertSame('application.old-api', $actions[0]['parent']);
 
         foreach ($actions as $action) {
             self::assertIsArray($action);

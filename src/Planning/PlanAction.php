@@ -8,6 +8,7 @@ final readonly class PlanAction
 {
     /** @var list<PlanChange> */
     public array $changes;
+    public ?ResourceAddress $parent;
 
     public function __construct(
         public ResourceAddress $address,
@@ -15,8 +16,21 @@ final readonly class PlanAction
         public PlanOperation $operation,
         public string $reason,
         public ?string $remoteId = null,
-        PlanChange ...$changes,
+        PlanChange|ResourceAddress ...$details,
     ) {
-        $this->changes = array_values($changes);
+        $parent = null;
+        $changes = [];
+        foreach ($details as $detail) {
+            if ($detail instanceof ResourceAddress) {
+                if ($parent !== null) {
+                    throw new \InvalidArgumentException('A plan action must not have multiple parents.');
+                }
+                $parent = $detail;
+            } else {
+                $changes[] = $detail;
+            }
+        }
+        $this->parent = $parent;
+        $this->changes = $changes;
     }
 }
