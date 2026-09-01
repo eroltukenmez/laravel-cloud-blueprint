@@ -4,13 +4,18 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] - 2026-09-01
+
 ### Changed
 
-- Added confirmation-gated `lcb state:unmanage` to atomically release one exact Application, Environment, Database Cluster, or logical Database identity from local State without calling or modifying Laravel Cloud.
+- Added confirmation-gated `lcb state:unmanage` to release one exact Application, Environment, Database Cluster, or logical Database identity from local State without requiring a Laravel Cloud token or modifying Laravel Cloud.
+- Ownership release is idempotent for unmanaged addresses and preserves State V1 while enabling removed or stale owned resources to return to normal unmanaged planning and explicit import workflows.
+- State V1 now enforces that every owned Environment references an owned Application parent, matching the existing logical Database parent-integrity boundary.
 
 ### Security
 
-- Ownership release defaults to no, requires explicit automation approval, refuses recursive parent removal while owned children remain, revalidates under the State lock, and never exposes remote IDs or secret material.
+- Ownership release defaults to no, requires explicit automation approval, refuses parents with owned children, and reloads and revalidates the exact approved identity and child set under the State lock before one atomic save.
+- `state:unmanage` is a local ownership operation only: it performs no Laravel Cloud read, deletion, detach, or other remote mutation and never exposes remote IDs or secret material.
 
 ## [0.1.0-alpha.5] - 2026-08-31
 

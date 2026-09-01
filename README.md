@@ -11,7 +11,7 @@
 Laravel Cloud Blueprint is an unofficial community CLI for describing a supported subset of Laravel Cloud resources in version-controlled YAML blueprints. It produces a read-only plan before mutation, then reconciles supported application, environment, and environment-variable changes when you apply it.
 
 > [!WARNING]
-> Version `0.1.0-alpha.5` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
+> Version `0.1.0-alpha.6` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
 
 ## See the Plan Before You Apply
 
@@ -42,16 +42,16 @@ lcb --version
 Expected output:
 
 ```text
-Laravel Cloud Blueprint 0.1.0-alpha.5
+Laravel Cloud Blueprint 0.1.0-alpha.6
 ```
 
 Composer's global bin directory must be available in `PATH` for the `lcb` command to be found.
 
 ## Status
 
-Current version: `0.1.0-alpha.5`.
+Current version: `0.1.0-alpha.6`.
 
-Alpha.5 can discover and compare applications, environments, environment variables, Database Clusters, and logical Databases. It can create missing resources in that supported set, update an environment's branch or an existing variable's value, and explicitly adopt identity-bearing resources into local State V1. The current development branch additionally supports explicitly releasing local ownership without touching Laravel Cloud. Application repository and region changes, renames, automatic adoption, remote state, and all Database update, attachment, replacement, and deletion lifecycles remain unsupported.
+Alpha.6 can discover and compare applications, environments, environment variables, Database Clusters, and logical Databases. It can create missing resources in that supported set, update an environment's branch or an existing variable's value, explicitly adopt identity-bearing resources into local State V1, and explicitly release local ownership without touching Laravel Cloud. Application repository and region changes, renames, automatic adoption, remote state, and all Database update, attachment, replacement, and deletion lifecycles remain unsupported.
 
 | Database capability | Status |
 | --- | --- |
@@ -64,9 +64,9 @@ Alpha.5 can discover and compare applications, environments, environment variabl
 | Database UPDATE or replacement | Unsupported |
 | Database DELETE or destroy | Unsupported |
 
-### Upgrading from alpha.4
+### Upgrading from alpha.5
 
-State remains at schema V1, so no state migration is required, and existing alpha.4 blueprints without Database definitions remain valid. Same-name unmanaged resources may require explicit `lcb import`; missing managed identities are not recreated automatically, and owned resources removed from the blueprint are reported as `UNSUPPORTED`. LCB never automatically deletes Cloud resources, and Environment Database attachment remains unsupported.
+State remains at schema V1, so no migration is required and existing alpha.5 blueprints and State files remain valid. Alpha.6 adds the explicit inverse ownership transition: `lcb import` adopts a matching unmanaged identity, while `lcb state:unmanage <address>` releases a managed identity locally. Ownership release never deletes or modifies the Laravel Cloud resource, and parents with owned children must be handled child-first. Cloud deletion and Environment Database attachment remain unsupported.
 
 ## Requirements
 

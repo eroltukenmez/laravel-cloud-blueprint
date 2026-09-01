@@ -42,7 +42,7 @@ use Symfony\Contracts\HttpClient\ResponseInterface;
 final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient
 {
     private const string BASE_URL = 'https://cloud.laravel.com/api';
-    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.5';
+    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.6';
 
     public function __construct(
         private HttpClientInterface $http,

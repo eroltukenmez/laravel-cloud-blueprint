@@ -120,7 +120,7 @@ Both commands must pass.
 
 ## Scope
 
-v0.1.0-alpha.5 supports only:
+v0.1.0-alpha.6 supports only:
 
 - Application
 - Environment

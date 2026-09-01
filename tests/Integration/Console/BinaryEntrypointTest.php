@@ -8,7 +8,7 @@ use PHPUnit\Framework\TestCase;
 
 final class BinaryEntrypointTest extends TestCase
 {
-    private const string VERSION_OUTPUT = 'Laravel Cloud Blueprint 0.1.0-alpha.5';
+    private const string VERSION_OUTPUT = 'Laravel Cloud Blueprint 0.1.0-alpha.6';
 
     public function testRepositoryBinaryUsesLocalVendorAutoloadFallback(): void
     {
