@@ -1,0 +1,35 @@
+{
+  "data": [
+    {
+      "id": "env-1",
+      "type": "environments",
+      "attributes": {"name": "production"},
+      "relationships": {
+        "application": {"data": {"type": "applications", "id": "app-1"}},
+        "branch": {"data": null},
+        "deployments": {"data": [{"type": "deployments", "id": "deployment-1"}]},
+        "currentDeployment": {"data": {"type": "deployments", "id": "deployment-1"}},
+        "domains": {"data": [{"type": "domains", "id": "domain-1"}]},
+        "primaryDomain": {"data": {"type": "domains", "id": "domain-1"}},
+        "instances": {"data": [{"type": "instances", "id": "instance-1"}]},
+        "database": {"data": {"type": "databaseSchemas", "id": "database-1"}},
+        "cache": {"data": {"type": "caches", "id": "cache-1"}},
+        "buckets": {"data": [{"type": "filesystems", "id": "filesystem-1"}]},
+        "websocketApplication": {"data": {"type": "websocketApplications", "id": "websocket-1"}},
+        "secrets": {"data": [{"type": "secrets", "id": "secret-1"}]}
+      }
+    }
+  ],
+  "included": [
+    {
+      "id": "app-1",
+      "type": "applications",
+      "attributes": {"name": "API"},
+      "relationships": {
+        "defaultEnvironment": {"data": {"type": "environments", "id": "env-1"}}
+      }
+    }
+  ],
+  "links": {"first": null, "last": null, "prev": null, "next": null},
+  "meta": {"current_page": 1, "last_page": 1, "per_page": 20, "total": 1}
+}

@@ -16,7 +16,38 @@ final readonly class ExecutionPlan implements Countable, IteratorAggregate
 
     public function __construct(PlanAction ...$actions)
     {
-        $this->actions = array_values($actions);
+        $deletes = [];
+        $other = [];
+        foreach ($actions as $action) {
+            if ($action->operation === PlanOperation::DELETE) {
+                $deletes[] = $action;
+            } else {
+                $other[] = $action;
+            }
+        }
+
+        $deleteAddresses = [];
+        foreach ($deletes as $delete) {
+            $deleteAddresses[(string) $delete->address] = $delete;
+        }
+        $depth = static function (PlanAction $action) use ($deleteAddresses): int {
+            $depth = 0;
+            $parent = $action->parent;
+            $seen = [];
+            while ($parent !== null && isset($deleteAddresses[(string) $parent])) {
+                if (isset($seen[(string) $parent])) {
+                    break;
+                }
+                $seen[(string) $parent] = true;
+                ++$depth;
+                $parent = $deleteAddresses[(string) $parent]->parent;
+            }
+            return $depth;
+        };
+        usort($deletes, static fn (PlanAction $left, PlanAction $right): int =>
+            $depth($right) <=> $depth($left) ?: strcmp((string) $left->address, (string) $right->address));
+
+        $this->actions = [...$deletes, ...$other];
     }
 
     public function count(): int
@@ -35,7 +66,8 @@ final readonly class ExecutionPlan implements Countable, IteratorAggregate
     public function hasActionableChanges(): bool
     {
         return $this->countByOperation(PlanOperation::CREATE) > 0
-            || $this->countByOperation(PlanOperation::UPDATE) > 0;
+            || $this->countByOperation(PlanOperation::UPDATE) > 0
+            || $this->countByOperation(PlanOperation::DELETE) > 0;
     }
 
     public function getIterator(): Traversable

@@ -17,6 +17,8 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
@@ -190,7 +192,12 @@ final readonly class CreatePlan
         }
 
         foreach ($ownedApplications as $resource) {
-            $applicationActions[] = $this->ownedOnlyApplicationAction($resource, $state, $applications);
+            $applicationActions[] = $this->ownedOnlyApplicationAction(
+                $resource,
+                $state,
+                $applications,
+                $desiredEnvironments,
+            );
         }
 
         /** @var array<string, list<CloudEnvironment>> $environmentCache */
@@ -208,11 +215,15 @@ final readonly class CreatePlan
         return new ExecutionPlan(...$applicationActions, ...$environmentActions, ...$variableActions);
     }
 
-    /** @param list<CloudApplication> $applications */
+    /**
+     * @param list<CloudApplication> $applications
+     * @param array<string, true> $desiredEnvironments
+     */
     private function ownedOnlyApplicationAction(
         StateResource $resource,
         StateDocument $state,
         array $applications,
+        array $desiredEnvironments,
     ): PlanAction {
         if ($resource->parent !== null) {
             return $this->applicationAction(
@@ -231,11 +242,22 @@ final readonly class CreatePlan
             );
         }
 
+        foreach ($state->childrenOf($resource->address) as $child) {
+            if (isset($desiredEnvironments[(string) $child->address])) {
+                return $this->applicationAction(
+                    $resource->address->name,
+                    PlanOperation::UNSUPPORTED,
+                    'This Application is absent from the blueprint but still owns a desired Environment. Parent deletion is structurally inconsistent.',
+                );
+            }
+        }
+
         if ($this->findApplicationById($applications, $resource->remoteId) !== null) {
             return $this->applicationAction(
                 $resource->address->name,
-                PlanOperation::UNSUPPORTED,
-                'This Application is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+                PlanOperation::DELETE,
+                'This State-owned Application is absent from the blueprint. Deletion is planned, but destructive execution is not enabled yet.',
+                $resource->remoteId,
             );
         }
 
@@ -243,10 +265,11 @@ final readonly class CreatePlan
 
         return $this->applicationAction(
             $resource->address->name,
-            PlanOperation::UNSUPPORTED,
+            PlanOperation::DELETE,
             $replacement === []
-                ? 'This Application is owned by LCB and absent from the blueprint, but its recorded remote identity is missing. State is retained and automatic removal is not supported.'
-                : 'This Application is owned by LCB and absent from the blueprint. Its recorded remote identity is missing and a same-name unmanaged replacement exists; state is retained and automatic removal is not supported.',
+                ? 'This State-owned Application is absent from the blueprint and its exact recorded remote identity is already missing. Deletion reconciliation is planned, but destructive execution is not enabled yet.'
+                : 'This State-owned Application is absent from the blueprint and its exact recorded remote identity is missing. A same-name replacement is unmanaged and is not the deletion target; destructive execution is not enabled yet.',
+            $resource->remoteId,
         );
     }
 
@@ -288,17 +311,23 @@ final readonly class CreatePlan
         if ($remoteParent === null) {
             return $this->environmentAction(
                 $resource->address->name,
-                PlanOperation::UNSUPPORTED,
-                'This Environment is owned by LCB and absent from the blueprint, but its recorded parent Application identity is missing. State is retained and automatic removal is not supported.',
+                PlanOperation::DELETE,
+                'This State-owned Environment is absent from the blueprint and its exact parent Application identity is already missing. Deletion cannot execute without a valid owned parent.',
+                $resource->remoteId,
+                $resource->parent,
             );
         }
 
         $remoteEnvironments = $this->cachedEnvironments($cloud, $remoteParent->id, $environmentCache);
-        if ($this->findEnvironmentById($remoteEnvironments, $resource->remoteId) !== null) {
+        $remoteEnvironment = $this->findEnvironmentById($remoteEnvironments, $resource->remoteId);
+        if ($remoteEnvironment !== null) {
             return $this->environmentAction(
                 $resource->address->name,
-                PlanOperation::UNSUPPORTED,
-                'This Environment is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+                PlanOperation::DELETE,
+                $this->environmentDeleteReason($remoteEnvironment),
+                $resource->remoteId,
+                $resource->parent,
+                $remoteEnvironment->dependencies,
             );
         }
 
@@ -322,10 +351,13 @@ final readonly class CreatePlan
 
         return $this->environmentAction(
             $resource->address->name,
-            PlanOperation::UNSUPPORTED,
+            PlanOperation::DELETE,
             $replacement === []
-                ? 'This Environment is owned by LCB and absent from the blueprint, but its recorded remote identity is missing. State is retained and automatic removal is not supported.'
-                : 'This Environment is owned by LCB and absent from the blueprint. Its recorded remote identity is missing and a same-name unmanaged replacement exists; state is retained and automatic removal is not supported.',
+                ? 'This State-owned Environment is absent from the blueprint and its exact recorded remote identity is already missing. Approved apply can reconcile local State without a DELETE request.'
+                : 'This State-owned Environment is absent from the blueprint and its exact recorded remote identity is missing. A same-name replacement is unmanaged and will not be deleted; approved apply can reconcile only the stale State identity.',
+            $resource->remoteId,
+            $resource->parent,
+            EnvironmentDependencies::authoritativeAbsence(),
         );
     }
 
@@ -341,6 +373,44 @@ final readonly class CreatePlan
         }
 
         return null;
+    }
+
+    private function environmentDeleteReason(CloudEnvironment $environment): string
+    {
+        $base = 'This State-owned Environment is absent from the blueprint. Guarded deletion requires explicit approval and locked rediscovery.';
+
+        return match ($environment->dependencies->readiness()) {
+            EnvironmentDestructiveReadiness::BLOCKED => $base . sprintf(
+                ' Dependency discovery found: %s.',
+                implode(', ', array_map(
+                    static fn ($category): string => $category->value,
+                    $environment->dependencies->blockingCategories(),
+                )),
+            ),
+            EnvironmentDestructiveReadiness::UNKNOWN => $base . ' Dependency discovery is incomplete or contains unknown relationships.'
+                . ($environment->dependencies->missingRelationships === []
+                    ? ''
+                    : sprintf(
+                        ' Missing dependency relationships: %s.',
+                        implode(', ', $environment->dependencies->missingRelationships),
+                    ))
+                . ($environment->dependencies->unknownRelationships === []
+                    ? ''
+                    : sprintf(
+                        ' Unknown dependency relationships: %s.',
+                        implode(', ', $environment->dependencies->unknownRelationships),
+                    )),
+            EnvironmentDestructiveReadiness::SAFE => $base . ' Dependency discovery is complete and found no known blockers.'
+                . ($environment->dependencies->informationalCategories() === []
+                    ? ''
+                    : sprintf(
+                        ' Expected child dependencies: %s.',
+                        implode(', ', array_map(
+                            static fn ($category): string => $category->value,
+                            $environment->dependencies->informationalCategories(),
+                        )),
+                    )),
+        };
     }
 
     /**
@@ -573,6 +643,8 @@ final readonly class CreatePlan
                 PlanOperation::UPDATE,
                 'Managed remote environment differs from desired state.',
                 $remote->id,
+                null,
+                null,
                 new PlanChange('branch', $remote->branch, $desired->branch),
             );
         }
@@ -893,17 +965,29 @@ final readonly class CreatePlan
         foreach ($state->resources() as $resource) {
             $address = (string) $resource->address;
             if ($resource->type === ResourceType::DATABASE_CLUSTER && !isset($desiredClusters[$address])) {
+                $hasDesiredChild = false;
+                foreach ($state->childrenOf($resource->address) as $child) {
+                    if (isset($desiredDatabases[(string) $child->address])) {
+                        $hasDesiredChild = true;
+                        break;
+                    }
+                }
                 $clusterActions[] = $this->databaseClusterAction(
                     $resource->address->name,
-                    PlanOperation::UNSUPPORTED,
-                    'This Database Cluster is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+                    $hasDesiredChild ? PlanOperation::UNSUPPORTED : PlanOperation::DELETE,
+                    $hasDesiredChild
+                        ? 'This Database Cluster is absent from the blueprint but still owns a desired logical Database. Parent deletion is structurally inconsistent.'
+                        : 'This State-owned Database Cluster is absent from the blueprint. Deletion is planned child-first, but destructive execution is not enabled yet.',
+                    $resource->remoteId,
                 );
             }
             if ($resource->type === ResourceType::DATABASE && !isset($desiredDatabases[$address])) {
                 $databaseActions[] = $this->databaseAction(
                     $resource->address->name,
-                    PlanOperation::UNSUPPORTED,
-                    'This logical Database is owned by LCB but is absent from the blueprint. Automatic removal is not supported.',
+                    PlanOperation::DELETE,
+                    'This State-owned logical Database is absent from the blueprint. Deletion is planned, but destructive execution and attachment mutation are not enabled yet.',
+                    $resource->remoteId,
+                    $resource->parent,
                 );
             }
         }
@@ -923,6 +1007,8 @@ final readonly class CreatePlan
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote Database Cluster type differs or is not safely supported.',
+                null,
+                null,
                 new PlanChange('type', $remote->type, $desired->type->value),
             );
         }
@@ -931,6 +1017,8 @@ final readonly class CreatePlan
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote Database Cluster region differs. Database Cluster updates are not supported yet.',
+                null,
+                null,
                 new PlanChange('region', $remote->region, $desired->region),
             );
         }
@@ -948,6 +1036,8 @@ final readonly class CreatePlan
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote Database Cluster configuration differs. Database Cluster updates are not supported yet.',
+                null,
+                null,
                 ...$changes,
             );
         }
@@ -1102,6 +1192,8 @@ final readonly class CreatePlan
         string $name,
         PlanOperation $operation,
         string $reason,
+        ?string $remoteId = null,
+        ?ResourceAddress $parent = null,
         PlanChange ...$changes,
     ): PlanAction {
         return new PlanAction(
@@ -1109,18 +1201,26 @@ final readonly class CreatePlan
             ResourceType::DATABASE_CLUSTER,
             $operation,
             $reason,
-            null,
-            ...$changes,
+            $remoteId,
+            ...($parent === null ? $changes : [$parent, ...$changes]),
         );
     }
 
-    private function databaseAction(string $name, PlanOperation $operation, string $reason): PlanAction
+    private function databaseAction(
+        string $name,
+        PlanOperation $operation,
+        string $reason,
+        ?string $remoteId = null,
+        ?ResourceAddress $parent = null,
+    ): PlanAction
     {
         return new PlanAction(
             new ResourceAddress(ResourceType::DATABASE, $name),
             ResourceType::DATABASE,
             $operation,
             $reason,
+            $remoteId,
+            ...($parent === null ? [] : [$parent]),
         );
     }
 
@@ -1139,10 +1239,11 @@ final readonly class CreatePlan
         PlanOperation $operation,
         string $reason,
         ?string $remoteId = null,
+        ?ResourceAddress $parent = null,
         PlanChange ...$changes,
     ): PlanAction {
         return new PlanAction(new ResourceAddress(ResourceType::APPLICATION, $name), ResourceType::APPLICATION,
-            $operation, $reason, $remoteId, ...$changes);
+            $operation, $reason, $remoteId, ...($parent === null ? $changes : [$parent, ...$changes]));
     }
 
     private function environmentAction(
@@ -1150,10 +1251,16 @@ final readonly class CreatePlan
         PlanOperation $operation,
         string $reason,
         ?string $remoteId = null,
+        ?ResourceAddress $parent = null,
+        ?\LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies $dependencies = null,
         PlanChange ...$changes,
     ): PlanAction {
         return new PlanAction(new ResourceAddress(ResourceType::ENVIRONMENT, $name), ResourceType::ENVIRONMENT,
-            $operation, $reason, $remoteId, ...$changes);
+            $operation,
+            $reason,
+            $remoteId,
+            ...array_values(array_filter([$parent, $dependencies, ...$changes])),
+        );
     }
 
     private function variableAddress(string $environmentName, string $variableName): ResourceAddress

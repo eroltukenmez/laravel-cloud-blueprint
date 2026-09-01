@@ -174,12 +174,16 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame('size', $action->changes[0]->field);
     }
 
-    public function testOwnedDatabaseResourcesAbsentFromBlueprintRemainVisibleAndNonDestructive(): void
+    public function testOwnedDatabaseResourcesAbsentFromBlueprintArePlannedChildFirstButRemainNonExecutable(): void
     {
         $plan = self::plan(self::blueprint(database: false), self::matchingCloud(), self::databaseState());
 
-        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database_cluster.primary')->operation);
-        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database.primary.application')->operation);
+        $actions = iterator_to_array($plan, false);
+        self::assertSame(PlanOperation::DELETE, self::action($plan, 'database_cluster.primary')->operation);
+        self::assertSame(PlanOperation::DELETE, self::action($plan, 'database.primary.application')->operation);
+        self::assertSame('database.primary.application', (string) $actions[0]->address);
+        self::assertSame('database_cluster.primary', (string) $actions[1]->address);
+        self::assertSame('database_cluster.primary', (string) $actions[0]->parent);
         self::assertNull(self::findAction($plan, 'database_attachment.production'));
     }
 

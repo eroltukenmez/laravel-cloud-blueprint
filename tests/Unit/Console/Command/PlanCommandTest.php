@@ -24,6 +24,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Console\Command\PlanCommand;
@@ -218,9 +219,9 @@ final class PlanCommandTest extends TestCase
 
         $text = $this->tester(self::validBlueprint(), state: $state);
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
-        self::assertStringContainsString('! application.old-api', $text->getDisplay());
-        self::assertStringContainsString('! environment.preview', $text->getDisplay());
-        self::assertStringContainsString('Plan: 0 to create, 0 to update, 2 unchanged, 2 unsupported.', $text->getDisplay());
+        self::assertStringContainsString('- application.old-api', $text->getDisplay());
+        self::assertStringContainsString('- environment.preview', $text->getDisplay());
+        self::assertStringContainsString('Plan: 0 to create, 0 to update, 2 to delete, 2 unchanged, 0 unsupported.', $text->getDisplay());
 
         $json = $this->tester(self::validBlueprint(), state: $state);
         self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
@@ -230,19 +231,20 @@ final class PlanCommandTest extends TestCase
         $actions = $decoded['actions'] ?? null;
         self::assertIsArray($summary);
         self::assertIsArray($actions);
-        self::assertSame(2, $summary['unsupported']);
+        self::assertSame(2, $summary['delete']);
+        self::assertSame(0, $summary['unsupported']);
         self::assertSame([
-            'application.API',
-            'application.old-api',
-            'environment.production',
             'environment.preview',
+            'application.old-api',
+            'application.API',
+            'environment.production',
         ], array_column($actions, 'resource'));
+        self::assertIsArray($actions[0]);
         self::assertIsArray($actions[1]);
-        self::assertSame('unsupported', $actions[1]['operation']);
-        self::assertSame(
-            'This Application is owned by LCB and absent from the blueprint, but its recorded remote identity is missing. State is retained and automatic removal is not supported.',
-            $actions[1]['reason'],
-        );
+        self::assertSame('delete', $actions[1]['operation']);
+        self::assertIsString($actions[1]['reason']);
+        self::assertStringContainsString('exact recorded remote identity is already missing', $actions[1]['reason']);
+        self::assertSame('application.old-api', $actions[0]['parent']);
 
         foreach ($actions as $action) {
             self::assertIsArray($action);
@@ -251,6 +253,60 @@ final class PlanCommandTest extends TestCase
             self::assertArrayNotHasKey('ownership', $action);
             self::assertArrayNotHasKey('desired', $action);
         }
+    }
+
+    public function testEnvironmentDeleteRendersSafeDependencyReadinessInTextAndJson(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'API');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application));
+        $cloud = new PlanDependencyCloudClient();
+
+        $text = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('database_attachment, custom_domain', $text->getDisplay());
+        self::assertStringNotContainsString('database-internal-id', $text->getDisplay());
+
+        $json = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['actions']);
+        self::assertIsArray($decoded['actions'][0]);
+        self::assertSame('blocked', $decoded['actions'][0]['destructive_readiness']);
+        self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['dependencies']);
+        self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['blocking_dependencies']);
+        self::assertSame([], $decoded['actions'][0]['informational_dependencies']);
+        self::assertSame([], $decoded['actions'][0]['missing_dependency_relationships']);
+        self::assertSame([], $decoded['actions'][0]['unknown_dependency_relationships']);
+        self::assertStringNotContainsString('database-internal-id', $json->getDisplay());
+    }
+
+    public function testEnvironmentDeleteSerializesInstanceAsInformationalExpectedChild(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'API');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application));
+        $json = $this->tester(self::validBlueprint(), cloud: new PlanInstanceCloudClient(), state: $state);
+
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['actions']);
+        self::assertIsArray($decoded['actions'][0]);
+        $action = $decoded['actions'][0];
+        self::assertSame('safe', $action['destructive_readiness']);
+        self::assertSame(['instance'], $action['dependencies']);
+        self::assertSame([], $action['blocking_dependencies']);
+        self::assertSame(['instance'], $action['informational_dependencies']);
+        self::assertSame([], $action['missing_dependency_relationships']);
+        self::assertSame([], $action['unknown_dependency_relationships']);
+        self::assertIsString($action['reason']);
+        self::assertStringContainsString('Expected child dependencies: instance', $action['reason']);
     }
 
     public function testDatabasePlanUsesExistingTextAndJsonContractsWithoutRemoteIds(): void
@@ -516,6 +572,41 @@ class PlanCommandCloudClient implements LaravelCloudClient
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void
     {
         throw new LogicException('Plan fake must remain read-only.');
+    }
+}
+
+final class PlanDependencyCloudClient extends PlanCommandCloudClient
+{
+    public function environments(string $applicationId): array
+    {
+        return [
+            new CloudEnvironment('env-1', $applicationId, 'production', 'main'),
+            new CloudEnvironment(
+                'env-preview',
+                $applicationId,
+                'preview',
+                'feature',
+                'database-internal-id',
+                new EnvironmentDependencies(
+                    'database-internal-id', null, null, 1, 0, 0, 0, 0, false, false, true,
+                ),
+            ),
+        ];
+    }
+}
+
+final class PlanInstanceCloudClient extends PlanCommandCloudClient
+{
+    public function environments(string $applicationId): array
+    {
+        $dependencies = new EnvironmentDependencies(
+            null, null, null, 0, 1, 0, 0, 0, false, false, true,
+        );
+
+        return [
+            new CloudEnvironment('env-1', $applicationId, 'production', 'main'),
+            new CloudEnvironment('env-preview', $applicationId, 'preview', 'feature', dependencies: $dependencies),
+        ];
     }
 }
 

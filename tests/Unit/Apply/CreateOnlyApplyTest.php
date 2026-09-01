@@ -110,6 +110,31 @@ final class CreateOnlyApplyTest extends TestCase
         }
     }
 
+    public function testEnvironmentDeleteWithoutDependencyDiscoveryRefusesBeforeLockOrMutation(): void
+    {
+        $events = new ApplyEvents();
+        $application = self::address(ResourceType::APPLICATION, 'my-api');
+        $plan = new ExecutionPlan(new PlanAction(
+            self::address(ResourceType::ENVIRONMENT, 'preview'),
+            ResourceType::ENVIRONMENT,
+            PlanOperation::DELETE,
+            'Dependency discovery is unavailable.',
+            'env-preview',
+            $application,
+        ));
+        $states = new ApplyStateStore($events);
+
+        try {
+            self::apply()->execute(self::blueprint(), $plan, new ApplyCloudClient($events), $states);
+            self::fail('Expected DELETE refusal.');
+        } catch (ApplyRefusedException $exception) {
+            self::assertStringContainsString('dependency discovery is unavailable', $exception->getMessage());
+        }
+
+        self::assertSame([], $events->values);
+        self::assertSame(0, $states->state->serial);
+    }
+
     public function testApplicationUpdateIsRefusedBeforeLockOrMutation(): void
     {
         $events = new ApplyEvents();

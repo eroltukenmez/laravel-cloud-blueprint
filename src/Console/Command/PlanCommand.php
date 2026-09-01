@@ -123,6 +123,7 @@ final class PlanCommand extends Command
 
         $create = $plan->countByOperation(PlanOperation::CREATE);
         $update = $plan->countByOperation(PlanOperation::UPDATE);
+        $delete = $plan->countByOperation(PlanOperation::DELETE);
         $unchanged = $plan->countByOperation(PlanOperation::NO_CHANGE);
         $unsupported = $plan->countByOperation(PlanOperation::UNSUPPORTED);
 
@@ -134,7 +135,7 @@ final class PlanCommand extends Command
             }
         }
 
-        if ($create === 0 && $update === 0 && $unsupported === 0 && !$hasUnmanagedMatches) {
+        if ($create === 0 && $update === 0 && $delete === 0 && $unsupported === 0 && !$hasUnmanagedMatches) {
             $output->writeln('No changes.');
             $output->writeln('');
             $output->writeln('Laravel Cloud infrastructure matches the blueprint.');
@@ -153,13 +154,22 @@ final class PlanCommand extends Command
             $output->writeln('');
         }
 
-        $output->writeln(sprintf(
-            'Plan: %d to create, %d to update, %d unchanged, %d unsupported.',
-            $create,
-            $update,
-            $unchanged,
-            $unsupported,
-        ));
+        $output->writeln($delete === 0
+            ? sprintf(
+                'Plan: %d to create, %d to update, %d unchanged, %d unsupported.',
+                $create,
+                $update,
+                $unchanged,
+                $unsupported,
+            )
+            : sprintf(
+                'Plan: %d to create, %d to update, %d to delete, %d unchanged, %d unsupported.',
+                $create,
+                $update,
+                $delete,
+                $unchanged,
+                $unsupported,
+            ));
     }
 
     private function renderJson(ExecutionPlan $plan, OutputInterface $output): int
@@ -169,6 +179,7 @@ final class PlanCommand extends Command
                 'summary' => [
                     'create' => $plan->countByOperation(PlanOperation::CREATE),
                     'update' => $plan->countByOperation(PlanOperation::UPDATE),
+                    'delete' => $plan->countByOperation(PlanOperation::DELETE),
                     'no_change' => $plan->countByOperation(PlanOperation::NO_CHANGE),
                     'unsupported' => $plan->countByOperation(PlanOperation::UNSUPPORTED),
                 ],
@@ -178,6 +189,22 @@ final class PlanCommand extends Command
                         'type' => $action->resourceType->value,
                         'operation' => $action->operation->value,
                         'reason' => $action->reason,
+                        'parent' => $action->parent === null ? null : (string) $action->parent,
+                        'destructive_readiness' => $action->environmentDependencies?->readiness()->value,
+                        'dependencies' => $action->environmentDependencies === null ? null : array_map(
+                            static fn ($dependency): string => $dependency->value,
+                            $action->environmentDependencies->categories(),
+                        ),
+                        'blocking_dependencies' => $action->environmentDependencies === null ? null : array_map(
+                            static fn ($dependency): string => $dependency->value,
+                            $action->environmentDependencies->blockingCategories(),
+                        ),
+                        'informational_dependencies' => $action->environmentDependencies === null ? null : array_map(
+                            static fn ($dependency): string => $dependency->value,
+                            $action->environmentDependencies->informationalCategories(),
+                        ),
+                        'missing_dependency_relationships' => $action->environmentDependencies?->missingRelationships,
+                        'unknown_dependency_relationships' => $action->environmentDependencies?->unknownRelationships,
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,
@@ -210,6 +237,7 @@ final class PlanCommand extends Command
         return match ($operation) {
             PlanOperation::CREATE => '+',
             PlanOperation::UPDATE => '~',
+            PlanOperation::DELETE => '-',
             PlanOperation::NO_CHANGE => '=',
             PlanOperation::UNSUPPORTED => '!',
         };

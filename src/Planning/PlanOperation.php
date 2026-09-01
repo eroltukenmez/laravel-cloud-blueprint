@@ -8,6 +8,7 @@ enum PlanOperation: string
 {
     case CREATE = 'create';
     case UPDATE = 'update';
+    case DELETE = 'delete';
     case NO_CHANGE = 'no_change';
     case UNSUPPORTED = 'unsupported';
 }
