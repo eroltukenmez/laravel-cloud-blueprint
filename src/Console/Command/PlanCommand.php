@@ -195,6 +195,14 @@ final class PlanCommand extends Command
                             static fn ($dependency): string => $dependency->value,
                             $action->environmentDependencies->categories(),
                         ),
+                        'blocking_dependencies' => $action->environmentDependencies === null ? null : array_map(
+                            static fn ($dependency): string => $dependency->value,
+                            $action->environmentDependencies->blockingCategories(),
+                        ),
+                        'informational_dependencies' => $action->environmentDependencies === null ? null : array_map(
+                            static fn ($dependency): string => $dependency->value,
+                            $action->environmentDependencies->informationalCategories(),
+                        ),
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,

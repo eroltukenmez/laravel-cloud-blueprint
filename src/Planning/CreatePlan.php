@@ -384,11 +384,20 @@ final readonly class CreatePlan
                 ' Dependency discovery found: %s.',
                 implode(', ', array_map(
                     static fn ($category): string => $category->value,
-                    $environment->dependencies->categories(),
+                    $environment->dependencies->blockingCategories(),
                 )),
             ),
             EnvironmentDestructiveReadiness::UNKNOWN => $base . ' Dependency discovery is incomplete or contains unknown relationships.',
-            EnvironmentDestructiveReadiness::SAFE => $base . ' Dependency discovery is complete and found no known blockers.',
+            EnvironmentDestructiveReadiness::SAFE => $base . ' Dependency discovery is complete and found no known blockers.'
+                . ($environment->dependencies->informationalCategories() === []
+                    ? ''
+                    : sprintf(
+                        ' Expected child dependencies: %s.',
+                        implode(', ', array_map(
+                            static fn ($category): string => $category->value,
+                            $environment->dependencies->informationalCategories(),
+                        )),
+                    )),
         };
     }
 

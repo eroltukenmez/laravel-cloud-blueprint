@@ -112,6 +112,10 @@ final class SymfonyLaravelCloudClientTest extends TestCase
             EnvironmentDependencyType::FILESYSTEM,
             EnvironmentDependencyType::DEFAULT_ENVIRONMENT,
         ], $dependencies->categories());
+        self::assertSame([
+            EnvironmentDependencyType::INSTANCE,
+        ], $dependencies->informationalCategories());
+        self::assertNotContains(EnvironmentDependencyType::INSTANCE, $dependencies->blockingCategories());
         self::assertSame('GET', $response->getRequestMethod());
         self::assertStringContainsString('include=application,branch,deployments', $response->getRequestUrl());
     }

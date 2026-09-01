@@ -277,7 +277,32 @@ final class PlanCommandTest extends TestCase
         self::assertIsArray($decoded['actions'][0]);
         self::assertSame('blocked', $decoded['actions'][0]['destructive_readiness']);
         self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['dependencies']);
+        self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['blocking_dependencies']);
+        self::assertSame([], $decoded['actions'][0]['informational_dependencies']);
         self::assertStringNotContainsString('database-internal-id', $json->getDisplay());
+    }
+
+    public function testEnvironmentDeleteSerializesInstanceAsInformationalExpectedChild(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'API');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-1'))
+            ->withResource(new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application));
+        $json = $this->tester(self::validBlueprint(), cloud: new PlanInstanceCloudClient(), state: $state);
+
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['actions']);
+        self::assertIsArray($decoded['actions'][0]);
+        $action = $decoded['actions'][0];
+        self::assertSame('safe', $action['destructive_readiness']);
+        self::assertSame(['instance'], $action['dependencies']);
+        self::assertSame([], $action['blocking_dependencies']);
+        self::assertSame(['instance'], $action['informational_dependencies']);
+        self::assertIsString($action['reason']);
+        self::assertStringContainsString('Expected child dependencies: instance', $action['reason']);
     }
 
     public function testDatabasePlanUsesExistingTextAndJsonContractsWithoutRemoteIds(): void
@@ -562,6 +587,21 @@ final class PlanDependencyCloudClient extends PlanCommandCloudClient
                     'database-internal-id', null, null, 1, 0, 0, 0, 0, false, false, true,
                 ),
             ),
+        ];
+    }
+}
+
+final class PlanInstanceCloudClient extends PlanCommandCloudClient
+{
+    public function environments(string $applicationId): array
+    {
+        $dependencies = new EnvironmentDependencies(
+            null, null, null, 0, 1, 0, 0, 0, false, false, true,
+        );
+
+        return [
+            new CloudEnvironment('env-1', $applicationId, 'production', 'main'),
+            new CloudEnvironment('env-preview', $applicationId, 'preview', 'feature', dependencies: $dependencies),
         ];
     }
 }

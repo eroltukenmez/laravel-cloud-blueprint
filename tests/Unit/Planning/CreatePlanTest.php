@@ -20,6 +20,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencyType;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LogicException;
@@ -500,6 +501,47 @@ final class CreatePlanTest extends TestCase
         self::assertStringContainsString('database_attachment', $action->reason);
         self::assertStringContainsString('custom_domain', $action->reason);
         self::assertStringContainsString('secret', $action->reason);
+    }
+
+    public function testOwnedOnlyEnvironmentWithInstanceIsSafeAndInstanceRemainsObservable(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $state = self::managedState()->withResource(
+            new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application),
+        );
+        $dependencies = new EnvironmentDependencies(
+            null, null, null, 0, 1, 0, 0, 0, false, false, true,
+        );
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(
+                applications: [self::remoteApplication()],
+                environments: [
+                    new CloudEnvironment('env-prod', 'app-1', 'production', 'main'),
+                    new CloudEnvironment('env-preview', 'app-1', 'preview', 'feature', dependencies: $dependencies),
+                ],
+            ),
+            $state,
+        );
+
+        $action = self::action($plan, 'environment.preview');
+        self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertNotNull($action->environmentDependencies);
+        self::assertSame(EnvironmentDestructiveReadiness::SAFE, $action->environmentDependencies->readiness());
+        self::assertSame([EnvironmentDependencyType::INSTANCE], $action->environmentDependencies->informationalCategories());
+        self::assertStringContainsString('Expected child dependencies: instance', $action->reason);
+    }
+
+    public function testInstanceWithDefaultEnvironmentRemainsBlocked(): void
+    {
+        $dependencies = new EnvironmentDependencies(
+            null, null, null, 0, 1, 0, 0, 0, false, true, true,
+        );
+
+        self::assertSame(EnvironmentDestructiveReadiness::BLOCKED, $dependencies->readiness());
+        self::assertSame([EnvironmentDependencyType::DEFAULT_ENVIRONMENT], $dependencies->blockingCategories());
+        self::assertSame([EnvironmentDependencyType::INSTANCE], $dependencies->informationalCategories());
     }
 
     public function testOwnedOnlyEnvironmentMissingIdentityDiagnosesSameNameReplacement(): void

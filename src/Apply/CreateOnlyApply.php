@@ -462,7 +462,7 @@ final readonly class CreateOnlyApply
                         (string) $action->address,
                         implode(', ', array_map(
                             static fn ($cat): string => $cat->value,
-                            $action->environmentDependencies->categories(),
+                            $action->environmentDependencies->blockingCategories(),
                         )),
                     ));
                 }
@@ -1336,7 +1336,7 @@ final readonly class CreateOnlyApply
                     'Environment deletion refused: dependency discovery found: %s.',
                     implode(', ', array_map(
                         static fn ($cat): string => $cat->value,
-                        $dependencies->categories(),
+                        $dependencies->blockingCategories(),
                     )),
                 ),
                 destructiveOutcome: DestructiveOutcome::REFUSED,

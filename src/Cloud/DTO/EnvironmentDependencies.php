@@ -98,9 +98,24 @@ final readonly class EnvironmentDependencies
         return $categories;
     }
 
+    /** @return list<EnvironmentDependencyType> */
+    public function blockingCategories(): array
+    {
+        return array_values(array_filter(
+            $this->categories(),
+            static fn (EnvironmentDependencyType $category): bool => $category !== EnvironmentDependencyType::INSTANCE,
+        ));
+    }
+
+    /** @return list<EnvironmentDependencyType> */
+    public function informationalCategories(): array
+    {
+        return $this->instanceCount > 0 ? [EnvironmentDependencyType::INSTANCE] : [];
+    }
+
     public function readiness(): EnvironmentDestructiveReadiness
     {
-        if ($this->categories() !== []) {
+        if ($this->blockingCategories() !== []) {
             return EnvironmentDestructiveReadiness::BLOCKED;
         }
 

@@ -89,6 +89,8 @@ Environment is the only Cloud resource whose DELETE may execute in v0.1. It requ
 
 Environment destructive dependency discovery is live and read-only. It must remain conservative when relationship data is missing, malformed, or unknown, and it must not imply ownership. No force or recursive destroy behavior is permitted.
 
+Discovered instances are expected Environment children and remain observable but do not by themselves block Environment deletion. Default Environment, database, cache, WebSocket, custom-domain, filesystem, secret, and deployment relationships remain destructive blockers.
+
 Do not implement destroy behavior.
 
 ## Apply

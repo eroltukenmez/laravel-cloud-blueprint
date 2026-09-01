@@ -13,6 +13,7 @@ use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
@@ -289,6 +290,25 @@ final class ApplyCommandTest extends TestCase
                 self::assertIsArray(json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR));
             }
         }
+    }
+
+    public function testAutoApproveAllowsEnvironmentDeleteWithOrdinaryInstance(): void
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $preview = new ResourceAddress(ResourceType::ENVIRONMENT, 'preview');
+        $stateDocument = self::managedState()->withResource(
+            new StateResource($preview, ResourceType::ENVIRONMENT, 'env-preview', $application),
+        );
+        [$tester, $cloud, $state] = $this->tester(
+            ApplyCommandEnvironmentDeleteClient::withInstancePreview(),
+            stateDocument: $stateDocument,
+        );
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--auto-approve' => true]));
+        self::assertInstanceOf(ApplyCommandEnvironmentDeleteClient::class, $cloud);
+        self::assertSame(['env-preview'], $cloud->deletedIds);
+        self::assertSame(1, $state->beginCount);
+        self::assertSame(1, $state->releaseCount);
     }
 
     public function testOwnedOnlyLifecycleActionBlocksVariableUpdateWithoutLeakingValues(): void
@@ -582,7 +602,7 @@ final readonly class ApplyCommandClientFactory implements LaravelCloudClientFact
     }
 }
 
-final class ApplyCommandCloudClient implements LaravelCloudClient
+class ApplyCommandCloudClient implements LaravelCloudClient
 {
     public int $mutationCount = 0;
 
@@ -590,9 +610,9 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
      * @param list<CloudApplication> $applications
      * @param list<CloudEnvironment> $environments
      */
-    private function __construct(
+    protected function __construct(
         private readonly array $applications,
-        private readonly array $environments,
+        protected array $environments,
         private readonly ?CloudValidationException $variableValidationFailure = null,
         private readonly ?CloudEnvironmentVariableCollection $variables = null,
     ) {
@@ -693,6 +713,36 @@ final class ApplyCommandCloudClient implements LaravelCloudClient
         if ($this->variableValidationFailure !== null) {
             throw $this->variableValidationFailure;
         }
+    }
+
+}
+
+final class ApplyCommandEnvironmentDeleteClient extends ApplyCommandCloudClient implements LaravelCloudEnvironmentMutationClient
+{
+    /** @var list<string> */
+    public array $deletedIds = [];
+
+    public static function withInstancePreview(): self
+    {
+        $dependencies = new EnvironmentDependencies(null, null, null, 0, 1, 0, 0, 0, false, false, true);
+
+        return new self(
+            [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
+            [
+                new CloudEnvironment('env-existing', 'app-existing', 'production', 'main', dependencies: $dependencies),
+                new CloudEnvironment('env-preview', 'app-existing', 'preview', 'feature', dependencies: $dependencies),
+            ],
+        );
+    }
+
+    public function deleteEnvironment(string $environmentId): void
+    {
+        ++$this->mutationCount;
+        $this->deletedIds[] = $environmentId;
+        $this->environments = array_values(array_filter(
+            $this->environments,
+            static fn (CloudEnvironment $environment): bool => $environment->id !== $environmentId,
+        ));
     }
 }
 

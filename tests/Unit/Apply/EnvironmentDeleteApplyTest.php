@@ -96,8 +96,38 @@ final class EnvironmentDeleteApplyTest extends TestCase
         yield 'bucket' => [self::dependencies(filesystems: 1)];
         yield 'default environment' => [self::dependencies(isDefault: true)];
         yield 'secret' => [self::dependencies(secrets: 1)];
-        yield 'instance' => [self::dependencies(instances: 1)];
         yield 'deployment' => [self::dependencies(deployments: 1)];
+    }
+
+    public function testOrdinaryInstanceIsInformationalAndExactIdIsDeletedAfterLockedRediscovery(): void
+    {
+        $dependencies = self::dependencies(instances: 1);
+        $cloud = new DeleteCloud([
+            [self::environment(dependencies: $dependencies)],
+            [],
+        ]);
+        $states = new DeleteStateStore(self::state());
+
+        $result = self::apply()->execute(self::blueprint(), self::plan($dependencies), $cloud, $states);
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(['env-old'], $cloud->deletedIds);
+        self::assertSame(['lock', 'get:app-old', 'delete:env-old', 'get:app-old', 'save', 'release'], $states->eventsWith($cloud));
+    }
+
+    public function testOrdinaryInstanceWithActualBlockerRefusesBeforeDeleteTransport(): void
+    {
+        $dependencies = self::dependencies(databaseId: 'db', instances: 1);
+        $cloud = new DeleteCloud([]);
+        $states = new DeleteStateStore(self::state());
+
+        $this->expectException(ApplyRefusedException::class);
+        try {
+            self::apply()->execute(self::blueprint(), self::plan($dependencies), $cloud, $states);
+        } finally {
+            self::assertSame(0, $cloud->deleteCalls);
+            self::assertSame([], $states->events);
+        }
     }
 
     #[DataProvider('blockers')]
