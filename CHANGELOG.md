@@ -4,19 +4,19 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7] - 2026-09-01
+
 ### Added
 
-- Added an explicit, read-only `DELETE` plan operation for State-owned resources removed from the Blueprint, with deterministic child-first ordering and exact stored identity metadata.
-- Added typed, live Environment dependency discovery for database, cache, WebSocket, domain, instance, deployment, secret, filesystem, and default-environment signals, including conservative incomplete/unknown handling.
-- Added guarded Environment-only DELETE execution with explicit approval, locked identity and dependency revalidation, single-attempt mutation, bounded absence confirmation, and recoverable State checkpoint outcomes.
-- Classified discovered instances as informational expected Environment children, matching Laravel's official Environment DELETE client behavior, while retaining all other dependency blockers.
-- Added non-sensitive missing/unknown relationship diagnostics for incomplete Environment dependency discovery without weakening UNKNOWN refusal.
-- Completed authoritative Environment domain and default-Environment discovery with scoped read-only API fallbacks when Laravel Cloud omits those relationships from included responses.
+- Added deterministic DELETE planning for State-owned resources omitted from the Blueprint and guarded execution for eligible Environment resources only.
+- Added typed Environment dependency readiness (`safe`, `blocked`, or `unknown`), with expected instances reported as informational children and unsafe dependencies or default-Environment status retained as blockers.
+- Added authoritative Environment domain and Application default-Environment discovery, including non-sensitive completeness diagnostics and scoped read-only fallbacks.
 
 ### Security
 
-- Environment is the only executable DELETE resource. Apply requires explicit approval, exact State identity, locked Blueprint and Cloud revalidation, complete SAFE dependency readiness, and authoritative remote absence before removing State; all other DELETE resource types remain disabled.
-- Environment dependency discovery retains only safe identities, counts, and categories; it never renders variable values, secret content, credentials, or internal dependency IDs.
+- Environment deletion requires explicit destructive approval, exact State identity, locked Blueprint/State/Cloud revalidation, complete SAFE readiness, at most one transmitted DELETE, and authoritative exact-ID absence before atomic State removal.
+- The guarded flow was validated end-to-end against a disposable Laravel Cloud Environment, including refusal without explicit automation approval, confirmed deletion, State checkpointing, post-delete convergence, and repeat-apply idempotency.
+- Application, Database Cluster, logical Database, variable, and attachment deletion remain unsupported; there is no recursive destroy, force bypass, or destructive mutation retry.
 
 ## [0.1.0-alpha.6] - 2026-09-01
 
