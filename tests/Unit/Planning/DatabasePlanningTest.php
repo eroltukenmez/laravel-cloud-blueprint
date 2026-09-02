@@ -195,12 +195,14 @@ final class DatabasePlanningTest extends TestCase
         $safeDatabase = new CloudDatabase(
             'database-1', 'cluster-1', 'application', 'cluster-1', [], true,
         );
+        $safeCloud = self::matchingCloud(databases: [$safeDatabase]);
         $safe = self::action(self::plan(
             self::blueprint(database: false),
-            self::matchingCloud(databases: [$safeDatabase]),
+            $safeCloud,
             self::databaseState(),
         ), 'database.primary.application');
         self::assertSame(DatabaseDestructiveReadiness::SAFE, $safe->databaseDependencies?->readiness());
+        self::assertSame([['cluster-1', 'database-1']], $safeCloud->destructiveDatabaseCalls);
 
         $attachedDatabase = new CloudDatabase(
             'database-1', 'cluster-1', 'application', 'cluster-1', ['env-1', 'env-2'], true,
@@ -828,6 +830,9 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseClient
     /** @var array<string, int> */
     public array $databaseCalls = [];
 
+    /** @var list<array{string, string}> */
+    public array $destructiveDatabaseCalls = [];
+
     public ?string $environmentDatabaseId = 'database-1';
     public bool $failClusterDetail = false;
     public bool $failDatabaseDetail = false;
@@ -899,6 +904,12 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseClient
             }
         }
         throw new \LogicException('Unknown Database detail request.');
+    }
+
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase
+    {
+        $this->destructiveDatabaseCalls[] = [$clusterId, $databaseId];
+        return $this->database($clusterId, $databaseId);
     }
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication

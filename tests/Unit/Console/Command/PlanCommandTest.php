@@ -737,4 +737,9 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
             true,
         );
     }
+
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase
+    {
+        return $this->database($clusterId, $databaseId);
+    }
 }

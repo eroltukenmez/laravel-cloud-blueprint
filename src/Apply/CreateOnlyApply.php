@@ -1260,7 +1260,7 @@ final readonly class CreateOnlyApply
         }
 
         try {
-            $remote = $cloud->database($parent->remoteId, $managed->remoteId);
+            $remote = $cloud->databaseWithDestructiveRelationships($parent->remoteId, $managed->remoteId);
         } catch (CloudResourceNotFoundException) {
             return $this->checkpointAbsentDatabase(
                 $action,

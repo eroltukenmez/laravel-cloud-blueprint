@@ -881,6 +881,11 @@ final class ApplyCommandLogicalDatabaseDeleteClient extends ApplyCommandCloudCli
         return $this->remoteDatabase();
     }
 
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase
+    {
+        return $this->database($clusterId, $databaseId);
+    }
+
     public function deleteDatabase(string $clusterId, string $databaseId): void
     {
         ++$this->mutationCount;

@@ -63,6 +63,11 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
         self::assertSame([['cluster-1', 'database-1']], $cloud->deletes);
+        self::assertSame([
+            ['cluster-1', 'database-1'],
+            ['cluster-1', 'database-1'],
+        ], $cloud->destructiveDiscoveries);
+        self::assertSame([['cluster-1', 'database-1']], $cloud->verificationDiscoveries);
         self::assertNull($states->state->find(self::databaseAddress()));
         self::assertSame('cluster-1', $states->state->get(self::clusterAddress())->remoteId);
         self::assertSame(8, $states->state->serial);
@@ -379,6 +384,12 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
     /** @var list<array{string, string}> */
     public array $deletes = [];
 
+    /** @var list<array{string, string}> */
+    public array $destructiveDiscoveries = [];
+
+    /** @var list<array{string, string}> */
+    public array $verificationDiscoveries = [];
+
     /**
      * @param array<string, list<CloudDatabase|CloudException>> $discoveries
      * @param list<CloudDatabase> $listed
@@ -416,6 +427,16 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
     }
     public function databases(string $clusterId): array { return $this->listed; }
     public function database(string $clusterId, string $databaseId): CloudDatabase
+    {
+        $this->verificationDiscoveries[] = [$clusterId, $databaseId];
+        return $this->nextDatabase($databaseId);
+    }
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase
+    {
+        $this->destructiveDiscoveries[] = [$clusterId, $databaseId];
+        return $this->nextDatabase($databaseId);
+    }
+    private function nextDatabase(string $databaseId): CloudDatabase
     {
         $next = array_shift($this->discoveries[$databaseId]);
         if ($next instanceof CloudException) {

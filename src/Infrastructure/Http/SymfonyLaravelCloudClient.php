@@ -45,6 +45,7 @@ use Symfony\Contracts\HttpClient\ResponseInterface;
 final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient
 {
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
+    private const string DATABASE_DESTRUCTIVE_INCLUDES = 'database,environments';
     private const string BASE_URL = 'https://cloud.laravel.com/api';
     private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.7';
 
@@ -202,10 +203,21 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
 
     public function database(string $clusterId, string $databaseId): CloudDatabase
     {
+        return $this->databaseDetail($clusterId, $databaseId, false);
+    }
+
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase
+    {
+        return $this->databaseDetail($clusterId, $databaseId, true);
+    }
+
+    private function databaseDetail(string $clusterId, string $databaseId, bool $destructiveRelationships): CloudDatabase
+    {
         $path = sprintf(
-            '/databases/clusters/%s/databases/%s',
+            '/databases/clusters/%s/databases/%s%s',
             rawurlencode($clusterId),
             rawurlencode($databaseId),
+            $destructiveRelationships ? '?include=' . self::DATABASE_DESTRUCTIVE_INCLUDES : '',
         );
         $resource = $this->mappingAt($this->get($path), 'data', $path);
         $database = $this->databaseFromResource($resource, $clusterId, $path);

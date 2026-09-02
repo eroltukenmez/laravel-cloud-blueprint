@@ -394,14 +394,19 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
             ]],
         ]);
 
-        $database = $this->client([new MockResponse(self::detail($resource))])
-            ->database('cluster-1', 'database-1');
+        $response = new MockResponse(self::detail($resource));
+        $database = $this->client([$response])
+            ->databaseWithDestructiveRelationships('cluster-1', 'database-1');
 
         self::assertSame('cluster-1', $database->relationshipClusterId);
         self::assertSame(['env-1', 'env-2'], $database->environmentIds);
         self::assertTrue($database->destructiveRelationshipsComplete);
         self::assertSame([], $database->missingRelationships);
         self::assertSame([], $database->unknownRelationships);
+        self::assertSame(
+            'https://cloud.laravel.com/api/databases/clusters/cluster-1/databases/database-1?include=database,environments',
+            $response->getRequestUrl(),
+        );
     }
 
     public function testLogicalDatabaseExplicitEmptyEnvironmentsIsComplete(): void
@@ -412,7 +417,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         ]);
 
         $database = $this->client([new MockResponse(self::detail($resource))])
-            ->database('cluster-1', 'database-1');
+            ->databaseWithDestructiveRelationships('cluster-1', 'database-1');
 
         self::assertTrue($database->destructiveRelationshipsComplete);
         self::assertSame([], $database->environmentIds);
@@ -421,7 +426,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
     public function testMissingAndMalformedLogicalDatabaseRelationshipsRemainIncomplete(): void
     {
         $missing = $this->client([new MockResponse(self::detail(self::databaseResource('database-1', 'application')))])
-            ->database('cluster-1', 'database-1');
+            ->databaseWithDestructiveRelationships('cluster-1', 'database-1');
         self::assertFalse($missing->destructiveRelationshipsComplete);
         self::assertSame(['database', 'environments'], $missing->missingRelationships);
 
@@ -430,7 +435,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
             'environments' => ['data' => [['type' => 'environments', 'id' => self::SECRET], 'bad']],
         ]);
         $malformed = $this->client([new MockResponse(self::detail($malformedResource))])
-            ->database('cluster-1', 'database-1');
+            ->databaseWithDestructiveRelationships('cluster-1', 'database-1');
         self::assertFalse($malformed->destructiveRelationshipsComplete);
         self::assertSame(['environments'], $malformed->unknownRelationships);
         self::assertStringNotContainsString(self::SECRET, serialize($malformed));

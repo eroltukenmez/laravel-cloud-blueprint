@@ -1023,7 +1023,7 @@ final readonly class CreatePlan
         }
 
         try {
-            $database = $cloud->database($parent->remoteId, $resource->remoteId);
+            $database = $cloud->databaseWithDestructiveRelationships($parent->remoteId, $resource->remoteId);
         } catch (CloudResourceNotFoundException) {
             return new DatabaseDependencies(0, 0, 0, false, true);
         } catch (CloudException) {

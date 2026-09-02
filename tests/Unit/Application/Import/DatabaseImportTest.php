@@ -330,6 +330,7 @@ final class DatabaseImportCloud implements LaravelCloudDatabaseClient
 
     public function databaseCluster(string $clusterId): CloudDatabaseCluster { throw new \LogicException('Unexpected detail read.'); }
     public function database(string $clusterId, string $databaseId): CloudDatabase { throw new \LogicException('Unexpected detail read.'); }
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase { throw new \LogicException('Unexpected detail read.'); }
     public function createApplication(CreateApplicationRequest $request): CloudApplication { ++$this->mutationCalls; throw new \LogicException('Mutation.'); }
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment { ++$this->mutationCalls; throw new \LogicException('Mutation.'); }
     public function updateEnvironment(string $environmentId, UpdateEnvironmentRequest $request): UpdatedCloudEnvironment { ++$this->mutationCalls; throw new \LogicException('Mutation.'); }
