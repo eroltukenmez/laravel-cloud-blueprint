@@ -354,6 +354,7 @@ final class DatabaseMutationCloud implements LaravelCloudDatabaseMutationClient
     }
     public function databases(string $clusterId): array { return $this->createdDatabases; }
     public function database(string $clusterId, string $databaseId): CloudDatabase { throw new \LogicException('Unexpected.'); }
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase { throw new \LogicException('Unexpected.'); }
 
     public function createDatabaseCluster(CreateDatabaseClusterRequest $request): CloudDatabaseCluster
     {

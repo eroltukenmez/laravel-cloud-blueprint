@@ -21,6 +21,7 @@ use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanChange;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
@@ -153,8 +154,15 @@ final class PlanCommand extends Command
             }
             if ($action->databaseDependencies !== null) {
                 $output->writeln(sprintf(
-                    '  Destructive readiness: %s (Database DELETE execution is not supported).',
+                    '  Destructive readiness: %s%s.',
                     $action->databaseDependencies->readiness()->value,
+                    $action->resourceType === ResourceType::DATABASE_CLUSTER
+                        ? ' (Database Cluster DELETE execution is not supported)'
+                        : match ($action->databaseDependencies->readiness()->value) {
+                            'safe' => ' (eligible for guarded deletion)',
+                            'blocked' => ' (guarded deletion is blocked)',
+                            default => ' (guarded deletion is not eligible)',
+                        },
                 ));
                 $blocking = $action->databaseDependencies->blockingCategories();
                 if ($blocking !== []) {

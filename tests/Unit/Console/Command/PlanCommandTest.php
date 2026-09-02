@@ -352,6 +352,9 @@ final class PlanCommandTest extends TestCase
         $text = $this->tester(self::validBlueprint(), cloud: new PlanDatabaseCloudClient(), state: $state);
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
         self::assertStringContainsString('Destructive readiness: blocked', $text->getDisplay());
+        self::assertStringContainsString('guarded deletion is blocked', $text->getDisplay());
+        self::assertStringNotContainsString('Database DELETE execution is not supported', $text->getDisplay());
+        self::assertStringContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
         self::assertStringContainsString('environment_attachment', $text->getDisplay());
 
         $json = $this->tester(self::validBlueprint(), cloud: new PlanDatabaseCloudClient(), state: $state);
@@ -360,21 +363,75 @@ final class PlanCommandTest extends TestCase
         self::assertIsArray($decoded);
         self::assertIsArray($decoded['actions']);
         $database = null;
+        $databaseCluster = null;
         foreach ($decoded['actions'] as $action) {
             if (is_array($action) && ($action['resource'] ?? null) === 'database.primary.application') {
                 $database = $action;
-                break;
+            }
+            if (is_array($action) && ($action['resource'] ?? null) === 'database_cluster.primary') {
+                $databaseCluster = $action;
             }
         }
         self::assertIsArray($database);
         self::assertSame('blocked', $database['destructive_readiness']);
+        self::assertIsString($database['reason']);
+        self::assertStringContainsString('guarded deletion is blocked', $database['reason']);
+        self::assertStringContainsString($database['reason'], $text->getDisplay());
+        self::assertStringNotContainsString('not supported', $database['reason']);
         self::assertSame(['environment_attachment'], $database['blocking_dependencies']);
         self::assertSame([], $database['missing_dependency_relationships']);
+        self::assertIsArray($databaseCluster);
+        self::assertIsString($databaseCluster['reason']);
+        self::assertStringContainsString('execution remains unsupported', $databaseCluster['reason']);
 
         foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
             self::assertStringNotContainsString('cluster-secret-id', $output);
             self::assertStringNotContainsString('database-secret-id', $output);
             self::assertStringNotContainsString('environment-secret-id', $output);
+        }
+    }
+
+    public function testSafeAndUnknownLogicalDatabaseDeletePresentationMatchesJsonReason(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-secret-id'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-secret-id',
+                $cluster,
+            ));
+
+        foreach ([
+            'safe' => new CloudDatabase(
+                'database-secret-id', 'cluster-secret-id', 'application', 'cluster-secret-id', [], true,
+            ),
+            'unknown' => new CloudDatabase('database-secret-id', 'cluster-secret-id', 'application'),
+        ] as $readiness => $detail) {
+            $cloud = new PlanDatabaseCloudClient($detail);
+            $text = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+            self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+            self::assertStringContainsString('Destructive readiness: ' . $readiness, $text->getDisplay());
+            self::assertStringNotContainsString('Database DELETE execution is not supported', $text->getDisplay());
+
+            $json = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+            self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+            $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+            self::assertIsArray($decoded);
+            self::assertIsArray($decoded['actions']);
+            $database = null;
+            foreach ($decoded['actions'] as $action) {
+                if (is_array($action) && ($action['resource'] ?? null) === 'database.primary.application') {
+                    $database = $action;
+                    break;
+                }
+            }
+            self::assertIsArray($database);
+            self::assertSame($readiness, $database['destructive_readiness']);
+            self::assertIsString($database['reason']);
+            self::assertStringContainsString($database['reason'], $text->getDisplay());
+            self::assertStringNotContainsString('not supported', $database['reason']);
         }
     }
 
@@ -697,6 +754,10 @@ final class PlanInvalidUtf8CloudClient extends PlanCommandCloudClient
 
 final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements LaravelCloudDatabaseClient
 {
+    public function __construct(private readonly ?CloudDatabase $databaseDetail = null)
+    {
+    }
+
     public function environments(string $applicationId): array
     {
         return [new CloudEnvironment('env-1', $applicationId, 'production', 'main', 'database-secret-id')];
@@ -728,7 +789,7 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
 
     public function database(string $clusterId, string $databaseId): CloudDatabase
     {
-        return new CloudDatabase(
+        return $this->databaseDetail ?? new CloudDatabase(
             $databaseId,
             $clusterId,
             'application',
@@ -736,5 +797,10 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
             ['environment-secret-id'],
             true,
         );
+    }
+
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase
+    {
+        return $this->database($clusterId, $databaseId);
     }
 }

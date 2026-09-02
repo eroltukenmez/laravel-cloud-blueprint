@@ -51,7 +51,7 @@ Composer's global bin directory must be available in `PATH` for the `lcb` comman
 
 Current version: `0.1.0-alpha.7`.
 
-Alpha.7 can discover and compare applications, environments, environment variables, Database Clusters, and logical Databases. It can create missing resources in that supported set, update an environment's branch or an existing variable's value, safely delete eligible State-owned Environments removed from the Blueprint, explicitly adopt identity-bearing resources into local State V1, and explicitly release local ownership without touching Laravel Cloud. Application repository and region changes, renames, automatic adoption, remote state, and all Database update, attachment, replacement, and deletion lifecycles remain unsupported.
+The current build can discover and compare applications, environments, environment variables, Database Clusters, and logical Databases. It can create missing resources in that supported set, update an environment's branch or an existing variable's value, and safely delete eligible State-owned Environments or logical Databases removed from the Blueprint. Logical Database deletion additionally requires authoritative empty attachment discovery and exact parent identity. Application repository and region changes, renames, automatic adoption, remote state, Database Cluster deletion, Database update/replacement, and Database attachment mutation remain unsupported.
 
 | Database capability | Status |
 | --- | --- |
@@ -62,11 +62,12 @@ Alpha.7 can discover and compare applications, environments, environment variabl
 | Logical Database CREATE | Supported |
 | Environment attachment | Unsupported |
 | Database UPDATE or replacement | Unsupported |
-| Database DELETE or destroy | Unsupported |
+| Logical Database DELETE | Guarded; State-owned, omitted, unattached, fully discovered, explicitly approved, and exactly verified only |
+| Database Cluster DELETE or general destroy | Unsupported |
 
 ### Upgrading from alpha.6
 
-State remains at schema V1, so no migration is required and existing alpha.6 blueprints and State files remain valid. Alpha.7 adds guarded deletion for an exact State-owned Environment omitted from the Blueprint, with explicit approval, complete dependency readiness, and locked revalidation. Application and Database deletion, variable deletion, recursive destroy, and force bypasses remain unsupported. `lcb state:unmanage` still releases local ownership only and never deletes Cloud infrastructure.
+State remains at schema V1, so no migration is required and existing alpha.6 blueprints and State files remain valid. The released alpha.7 baseline added guarded deletion for an exact State-owned Environment omitted from the Blueprint, with explicit approval, complete dependency readiness, and locked revalidation; Database deletion was not part of that release. Application and Database Cluster deletion, variable deletion, recursive destroy, and force bypasses remain unsupported. `lcb state:unmanage` still releases local ownership only and never deletes Cloud infrastructure.
 
 ## Requirements
 
@@ -195,7 +196,7 @@ Run `lcb <command> --help` for exact usage.
 
 - `CREATE`: a supported desired resource is missing remotely.
 - `UPDATE`: a supported mutable field differs remotely (environment branch or variable value).
-- `DELETE`: a State-owned resource is absent from the blueprint. Environment DELETE alone may execute under the guarded lifecycle below; other resource types remain non-executable.
+- `DELETE`: a State-owned resource is absent from the blueprint. Eligible Environment and logical Database actions may execute under the guarded lifecycle below; other resource types remain non-executable.
 - `NO_CHANGE`: the remote resource matches the blueprint.
 - `UNSUPPORTED`: satisfying the difference would require behavior unavailable in this release.
 
@@ -203,19 +204,19 @@ Text plans use `+` for create, `~` for update, `-` for delete intent, `=` for no
 
 Planning is read-only and deterministic. State-owned resources absent from the Blueprint are represented child-first as DELETE intent using their exact stored identities; unmanaged same-name resources never become deletion targets. Environment DELETE intent includes conservative live discovery of attached databases, caches, WebSockets, domains, instances, deployments, secrets, filesystems, and default-environment status. Instances are reported as expected Environment children and do not by themselves block deletion; all other discovered categories remain blockers. Missing, malformed, or unknown relationship data is never treated as safe. Only complete, SAFE Environment DELETE actions can reach guarded apply execution.
 
-JSON Environment DELETE plans expose missing and unknown dependency relationship names for safe diagnosis. These diagnostics contain relationship names only, never dependency IDs or secret values, and do not weaken UNKNOWN readiness.
+JSON Environment and logical Database DELETE plans expose missing and unknown dependency relationship names for safe diagnosis. These diagnostics contain relationship names only, never dependency IDs or secret values, and do not weaken UNKNOWN readiness.
 
 Dependency discovery prefers Environment relationship linkage. When Laravel Cloud omits domain linkage or the included Application's default-Environment linkage, LCB uses the documented scoped domain-list and Application-get endpoints to obtain only the existence/count or exact identity needed for destructive readiness.
 
 Planning loads local state and treats stored Application, Environment, Database Cluster, and logical Database remote IDs as authoritative ownership. A missing managed identity or same-name replacement is never automatically recreated, adopted, or substituted for an owned deletion identity. Exact-name resources without state ownership may still be inspected read-only; existing unmanaged resources must be explicitly adopted with `lcb import` before LCB can mutate them or create owned children. Genuinely absent Database Clusters and logical Databases under new or already-owned Clusters are eligible for `CREATE`. Database configuration differences remain unsupported.
 
-Removing a managed Environment from the blueprint produces a DELETE plan. Apply may delete only the exact State-owned remote Environment when dependency discovery is complete and SAFE, the operator explicitly approves, and locked rediscovery confirms the same identity and parent. There is no force or recursive destroy mode. State ownership is removed only after authoritative remote absence; an already-absent exact ID is reconciled without touching any same-name replacement. Application, Database Cluster, and logical Database DELETE remain non-executable. `lcb state:unmanage` remains a separate local-only ownership operation.
+Removing a managed Environment or logical Database from the blueprint produces a DELETE plan. Apply may delete only the exact State-owned remote resource when dependency discovery is complete and SAFE, the operator explicitly approves, and locked rediscovery confirms the same identity and parent. A logical Database must have a complete, empty reverse Environment attachment relationship; LCB does not detach it automatically. There is no force or recursive destroy mode. State ownership is removed only after authoritative exact-ID absence; an already-absent identity is reconciled without touching a same-name replacement. Application and Database Cluster DELETE remain non-executable. `lcb state:unmanage` remains a separate local-only ownership operation.
 
 Environment variables remain desired-only and are not recorded as owned state resources. Removing a variable key from the blueprint therefore produces no removal action and leaves the remote variable untouched.
 
 ## Apply Semantics
 
-Apply always creates a fresh plan and refuses unsupported actions before Cloud mutation. Supported changes request approval unless auto-approved; interactive approval defaults to no, and `--json` or non-interactive mode does not imply approval. Environment DELETE shows a permanent-deletion warning, then reloads State and Blueprint under lock and performs fresh exact-ID dependency discovery. DELETE is transmitted at most once and a 204 or error never removes State without subsequent authoritative absence. Database CREATE plans retain their locked revalidation. Potentially duplicate-creating POST requests are never automatically retried.
+Apply always creates a fresh plan and refuses unsupported actions before Cloud mutation. Supported changes request approval unless auto-approved; interactive approval defaults to no, and `--json` or non-interactive mode does not imply approval. Environment and logical Database DELETE show a permanent-deletion warning, then reload State and Blueprint under lock and perform fresh exact-ID dependency discovery. DELETE is transmitted at most once and a 204 or error never removes State without subsequent authoritative absence. Each confirmed logical Database absence is checkpointed before further destructive work. Database CREATE plans retain their locked revalidation. Potentially destructive or duplicate-creating requests are never automatically retried.
 
 Supported work is processed in dependency order: application, environments, Database Clusters, logical Databases, then environment-variable groups. Environment branch updates use Laravel Cloud's environment PATCH endpoint and accept a confirmed success response without requiring an `attributes.branch` string. Variables are sent per environment with Laravel Cloud's `method=set` mode for both create and update.
 
@@ -254,14 +255,14 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 ## Known Limitations
 
 - This is early alpha software with a limited mutation model.
-- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references. Discovery, planning, explicit import, Database Cluster CREATE, and logical Database CREATE are supported. Existing resources require import before owned mutation. Database configuration UPDATE, Environment Database attachment/detach, and Database DELETE/destroy remain unsupported.
+- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references. Discovery, planning, explicit import, Database Cluster CREATE, logical Database CREATE, and guarded logical Database DELETE are supported. Existing resources require import before owned mutation. Database configuration UPDATE, Environment Database attachment/detach, Database Cluster DELETE, and general destroy remain unsupported.
 - Environment branch and variable value updates are supported; other updates and renames are not. A variable-key change is not an in-place rename and cannot remove the old remote key.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
 - Explicit Application, Environment, Database Cluster, and logical Database identity adoption is supported through `lcb import`; variable and Database attachment adoption, automatic adoption, conflict repair, and repository migration or rebinding are not supported.
-- Managed resources removed from the blueprint produce DELETE plans. Only eligible Environment actions may execute; other resource types remain in State unless ownership is explicitly released with `lcb state:unmanage`. Rename/state-move semantics are not supported.
+- Managed resources removed from the blueprint produce DELETE plans. Only eligible Environment and logical Database actions may execute; other resource types remain in State unless ownership is explicitly released with `lcb state:unmanage`. Rename/state-move semantics are not supported.
 - Removed environment-variable keys are not reported because variables do not yet have state ownership; remote variables remain untouched.
-- DELETE execution for Application and Database resources, destroy commands, force bypasses, drift repair, and remote state are not supported.
+- DELETE execution for Application and Database Cluster resources, automatic Database detach, destroy commands, force bypasses, drift repair, and remote state are not supported.
 - Database configuration mutation, Database attachment ownership/mutation, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.
 - Source-provider metadata may be absent from API responses and require `--provider`.

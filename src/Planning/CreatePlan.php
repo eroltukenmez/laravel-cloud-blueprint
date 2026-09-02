@@ -23,6 +23,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
@@ -985,8 +986,8 @@ final readonly class CreatePlan
                         ? 'This Database Cluster is absent from the blueprint but still owns a desired logical Database. Parent deletion is structurally inconsistent.'
                         : match ($dependencies?->readiness()->value) {
                             'safe' => 'This State-owned Database Cluster is absent from the blueprint and authoritative discovery shows it is empty. Deletion execution remains unsupported.',
-                            'blocked' => 'This State-owned Database Cluster is absent from the blueprint, but deletion is blocked by existing logical Database children.',
-                            default => 'This State-owned Database Cluster is absent from the blueprint, but child discovery is incomplete and deletion readiness is unknown.',
+                            'blocked' => 'This State-owned Database Cluster is absent from the blueprint, but deletion is blocked by existing logical Database children. Deletion execution remains unsupported.',
+                            default => 'This State-owned Database Cluster is absent from the blueprint, but child discovery is incomplete and deletion readiness is unknown. Deletion execution remains unsupported.',
                         },
                     $resource->remoteId,
                     null,
@@ -999,8 +1000,8 @@ final readonly class CreatePlan
                     $resource->address->name,
                     PlanOperation::DELETE,
                     match ($dependencies->readiness()->value) {
-                        'safe' => 'This State-owned logical Database is absent from the blueprint. Dependency discovery is complete and deletion readiness is safe, but execution is not supported yet.',
-                        'blocked' => 'This State-owned logical Database is absent from the blueprint, but deletion is blocked by discovered dependencies and execution is not supported.',
+                        'safe' => 'This State-owned logical Database is absent from the blueprint. Dependency discovery is complete and it is eligible for guarded deletion.',
+                        'blocked' => 'This State-owned logical Database is absent from the blueprint, but guarded deletion is blocked by discovered dependencies.',
                         default => 'This State-owned logical Database is absent from the blueprint, but deletion readiness is unknown because dependency discovery is incomplete.',
                     },
                     $resource->remoteId,
@@ -1022,7 +1023,9 @@ final readonly class CreatePlan
         }
 
         try {
-            $database = $cloud->database($parent->remoteId, $resource->remoteId);
+            $database = $cloud->databaseWithDestructiveRelationships($parent->remoteId, $resource->remoteId);
+        } catch (CloudResourceNotFoundException) {
+            return new DatabaseDependencies(0, 0, 0, false, true);
         } catch (CloudException) {
             return new DatabaseDependencies(0, 0, 0, false, false, [], ['exact_database']);
         }
@@ -1147,6 +1150,7 @@ final readonly class CreatePlan
             $managed
                 ? 'Owned remote Database Cluster matches desired state.'
                 : 'Matching remote Database Cluster exists but is unmanaged; future mutation requires import and state ownership.',
+            $managed ? $remote->id : null,
         );
     }
 

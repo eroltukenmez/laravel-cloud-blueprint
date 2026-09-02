@@ -25,6 +25,7 @@ use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
 use LaravelCloudBlueprint\State\Exception\StateLockedException;
@@ -146,7 +147,7 @@ final class ApplyCommand extends Command
 
             if ($hasDestructive) {
                 $output->writeln('');
-                $output->writeln('WARNING: This permanently deletes a Laravel Cloud Environment and cannot be undone.');
+                $output->writeln($this->destructiveWarning($plan));
                 $output->writeln('This is Cloud deletion, not the local-only state:unmanage operation.');
                 $output->writeln('');
                 if (!$helper->ask($input, $output, new ConfirmationQuestion('Confirm destructive apply? [y/N] ', false))) {
@@ -214,6 +215,23 @@ final class ApplyCommand extends Command
             }
         }
         $output->writeln('');
+    }
+
+    private function destructiveWarning(\LaravelCloudBlueprint\Planning\ExecutionPlan $plan): string
+    {
+        $types = [];
+        foreach ($plan as $action) {
+            if ($action->operation === PlanOperation::DELETE) {
+                $types[$action->resourceType->value] = true;
+            }
+        }
+        if (array_keys($types) === [ResourceType::ENVIRONMENT->value]) {
+            return 'WARNING: This permanently deletes a Laravel Cloud Environment and cannot be undone.';
+        }
+        if (array_keys($types) === [ResourceType::DATABASE->value]) {
+            return 'WARNING: This permanently deletes a Laravel Cloud logical Database and cannot be undone.';
+        }
+        return 'WARNING: This permanently deletes Laravel Cloud resources and cannot be undone.';
     }
 
     private function renderResultText(ApplyResult $result, OutputInterface $output): void

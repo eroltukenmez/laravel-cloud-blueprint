@@ -81,11 +81,12 @@ v0.1 supports:
 - CREATE
 - UPDATE
 - Environment DELETE planning and guarded execution
+- logical Database DELETE planning and guarded execution
 - DELETE planning only for other resource types (non-executable)
 - NO_CHANGE
 - UNSUPPORTED
 
-Environment is the only Cloud resource whose DELETE may execute in v0.1. It requires explicit approval, exact State identity, locked live rediscovery, complete SAFE dependency readiness, and confirmed remote absence before State removal. Other DELETE resource types remain non-executable.
+Environment and logical Database are the only Cloud resources whose DELETE may execute in v0.1. Both require explicit approval, exact State identity, locked live rediscovery, complete SAFE dependency readiness, and confirmed remote absence before State removal. Logical Database deletion additionally requires its exact State-owned Cluster parent and complete empty reverse Environment attachments. Other DELETE resource types remain non-executable.
 
 Environment destructive dependency discovery is live and read-only. It must remain conservative when relationship data is missing, malformed, or unknown, and it must not imply ownership. No force or recursive destroy behavior is permitted.
 
@@ -138,7 +139,7 @@ v0.1.0-alpha.7 supports only:
 - Database Cluster
 - logical Database
 
-Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, and guarded DELETE for Environment only. Application repository and region changes, Database updates and replacements/deletion, and Environment Database attachment are UNSUPPORTED.
+Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, and guarded DELETE for Environment and logical Database only. Application repository and region changes, Database updates and replacements, Database Cluster deletion, and Environment Database attachment/detach are UNSUPPORTED.
 
 Explicit import supports Application, Environment, Database Cluster, and logical Database identity adoption into local state only. Environment variables and Database attachments are not importable.
 

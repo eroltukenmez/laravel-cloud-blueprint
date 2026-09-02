@@ -18,4 +18,6 @@ interface LaravelCloudDatabaseClient extends LaravelCloudClient
     public function databases(string $clusterId): array;
 
     public function database(string $clusterId, string $databaseId): CloudDatabase;
+
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase;
 }

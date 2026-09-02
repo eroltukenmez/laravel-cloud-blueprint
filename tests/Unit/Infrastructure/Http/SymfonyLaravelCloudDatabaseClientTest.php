@@ -13,9 +13,12 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Infrastructure\Http\SymfonyLaravelCloudClient;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpClient\MockHttpClient;
@@ -170,6 +173,63 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
                 self::assertSame($unexpectedStatus, $exception->statusCode);
             }
         }
+    }
+
+    public function testLogicalDatabaseDeleteTargetsExactNestedIdsWithNoBodyAndAcceptsOnly204(): void
+    {
+        $response = new MockResponse('', ['http_code' => 204]);
+        $client = $this->client([$response]);
+
+        $client->deleteDatabase('cluster/exact', 'database/exact');
+
+        self::assertSame(
+            'https://cloud.laravel.com/api/databases/clusters/cluster%2Fexact/databases/database%2Fexact',
+            $response->getRequestUrl(),
+        );
+        self::assertSame('DELETE', $response->getRequestMethod());
+        self::assertArrayNotHasKey('body', $response->getRequestOptions());
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse('{}', ['http_code' => 200])])
+            ->deleteDatabase('cluster-1', 'database-1');
+    }
+
+    public function testLogicalDatabaseDeleteMapsDocumentedErrorsSafely(): void
+    {
+        foreach ([
+            403 => CloudAuthenticationException::class,
+            404 => CloudResourceNotFoundException::class,
+            422 => CloudValidationException::class,
+        ] as $status => $expected) {
+            try {
+                $this->client([new MockResponse('{"message":"safe failure"}', ['http_code' => $status])])
+                    ->deleteDatabase('cluster-1', 'database-1');
+                self::fail('Expected logical Database DELETE failure.');
+            } catch (CloudApiException $exception) {
+                self::assertInstanceOf($expected, $exception);
+                self::assertSame('DELETE', $exception->method);
+                self::assertSame('/databases/clusters/cluster-1/databases/database-1', $exception->path);
+            }
+        }
+    }
+
+    public function testLogicalDatabaseDeleteTransportFailureIsUncertainAndNeverRetried(): void
+    {
+        $calls = 0;
+        $http = new MockHttpClient(static function () use (&$calls): never {
+            ++$calls;
+            throw new TransportException('connection reset');
+        });
+
+        try {
+            (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))
+                ->deleteDatabase('cluster-1', 'database-1');
+            self::fail('Expected uncertain logical Database DELETE failure.');
+        } catch (CloudTransportException $exception) {
+            self::assertSame('DELETE', $exception->method);
+            self::assertStringContainsString('uncertain', $exception->getMessage());
+        }
+
+        self::assertSame(1, $calls);
     }
 
     public function testLaravelMysqlClusterMapsOnlyTypedSafeFields(): void
@@ -334,14 +394,19 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
             ]],
         ]);
 
-        $database = $this->client([new MockResponse(self::detail($resource))])
-            ->database('cluster-1', 'database-1');
+        $response = new MockResponse(self::detail($resource));
+        $database = $this->client([$response])
+            ->databaseWithDestructiveRelationships('cluster-1', 'database-1');
 
         self::assertSame('cluster-1', $database->relationshipClusterId);
         self::assertSame(['env-1', 'env-2'], $database->environmentIds);
         self::assertTrue($database->destructiveRelationshipsComplete);
         self::assertSame([], $database->missingRelationships);
         self::assertSame([], $database->unknownRelationships);
+        self::assertSame(
+            'https://cloud.laravel.com/api/databases/clusters/cluster-1/databases/database-1?include=database,environments',
+            $response->getRequestUrl(),
+        );
     }
 
     public function testLogicalDatabaseExplicitEmptyEnvironmentsIsComplete(): void
@@ -352,7 +417,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         ]);
 
         $database = $this->client([new MockResponse(self::detail($resource))])
-            ->database('cluster-1', 'database-1');
+            ->databaseWithDestructiveRelationships('cluster-1', 'database-1');
 
         self::assertTrue($database->destructiveRelationshipsComplete);
         self::assertSame([], $database->environmentIds);
@@ -361,7 +426,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
     public function testMissingAndMalformedLogicalDatabaseRelationshipsRemainIncomplete(): void
     {
         $missing = $this->client([new MockResponse(self::detail(self::databaseResource('database-1', 'application')))])
-            ->database('cluster-1', 'database-1');
+            ->databaseWithDestructiveRelationships('cluster-1', 'database-1');
         self::assertFalse($missing->destructiveRelationshipsComplete);
         self::assertSame(['database', 'environments'], $missing->missingRelationships);
 
@@ -370,7 +435,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
             'environments' => ['data' => [['type' => 'environments', 'id' => self::SECRET], 'bad']],
         ]);
         $malformed = $this->client([new MockResponse(self::detail($malformedResource))])
-            ->database('cluster-1', 'database-1');
+            ->databaseWithDestructiveRelationships('cluster-1', 'database-1');
         self::assertFalse($malformed->destructiveRelationshipsComplete);
         self::assertSame(['environments'], $malformed->unknownRelationships);
         self::assertStringNotContainsString(self::SECRET, serialize($malformed));

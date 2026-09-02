@@ -177,7 +177,7 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame('size', $action->changes[0]->field);
     }
 
-    public function testOwnedDatabaseResourcesAbsentFromBlueprintArePlannedChildFirstButRemainNonExecutable(): void
+    public function testOwnedDatabaseResourcesAbsentFromBlueprintArePlannedChildFirstAndClusterRemainsNonExecutable(): void
     {
         $plan = self::plan(self::blueprint(database: false), self::matchingCloud(), self::databaseState());
 
@@ -187,6 +187,8 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame('database.primary.application', (string) $actions[0]->address);
         self::assertSame('database_cluster.primary', (string) $actions[1]->address);
         self::assertSame('database_cluster.primary', (string) $actions[0]->parent);
+        self::assertStringNotContainsString('not supported', $actions[0]->reason);
+        self::assertStringContainsString('execution remains unsupported', $actions[1]->reason);
         self::assertNull(self::findAction($plan, 'database_attachment.production'));
     }
 
@@ -195,12 +197,16 @@ final class DatabasePlanningTest extends TestCase
         $safeDatabase = new CloudDatabase(
             'database-1', 'cluster-1', 'application', 'cluster-1', [], true,
         );
+        $safeCloud = self::matchingCloud(databases: [$safeDatabase]);
         $safe = self::action(self::plan(
             self::blueprint(database: false),
-            self::matchingCloud(databases: [$safeDatabase]),
+            $safeCloud,
             self::databaseState(),
         ), 'database.primary.application');
         self::assertSame(DatabaseDestructiveReadiness::SAFE, $safe->databaseDependencies?->readiness());
+        self::assertStringContainsString('eligible for guarded deletion', $safe->reason);
+        self::assertStringNotContainsString('not supported', $safe->reason);
+        self::assertSame([['cluster-1', 'database-1']], $safeCloud->destructiveDatabaseCalls);
 
         $attachedDatabase = new CloudDatabase(
             'database-1', 'cluster-1', 'application', 'cluster-1', ['env-1', 'env-2'], true,
@@ -218,6 +224,8 @@ final class DatabasePlanningTest extends TestCase
             $dependencies->blockingCategories(),
         );
         self::assertSame(2, $dependencies->environmentAttachmentCount);
+        self::assertStringContainsString('guarded deletion is blocked', $attached->reason);
+        self::assertStringNotContainsString('not supported', $attached->reason);
     }
 
     public function testLogicalDatabaseMissingOrMalformedDiscoveryIsUnknown(): void
@@ -232,6 +240,8 @@ final class DatabasePlanningTest extends TestCase
                 self::databaseState(),
             ), 'database.primary.application');
             self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $action->databaseDependencies?->readiness());
+            self::assertStringContainsString('readiness is unknown', $action->reason);
+            self::assertStringNotContainsString('not supported', $action->reason);
         }
     }
 
@@ -828,6 +838,9 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseClient
     /** @var array<string, int> */
     public array $databaseCalls = [];
 
+    /** @var list<array{string, string}> */
+    public array $destructiveDatabaseCalls = [];
+
     public ?string $environmentDatabaseId = 'database-1';
     public bool $failClusterDetail = false;
     public bool $failDatabaseDetail = false;
@@ -899,6 +912,12 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseClient
             }
         }
         throw new \LogicException('Unknown Database detail request.');
+    }
+
+    public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase
+    {
+        $this->destructiveDatabaseCalls[] = [$clusterId, $databaseId];
+        return $this->database($clusterId, $databaseId);
     }
 
     public function createApplication(CreateApplicationRequest $request): CloudApplication
