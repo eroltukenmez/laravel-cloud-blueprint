@@ -185,6 +185,8 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         self::assertInstanceOf(CloudLaravelMySqlConfiguration::class, $cluster->configuration);
         self::assertSame('db-flex.m-1vcpu-512mb', $cluster->configuration->size);
         self::assertSame(5, $cluster->configuration->storage);
+        self::assertFalse($cluster->childDiscoveryComplete);
+        self::assertSame(['databases'], $cluster->missingRelationships);
         self::assertStringNotContainsString(self::SECRET, serialize($cluster));
     }
 
@@ -320,6 +322,82 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         self::assertSame('cluster-1', $database->clusterId);
         self::assertStringNotContainsString(self::SECRET, serialize($database));
         self::assertSame('https://cloud.laravel.com/api/databases/clusters/cluster-1/databases/database-1', $response->getRequestUrl());
+    }
+
+    public function testLogicalDatabaseDetailPreservesCompleteParentAndEnvironmentRelationships(): void
+    {
+        $resource = self::withRelationships(self::databaseResource('database-1', 'application'), [
+            'database' => ['data' => ['type' => 'databases', 'id' => 'cluster-1']],
+            'environments' => ['data' => [
+                ['type' => 'environments', 'id' => 'env-2'],
+                ['type' => 'environments', 'id' => 'env-1'],
+            ]],
+        ]);
+
+        $database = $this->client([new MockResponse(self::detail($resource))])
+            ->database('cluster-1', 'database-1');
+
+        self::assertSame('cluster-1', $database->relationshipClusterId);
+        self::assertSame(['env-1', 'env-2'], $database->environmentIds);
+        self::assertTrue($database->destructiveRelationshipsComplete);
+        self::assertSame([], $database->missingRelationships);
+        self::assertSame([], $database->unknownRelationships);
+    }
+
+    public function testLogicalDatabaseExplicitEmptyEnvironmentsIsComplete(): void
+    {
+        $resource = self::withRelationships(self::databaseResource('database-1', 'application'), [
+            'database' => ['data' => ['type' => 'databases', 'id' => 'cluster-1']],
+            'environments' => ['data' => []],
+        ]);
+
+        $database = $this->client([new MockResponse(self::detail($resource))])
+            ->database('cluster-1', 'database-1');
+
+        self::assertTrue($database->destructiveRelationshipsComplete);
+        self::assertSame([], $database->environmentIds);
+    }
+
+    public function testMissingAndMalformedLogicalDatabaseRelationshipsRemainIncomplete(): void
+    {
+        $missing = $this->client([new MockResponse(self::detail(self::databaseResource('database-1', 'application')))])
+            ->database('cluster-1', 'database-1');
+        self::assertFalse($missing->destructiveRelationshipsComplete);
+        self::assertSame(['database', 'environments'], $missing->missingRelationships);
+
+        $malformedResource = self::withRelationships(self::databaseResource('database-1', 'application'), [
+            'database' => ['data' => ['type' => 'databases', 'id' => 'cluster-1']],
+            'environments' => ['data' => [['type' => 'environments', 'id' => self::SECRET], 'bad']],
+        ]);
+        $malformed = $this->client([new MockResponse(self::detail($malformedResource))])
+            ->database('cluster-1', 'database-1');
+        self::assertFalse($malformed->destructiveRelationshipsComplete);
+        self::assertSame(['environments'], $malformed->unknownRelationships);
+        self::assertStringNotContainsString(self::SECRET, serialize($malformed));
+    }
+
+    public function testClusterDetailPreservesCompleteChildrenAndMalformedEvidenceIsIncomplete(): void
+    {
+        $completeResource = self::withRelationships(self::mysqlResource('cluster-1'), [
+            'databases' => ['data' => [
+                ['type' => 'databaseSchemas', 'id' => 'database-2'],
+                ['type' => 'databaseSchemas', 'id' => 'database-1'],
+            ]],
+        ]);
+        $completeResponse = new MockResponse(self::detail($completeResource));
+        $complete = $this->client([$completeResponse])->databaseCluster('cluster-1');
+        self::assertSame(['database-1', 'database-2'], $complete->databaseIds);
+        self::assertTrue($complete->childDiscoveryComplete);
+        self::assertStringContainsString('include=databases', $completeResponse->getRequestUrl());
+
+        $malformedResource = self::withRelationships(self::mysqlResource('cluster-1'), [
+            'databases' => ['data' => [['type' => 'wrong', 'id' => self::SECRET]]],
+        ]);
+        $malformed = $this->client([new MockResponse(self::detail($malformedResource))])
+            ->databaseCluster('cluster-1');
+        self::assertFalse($malformed->childDiscoveryComplete);
+        self::assertSame(['databases'], $malformed->unknownRelationships);
+        self::assertStringNotContainsString(self::SECRET, serialize($malformed));
     }
 
     public function testMalformedLogicalDatabaseFailsWithoutRawBody(): void
@@ -514,6 +592,17 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
 
         $attributes[$key] = $value;
         $resource['attributes'] = $attributes;
+        return $resource;
+    }
+
+    /**
+     * @param array<string, mixed> $resource
+     * @param array<string, mixed> $relationships
+     * @return array<string, mixed>
+     */
+    private static function withRelationships(array $resource, array $relationships): array
+    {
+        $resource['relationships'] = $relationships;
         return $resource;
     }
 

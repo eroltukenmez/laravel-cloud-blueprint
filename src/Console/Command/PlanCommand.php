@@ -151,6 +151,19 @@ final class PlanCommand extends Command
                     $output->writeln(sprintf('  %s: %s → %s', $change->field, $change->before, $change->after));
                 }
             }
+            if ($action->databaseDependencies !== null) {
+                $output->writeln(sprintf(
+                    '  Destructive readiness: %s (Database DELETE execution is not supported).',
+                    $action->databaseDependencies->readiness()->value,
+                ));
+                $blocking = $action->databaseDependencies->blockingCategories();
+                if ($blocking !== []) {
+                    $output->writeln(sprintf('  Blocking dependencies: %s.', implode(', ', array_map(
+                        static fn ($dependency): string => $dependency->value,
+                        $blocking,
+                    ))));
+                }
+            }
             $output->writeln('');
         }
 
@@ -184,27 +197,29 @@ final class PlanCommand extends Command
                     'unsupported' => $plan->countByOperation(PlanOperation::UNSUPPORTED),
                 ],
                 'actions' => array_map(
-                    static fn (PlanAction $action): array => array_filter([
+                    static function (PlanAction $action): array {
+                        $dependencies = $action->destructiveDependencies();
+                        return array_filter([
                         'resource' => (string) $action->address,
                         'type' => $action->resourceType->value,
                         'operation' => $action->operation->value,
                         'reason' => $action->reason,
                         'parent' => $action->parent === null ? null : (string) $action->parent,
-                        'destructive_readiness' => $action->environmentDependencies?->readiness()->value,
-                        'dependencies' => $action->environmentDependencies === null ? null : array_map(
+                        'destructive_readiness' => $dependencies?->readiness()->value,
+                        'dependencies' => $dependencies === null ? null : array_map(
                             static fn ($dependency): string => $dependency->value,
-                            $action->environmentDependencies->categories(),
+                            $dependencies->categories(),
                         ),
-                        'blocking_dependencies' => $action->environmentDependencies === null ? null : array_map(
+                        'blocking_dependencies' => $dependencies === null ? null : array_map(
                             static fn ($dependency): string => $dependency->value,
-                            $action->environmentDependencies->blockingCategories(),
+                            $dependencies->blockingCategories(),
                         ),
-                        'informational_dependencies' => $action->environmentDependencies === null ? null : array_map(
+                        'informational_dependencies' => $dependencies === null ? null : array_map(
                             static fn ($dependency): string => $dependency->value,
-                            $action->environmentDependencies->informationalCategories(),
+                            $dependencies->informationalCategories(),
                         ),
-                        'missing_dependency_relationships' => $action->environmentDependencies?->missingRelationships,
-                        'unknown_dependency_relationships' => $action->environmentDependencies?->unknownRelationships,
+                        'missing_dependency_relationships' => $dependencies?->missingRelationships,
+                        'unknown_dependency_relationships' => $dependencies?->unknownRelationships,
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,
@@ -213,7 +228,8 @@ final class PlanCommand extends Command
                             ],
                             $action->changes,
                         ),
-                    ], static fn (mixed $value): bool => $value !== null),
+                        ], static fn (mixed $value): bool => $value !== null);
+                    },
                     iterator_to_array($plan, false),
                 ),
             ], $output)

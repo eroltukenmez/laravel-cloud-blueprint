@@ -13,6 +13,13 @@ final readonly class CloudDatabaseCluster
         public string $status,
         public string $region,
         public CloudDatabaseClusterConfiguration $configuration,
+        /** @var list<string> */
+        public array $databaseIds = [],
+        public bool $childDiscoveryComplete = false,
+        /** @var list<string> */
+        public array $missingRelationships = [],
+        /** @var list<string> */
+        public array $unknownRelationships = [],
     ) {
     }
 }

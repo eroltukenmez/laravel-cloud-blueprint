@@ -168,7 +168,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
 
     public function databaseCluster(string $clusterId): CloudDatabaseCluster
     {
-        $path = sprintf('/databases/clusters/%s', rawurlencode($clusterId));
+        $path = sprintf('/databases/clusters/%s?include=databases', rawurlencode($clusterId));
         $resource = $this->mappingAt($this->get($path), 'data', $path);
         $cluster = $this->databaseClusterFromResource($resource, $path);
         if ($cluster->id !== $clusterId) {
@@ -693,6 +693,16 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
     {
         $attributes = $this->mappingAt($resource, 'attributes', $path);
         $type = $this->requiredNonEmptyString($attributes, 'type', $path);
+        [$databaseIds, $complete, $missing, $unknown] = $this->databaseRelationshipIds(
+            $resource,
+            'databases',
+            'databaseSchemas',
+            true,
+        );
+        $unknown = array_values(array_unique([...$unknown, ...$this->unknownDatabaseRelationships($resource, ['databases'])]));
+        if ($unknown !== []) {
+            $complete = false;
+        }
 
         return new CloudDatabaseCluster(
             $this->requiredNonEmptyString($resource, 'id', $path),
@@ -701,6 +711,10 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             $this->requiredNonEmptyString($attributes, 'status', $path),
             $this->requiredNonEmptyString($attributes, 'region', $path),
             $this->databaseConfiguration($type, $attributes, $path),
+            $databaseIds,
+            $complete,
+            $missing,
+            $unknown,
         );
     }
 
@@ -736,11 +750,92 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
     /** @param array<string, mixed> $resource */
     private function databaseFromResource(array $resource, string $clusterId, string $path): CloudDatabase
     {
+        [$parentIds, $parentComplete, $parentMissing, $parentUnknown] = $this->databaseRelationshipIds(
+            $resource,
+            'database',
+            'databases',
+            false,
+        );
+        [$environmentIds, $environmentComplete, $environmentMissing, $environmentUnknown] =
+            $this->databaseRelationshipIds($resource, 'environments', 'environments', true);
+        $unexpected = $this->unknownDatabaseRelationships($resource, ['database', 'environments']);
+
         return new CloudDatabase(
             $this->requiredNonEmptyString($resource, 'id', $path),
             $clusterId,
             $this->requiredNonEmptyString($this->mappingAt($resource, 'attributes', $path), 'name', $path),
+            count($parentIds) === 1 ? $parentIds[0] : null,
+            $environmentIds,
+            $parentComplete && $environmentComplete && $unexpected === [],
+            array_values(array_unique([...$parentMissing, ...$environmentMissing])),
+            array_values(array_unique([...$parentUnknown, ...$environmentUnknown, ...$unexpected])),
         );
+    }
+
+    /**
+     * Tolerantly reads destructive relationship linkage. Missing or malformed evidence is retained as
+     * incomplete rather than normalized to an authoritative empty collection.
+     *
+     * @param array<string, mixed> $resource
+     * @return array{list<string>, bool, list<string>, list<string>}
+     */
+    private function databaseRelationshipIds(
+        array $resource,
+        string $name,
+        string $expectedType,
+        bool $many,
+    ): array {
+        if (!array_key_exists('relationships', $resource)) {
+            return [[], false, [$name], []];
+        }
+        if (!is_array($resource['relationships'])) {
+            return [[], false, [], [$name]];
+        }
+        $relationships = $resource['relationships'];
+        if (!array_key_exists($name, $relationships)) {
+            return [[], false, [$name], []];
+        }
+        $relationship = $relationships[$name];
+        if (!is_array($relationship) || !array_key_exists('data', $relationship)) {
+            return [[], false, [], [$name]];
+        }
+        $data = $relationship['data'];
+        $items = $many ? $data : [$data];
+        if (!is_array($items) || (!$many && $data === null)) {
+            return [[], false, [], [$name]];
+        }
+
+        $ids = [];
+        foreach ($items as $item) {
+            if (!is_array($item)
+                || ($item['type'] ?? null) !== $expectedType
+                || !isset($item['id'])
+                || !is_string($item['id'])
+                || trim($item['id']) === ''
+                || isset($ids[$item['id']])) {
+                return [[], false, [], [$name]];
+            }
+            $ids[$item['id']] = true;
+        }
+
+        $values = array_keys($ids);
+        sort($values, SORT_STRING);
+        return [$values, true, [], []];
+    }
+
+    /**
+     * @param array<string, mixed> $resource
+     * @param list<string> $known
+     * @return list<string>
+     */
+    private function unknownDatabaseRelationships(array $resource, array $known): array
+    {
+        if (!isset($resource['relationships']) || !is_array($resource['relationships'])) {
+            return [];
+        }
+        $unknown = array_values(array_diff(array_keys($resource['relationships']), $known));
+        sort($unknown, SORT_STRING);
+        return $unknown;
     }
 
     /**
