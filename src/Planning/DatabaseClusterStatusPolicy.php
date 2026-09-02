@@ -4,8 +4,22 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Planning;
 
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseClusterLifecycleReadiness;
+
 final readonly class DatabaseClusterStatusPolicy
 {
+    public function destructiveReadiness(string $status): DatabaseClusterLifecycleReadiness
+    {
+        return match ($status) {
+            'available' => DatabaseClusterLifecycleReadiness::ELIGIBLE,
+            'creating', 'updating', 'restarting', 'upgrading', 'moving', 'restoring',
+            'snapshotting_before_archiving', 'archiving', 'deleting',
+            'stopped', 'restore_failed', 'disabled', 'archived', 'deleted' =>
+                DatabaseClusterLifecycleReadiness::INELIGIBLE,
+            default => DatabaseClusterLifecycleReadiness::UNKNOWN,
+        };
+    }
+
     public function unsupportedReason(string $status): ?string
     {
         return match ($status) {

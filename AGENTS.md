@@ -88,6 +88,8 @@ v0.1 supports:
 
 Environment and logical Database are the only Cloud resources whose DELETE may execute in v0.1. Both require explicit approval, exact State identity, locked live rediscovery, complete SAFE dependency readiness, and confirmed remote absence before State removal. Logical Database deletion additionally requires its exact State-owned Cluster parent and complete empty reverse Environment attachments. Other DELETE resource types remain non-executable.
 
+Database Cluster destructive readiness includes read-only exact-ID child, snapshot, retained recovery configuration, and lifecycle discovery. Any snapshot blocks readiness; incomplete evidence remains unknown. Database Cluster and snapshot DELETE remain unsupported, and snapshots are never automatically deleted.
+
 Environment destructive dependency discovery is live and read-only. It must remain conservative when relationship data is missing, malformed, or unknown, and it must not imply ownership. No force or recursive destroy behavior is permitted.
 
 Incomplete Environment dependency diagnostics may expose relationship names only. They must never expose dependency IDs, credentials, secret values, or other sensitive payload data.

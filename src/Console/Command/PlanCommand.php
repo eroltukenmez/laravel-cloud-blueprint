@@ -171,6 +171,28 @@ final class PlanCommand extends Command
                         $blocking,
                     ))));
                 }
+                if ($action->databaseDependencies->missingRelationships !== []) {
+                    $output->writeln(sprintf(
+                        '  Missing dependency relationships: %s.',
+                        implode(', ', $action->databaseDependencies->missingRelationships),
+                    ));
+                }
+                if ($action->databaseDependencies->unknownRelationships !== []) {
+                    $output->writeln(sprintf(
+                        '  Unknown dependency relationships: %s.',
+                        implode(', ', $action->databaseDependencies->unknownRelationships),
+                    ));
+                }
+                if ($action->resourceType === ResourceType::DATABASE_CLUSTER) {
+                    $output->writeln($action->databaseDependencies->snapshotDiscoveryComplete
+                        ? sprintf(
+                            '  Discovered snapshots: %d (%d manual, %d scheduled).',
+                            $action->databaseDependencies->snapshotCount,
+                            $action->databaseDependencies->manualSnapshotCount,
+                            $action->databaseDependencies->scheduledSnapshotCount,
+                        )
+                        : '  Snapshot discovery: incomplete.');
+                }
             }
             $output->writeln('');
         }
@@ -207,6 +229,9 @@ final class PlanCommand extends Command
                 'actions' => array_map(
                     static function (PlanAction $action): array {
                         $dependencies = $action->destructiveDependencies();
+                        $clusterDependencies = $action->resourceType === ResourceType::DATABASE_CLUSTER
+                            ? $action->databaseDependencies
+                            : null;
                         return array_filter([
                         'resource' => (string) $action->address,
                         'type' => $action->resourceType->value,
@@ -228,6 +253,18 @@ final class PlanCommand extends Command
                         ),
                         'missing_dependency_relationships' => $dependencies?->missingRelationships,
                         'unknown_dependency_relationships' => $dependencies?->unknownRelationships,
+                        'snapshot_discovery_complete' => $clusterDependencies?->snapshotDiscoveryComplete,
+                        'snapshot_count' => $clusterDependencies?->snapshotDiscoveryComplete === true
+                            ? $clusterDependencies->snapshotCount
+                            : null,
+                        'manual_snapshot_count' => $clusterDependencies?->snapshotDiscoveryComplete === true
+                            ? $clusterDependencies->manualSnapshotCount
+                            : null,
+                        'scheduled_snapshot_count' => $clusterDependencies?->snapshotDiscoveryComplete === true
+                            ? $clusterDependencies->scheduledSnapshotCount
+                            : null,
+                        'recovery_evidence_complete' => $clusterDependencies?->recoveryEvidenceComplete,
+                        'cluster_lifecycle_readiness' => $clusterDependencies?->lifecycleReadiness->value,
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,

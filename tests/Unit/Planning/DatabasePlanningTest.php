@@ -22,10 +22,11 @@ use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Blueprint\SourceDefinition;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Blueprint\VariableDefinitionCollection;
-use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseLifecycleClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseSnapshot;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
@@ -34,7 +35,10 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CloudUnknownDatabaseConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencyType;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDestructiveReadiness;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotStatus;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotType;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
@@ -273,7 +277,11 @@ final class DatabasePlanningTest extends TestCase
             new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
         );
 
-        $safeCluster = self::mysqlCluster(databaseIds: [], childDiscoveryComplete: true);
+        $safeCluster = self::mysqlCluster(
+            configuration: new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false),
+            databaseIds: [],
+            childDiscoveryComplete: true,
+        );
         $safe = self::action(self::plan(
             self::blueprint(database: false),
             self::matchingCloud($safeCluster),
@@ -302,9 +310,106 @@ final class DatabasePlanningTest extends TestCase
         self::assertNull(self::findAction($unmanagedPlan, 'database.primary.reporting'));
     }
 
+    public function testClusterSnapshotsAndRetainedRecoveryBlockReadinessWithoutExposingSnapshotIdentity(): void
+    {
+        $cluster = self::mysqlCluster(databaseIds: [], childDiscoveryComplete: true);
+        $cloud = self::matchingCloud($cluster);
+        $cloud->snapshots['cluster-1'] = [
+            new CloudDatabaseSnapshot(
+                'secret-snapshot-id',
+                'cluster-1',
+                DatabaseSnapshotType::MANUAL,
+                DatabaseSnapshotStatus::AVAILABLE,
+                false,
+            ),
+            new CloudDatabaseSnapshot(
+                'scheduled-snapshot-id',
+                'cluster-1',
+                DatabaseSnapshotType::SCHEDULED,
+                DatabaseSnapshotStatus::PENDING,
+                true,
+            ),
+            new CloudDatabaseSnapshot(
+                'unknown-status-snapshot-id',
+                'cluster-1',
+                DatabaseSnapshotType::MANUAL,
+                null,
+                false,
+            ),
+        ];
+        $state = new StateDocument(StateVersion::V1, 0, null,
+            new StateResource(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+                ResourceType::DATABASE_CLUSTER, 'cluster-1'));
+
+        $action = self::action(self::plan(self::blueprint(database: false), $cloud, $state), 'database_cluster.primary');
+
+        self::assertNotNull($action->databaseDependencies);
+        self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $action->databaseDependencies->readiness());
+        self::assertContains(DatabaseDependencyType::DATABASE_SNAPSHOT, $action->databaseDependencies->categories());
+        self::assertContains(DatabaseDependencyType::RETAINED_DATABASE_RECOVERY, $action->databaseDependencies->categories());
+        self::assertContains('snapshot_status', $action->databaseDependencies->unknownRelationships);
+        self::assertTrue($action->databaseDependencies->snapshotDiscoveryComplete);
+        self::assertSame(3, $action->databaseDependencies->snapshotCount);
+        self::assertSame(2, $action->databaseDependencies->manualSnapshotCount);
+        self::assertSame(1, $action->databaseDependencies->scheduledSnapshotCount);
+        self::assertSame(['cluster-1'], $cloud->snapshotCalls);
+        self::assertStringNotContainsString('secret-snapshot-id', $action->reason);
+        self::assertStringNotContainsString('scheduled-snapshot-id', $action->reason);
+    }
+
+    public function testClusterSnapshotFailureUnknownLifecycleAndTransitionalLifecycleFailClosed(): void
+    {
+        $configuration = new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false);
+        $state = new StateDocument(StateVersion::V1, 0, null,
+            new StateResource(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+                ResourceType::DATABASE_CLUSTER, 'cluster-1'));
+
+        $failed = self::matchingCloud(self::mysqlCluster(configuration: $configuration, databaseIds: [], childDiscoveryComplete: true));
+        $failed->failSnapshots = true;
+        $unknownAction = self::action(self::plan(self::blueprint(database: false), $failed, $state), 'database_cluster.primary');
+        self::assertNotNull($unknownAction->databaseDependencies);
+        self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $unknownAction->databaseDependencies->readiness());
+        self::assertContains('snapshots', $unknownAction->databaseDependencies->missingRelationships);
+        self::assertFalse($unknownAction->databaseDependencies->snapshotDiscoveryComplete);
+
+        $unknownStatus = self::action(self::plan(
+            self::blueprint(database: false),
+            self::matchingCloud(self::mysqlCluster(status: 'future-status', configuration: $configuration,
+                databaseIds: [], childDiscoveryComplete: true)),
+            $state,
+        ), 'database_cluster.primary');
+        self::assertNotNull($unknownStatus->databaseDependencies);
+        self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $unknownStatus->databaseDependencies->readiness());
+        self::assertContains('cluster_lifecycle', $unknownStatus->databaseDependencies->unknownRelationships);
+
+        $creating = self::action(self::plan(
+            self::blueprint(database: false),
+            self::matchingCloud(self::mysqlCluster(status: 'creating', configuration: $configuration,
+                databaseIds: [], childDiscoveryComplete: true)),
+            $state,
+        ), 'database_cluster.primary');
+        self::assertNotNull($creating->databaseDependencies);
+        self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $creating->databaseDependencies->readiness());
+        self::assertContains(DatabaseDependencyType::DATABASE_CLUSTER_LIFECYCLE,
+            $creating->databaseDependencies->blockingCategories());
+
+        $unknownRecovery = self::action(self::plan(
+            self::blueprint(database: false),
+            self::matchingCloud(self::mysqlCluster(configuration: new CloudUnknownDatabaseConfiguration(),
+                databaseIds: [], childDiscoveryComplete: true)),
+            $state,
+        ), 'database_cluster.primary');
+        self::assertNotNull($unknownRecovery->databaseDependencies);
+        self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $unknownRecovery->databaseDependencies->readiness());
+        self::assertContains('retained_recovery', $unknownRecovery->databaseDependencies->unknownRelationships);
+        self::assertFalse($unknownRecovery->databaseDependencies->recoveryEvidenceComplete);
+    }
+
     public function testIncompleteClusterChildDiscoveryIsUnknown(): void
     {
-        $cluster = self::mysqlCluster();
+        $cluster = self::mysqlCluster(
+            configuration: new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false),
+        );
         $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
         $state = new StateDocument(StateVersion::V1, 0, null,
             new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'));
@@ -331,6 +436,7 @@ final class DatabasePlanningTest extends TestCase
                 ResourceType::DATABASE, 'database-2', $clusterAddress),
         );
         $cluster = self::mysqlCluster(
+            configuration: new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false),
             databaseIds: ['database-1', 'database-2', 'unmanaged-id'],
             childDiscoveryComplete: true,
         );
@@ -339,6 +445,9 @@ final class DatabasePlanningTest extends TestCase
             new CloudDatabase('database-2', 'cluster-1', 'reporting', 'cluster-1', [], true),
             new CloudDatabase('unmanaged-id', 'cluster-1', 'external'),
         ]);
+        $cloud->snapshots['cluster-1'] = [new CloudDatabaseSnapshot(
+            'snapshot-1', 'cluster-1', DatabaseSnapshotType::MANUAL, DatabaseSnapshotStatus::AVAILABLE, false,
+        )];
 
         $plan = self::plan(self::blueprint(database: false), $cloud, $state);
         $action = self::action($plan, 'database_cluster.primary');
@@ -347,6 +456,7 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $dependencies->readiness());
         self::assertSame(2, $dependencies->ownedChildCount);
         self::assertSame(1, $dependencies->unmanagedChildCount);
+        self::assertContains(DatabaseDependencyType::DATABASE_SNAPSHOT, $dependencies->blockingCategories());
         self::assertSame([
             'database.primary.application',
             'database.primary.reporting',
@@ -356,6 +466,32 @@ final class DatabasePlanningTest extends TestCase
             iterator_to_array($plan, false),
         ), 0, 3));
         self::assertNull(self::findAction($plan, 'database.primary.external'));
+    }
+
+    public function testClusterLifecycleChangeAcrossDiscoveryObservationsCannotStaySafe(): void
+    {
+        $configuration = new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false);
+        $state = new StateDocument(StateVersion::V1, 0, null,
+            new StateResource(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+                ResourceType::DATABASE_CLUSTER, 'cluster-1'));
+
+        $readiness = [];
+        foreach (['available', 'creating', 'future-status'] as $status) {
+            $action = self::action(self::plan(
+                self::blueprint(database: false),
+                self::matchingCloud(self::mysqlCluster(status: $status, configuration: $configuration,
+                    databaseIds: [], childDiscoveryComplete: true)),
+                $state,
+            ), 'database_cluster.primary');
+            self::assertNotNull($action->databaseDependencies);
+            $readiness[] = $action->databaseDependencies->readiness();
+        }
+
+        self::assertSame([
+            DatabaseDestructiveReadiness::SAFE,
+            DatabaseDestructiveReadiness::BLOCKED,
+            DatabaseDestructiveReadiness::UNKNOWN,
+        ], $readiness);
     }
 
     public function testLogicalDatabaseDeleteUsesExactStateIdentityNotSameNameReplacement(): void
@@ -644,6 +780,21 @@ final class DatabasePlanningTest extends TestCase
         self::addToAssertionCount(1);
     }
 
+    public function testSafeClusterDeleteReadinessStillCannotExecute(): void
+    {
+        $plan = new ExecutionPlan(new PlanAction(
+            new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+            ResourceType::DATABASE_CLUSTER,
+            PlanOperation::DELETE,
+            'Read-only Cluster delete intent.',
+            'cluster-1',
+            new DatabaseDependencies(0, 0, 0, false, true),
+        ));
+
+        $this->expectException(ApplyRefusedException::class);
+        self::apply()->assertSupported($plan);
+    }
+
     /** @return iterable<string, array{PlanAction, ResourceType}> */
     public static function existingMutationActions(): iterable
     {
@@ -830,7 +981,7 @@ final class EmptyEnvironmentValues implements \LaravelCloudBlueprint\Planning\Co
     }
 }
 
-final class DatabasePlanningCloud implements LaravelCloudDatabaseClient
+final class DatabasePlanningCloud implements LaravelCloudDatabaseLifecycleClient
 {
     public int $clusterCalls = 0;
     public int $environmentCalls = 0;
@@ -844,6 +995,13 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseClient
     public ?string $environmentDatabaseId = 'database-1';
     public bool $failClusterDetail = false;
     public bool $failDatabaseDetail = false;
+    public bool $failSnapshots = false;
+
+    /** @var array<string, list<CloudDatabaseSnapshot>> */
+    public array $snapshots = [];
+
+    /** @var list<string> */
+    public array $snapshotCalls = [];
 
     /**
      * @param list<CloudDatabaseCluster> $clusters
@@ -899,6 +1057,15 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseClient
     {
         $this->databaseCalls[$clusterId] = ($this->databaseCalls[$clusterId] ?? 0) + 1;
         return $this->databases[$clusterId] ?? [];
+    }
+
+    public function databaseSnapshots(string $clusterId): array
+    {
+        $this->snapshotCalls[] = $clusterId;
+        if ($this->failSnapshots) {
+            throw new CloudResponseException('Snapshot discovery failed.', 'GET', '/databases/clusters/{id}/snapshots');
+        }
+        return $this->snapshots[$clusterId] ?? [];
     }
 
     public function database(string $clusterId, string $databaseId): CloudDatabase

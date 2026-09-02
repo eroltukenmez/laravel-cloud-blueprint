@@ -8,11 +8,15 @@ use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseLifecycleClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseClusterConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseSnapshot;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotStatus;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotType;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariable;
@@ -42,7 +46,7 @@ use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
-final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient
+final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudDatabaseLifecycleClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient
 {
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string DATABASE_DESTRUCTIVE_INCLUDES = 'database,environments';
@@ -178,6 +182,55 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         }
 
         return $cluster;
+    }
+
+    public function databaseSnapshots(string $clusterId): array
+    {
+        $snapshots = [];
+        $seen = [];
+        $path = sprintf('/databases/clusters/%s/snapshots', rawurlencode($clusterId));
+        $visited = [];
+        $expectedPage = 1;
+
+        while (true) {
+            if (isset($visited[$path]) || count($visited) >= 1000) {
+                throw $this->malformed($path, 'Snapshot pagination is cyclic or exceeds the safety limit.');
+            }
+            $visited[$path] = true;
+            $document = $this->get($path);
+            $links = $this->mappingAt($document, 'links', $path);
+            $meta = $this->mappingAt($document, 'meta', $path);
+            $currentPage = $this->requiredInteger($meta, 'current_page', $path);
+            $lastPage = $this->requiredInteger($meta, 'last_page', $path);
+            if ($currentPage !== $expectedPage || $lastPage < $currentPage) {
+                throw $this->malformed($path, 'Snapshot pagination metadata is inconsistent.');
+            }
+
+            foreach ($this->listAt($document, 'data', $path) as $value) {
+                $snapshot = $this->databaseSnapshotFromResource($this->valueAsMapping($value, $path), $clusterId, $path);
+                if (isset($seen[$snapshot->id])) {
+                    throw $this->malformed($path, 'Snapshot response contains duplicate IDs.');
+                }
+                $seen[$snapshot->id] = true;
+                $snapshots[] = $snapshot;
+            }
+
+            $next = $this->optionalString($links, 'next', $path);
+            if ($currentPage === $lastPage) {
+                if ($next !== null) {
+                    throw $this->malformed($path, 'Snapshot pagination continues after its final page.');
+                }
+                break;
+            }
+            if ($next === null) {
+                throw $this->malformed($path, 'Snapshot pagination ended before its final page.');
+            }
+            $path = $next;
+            ++$expectedPage;
+        }
+
+        usort($snapshots, static fn (CloudDatabaseSnapshot $left, CloudDatabaseSnapshot $right): int => $left->id <=> $right->id);
+        return $snapshots;
     }
 
     public function databases(string $clusterId): array
@@ -738,6 +791,32 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             $complete,
             $missing,
             $unknown,
+        );
+    }
+
+    /** @param array<string, mixed> $resource */
+    private function databaseSnapshotFromResource(array $resource, string $clusterId, string $path): CloudDatabaseSnapshot
+    {
+        $attributes = $this->mappingAt($resource, 'attributes', $path);
+        $relationships = $this->mappingAt($resource, 'relationships', $path);
+        $database = $this->mappingAt($relationships, 'database', $path);
+        $parent = $this->mappingAt($database, 'data', $path);
+        if ($this->requiredNonEmptyString($parent, 'type', $path) !== 'databases'
+            || $this->requiredNonEmptyString($parent, 'id', $path) !== $clusterId) {
+            throw $this->malformed($path, 'Snapshot parent identity does not match the requested Cluster.');
+        }
+
+        $type = DatabaseSnapshotType::tryFrom($this->requiredNonEmptyString($attributes, 'type', $path));
+        if ($type === null) {
+            throw $this->malformed($path, 'Snapshot type is unknown.');
+        }
+
+        return new CloudDatabaseSnapshot(
+            $this->requiredNonEmptyString($resource, 'id', $path),
+            $clusterId,
+            $type,
+            DatabaseSnapshotStatus::tryFrom($this->requiredNonEmptyString($attributes, 'status', $path)),
+            $this->requiredBoolean($attributes, 'pitr_enabled', $path),
         );
     }
 

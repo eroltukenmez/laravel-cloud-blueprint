@@ -7,12 +7,14 @@ This project uses a Keep a Changelog-inspired format.
 ### Added
 
 - Added guarded DELETE execution for exact State-owned logical Databases omitted from the Blueprint when parent identity and reverse Environment attachment discovery are complete and safe.
+- Added read-only, Cluster-scoped snapshot discovery and conservative Database Cluster lifecycle readiness covering complete pagination, retained recovery configuration, and lifecycle status.
 
 ### Security
 
 - Logical Database deletion requires explicit approval, locked Blueprint/State/Cloud replanning, an exact State-owned Cluster and Database identity, complete empty attachments, at most one DELETE transmission, authoritative exact-ID absence, and an immediate atomic State checkpoint.
 - Destructive logical Database discovery explicitly requests the authoritative parent Database and reverse Environment relationships; missing or malformed relationship data remains non-executable.
 - Database Cluster deletion and automatic detach remain unsupported; `state:unmanage` remains local-only.
+- Any discovered Database snapshot blocks Cluster destructive readiness, incomplete snapshot or lifecycle evidence remains unknown, and snapshots are never automatically deleted.
 
 ## [0.1.0-alpha.7] - 2026-09-01
 

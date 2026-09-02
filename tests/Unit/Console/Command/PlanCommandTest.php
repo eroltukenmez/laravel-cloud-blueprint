@@ -12,16 +12,19 @@ use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
-use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseLifecycleClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseSnapshot;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariable;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotStatus;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotType;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
@@ -435,6 +438,49 @@ final class PlanCommandTest extends TestCase
         }
     }
 
+    public function testClusterSnapshotDiagnosticsAreSafeAndConsistentInTextAndJson(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = StateDocument::empty()->withOrganization('acme')->withResource(
+            new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-secret-id'),
+        );
+        $cloud = new PlanDatabaseCloudClient(snapshots: [new CloudDatabaseSnapshot(
+            'snapshot-secret-id',
+            'cluster-secret-id',
+            DatabaseSnapshotType::MANUAL,
+            DatabaseSnapshotStatus::AVAILABLE,
+            false,
+        )]);
+
+        $text = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('database_snapshot', $text->getDisplay());
+        self::assertStringContainsString('Discovered snapshots: 1 (1 manual, 0 scheduled).', $text->getDisplay());
+        self::assertStringContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
+
+        $json = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['actions']);
+        $actions = $decoded['actions'];
+        $action = $actions[0];
+        self::assertIsArray($action);
+        self::assertSame('blocked', $action['destructive_readiness']);
+        self::assertIsArray($action['blocking_dependencies']);
+        self::assertContains('database_snapshot', $action['blocking_dependencies']);
+        self::assertTrue($action['snapshot_discovery_complete']);
+        self::assertSame(1, $action['snapshot_count']);
+        self::assertSame(1, $action['manual_snapshot_count']);
+        self::assertSame(0, $action['scheduled_snapshot_count']);
+        self::assertTrue($action['recovery_evidence_complete']);
+        self::assertSame('eligible', $action['cluster_lifecycle_readiness']);
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
+            self::assertStringNotContainsString('snapshot-secret-id', $output);
+            self::assertStringNotContainsString('cluster-secret-id', $output);
+        }
+    }
+
     private function tester(
         string $blueprint,
         ?CloudApiToken $token = new CloudApiToken('super-secret-token'),
@@ -752,9 +798,13 @@ final class PlanInvalidUtf8CloudClient extends PlanCommandCloudClient
     }
 }
 
-final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements LaravelCloudDatabaseClient
+final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements LaravelCloudDatabaseLifecycleClient
 {
-    public function __construct(private readonly ?CloudDatabase $databaseDetail = null)
+    /** @param list<CloudDatabaseSnapshot> $snapshots */
+    public function __construct(
+        private readonly ?CloudDatabase $databaseDetail = null,
+        private readonly array $snapshots = [],
+    )
     {
     }
 
@@ -785,6 +835,11 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
     public function databases(string $clusterId): array
     {
         return [new CloudDatabase('database-secret-id', $clusterId, 'application')];
+    }
+
+    public function databaseSnapshots(string $clusterId): array
+    {
+        return $this->snapshots;
     }
 
     public function database(string $clusterId, string $databaseId): CloudDatabase

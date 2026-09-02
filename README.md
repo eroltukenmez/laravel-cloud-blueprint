@@ -65,6 +65,8 @@ The current build can discover and compare applications, environments, environme
 | Logical Database DELETE | Guarded; State-owned, omitted, unattached, fully discovered, explicitly approved, and exactly verified only |
 | Database Cluster DELETE or general destroy | Unsupported |
 
+Database Cluster DELETE planning now performs read-only discovery of exact-ID logical Database children, all paginated snapshot rows, retained recovery configuration, and the current lifecycle status. Any snapshot or retained recovery configuration blocks readiness; incomplete discovery and unknown lifecycle evidence remain `UNKNOWN`. This is diagnostic groundwork only: Cluster DELETE is still non-executable and snapshots are never deleted automatically.
+
 ### Upgrading from alpha.6
 
 State remains at schema V1, so no migration is required and existing alpha.6 blueprints and State files remain valid. The released alpha.7 baseline added guarded deletion for an exact State-owned Environment omitted from the Blueprint, with explicit approval, complete dependency readiness, and locked revalidation; Database deletion was not part of that release. Application and Database Cluster deletion, variable deletion, recursive destroy, and force bypasses remain unsupported. `lcb state:unmanage` still releases local ownership only and never deletes Cloud infrastructure.
@@ -204,7 +206,7 @@ Text plans use `+` for create, `~` for update, `-` for delete intent, `=` for no
 
 Planning is read-only and deterministic. State-owned resources absent from the Blueprint are represented child-first as DELETE intent using their exact stored identities; unmanaged same-name resources never become deletion targets. Environment DELETE intent includes conservative live discovery of attached databases, caches, WebSockets, domains, instances, deployments, secrets, filesystems, and default-environment status. Instances are reported as expected Environment children and do not by themselves block deletion; all other discovered categories remain blockers. Missing, malformed, or unknown relationship data is never treated as safe. Only complete, SAFE Environment DELETE actions can reach guarded apply execution.
 
-JSON Environment and logical Database DELETE plans expose missing and unknown dependency relationship names for safe diagnosis. These diagnostics contain relationship names only, never dependency IDs or secret values, and do not weaken UNKNOWN readiness.
+JSON Environment, Database Cluster, and logical Database DELETE plans expose missing and unknown dependency relationship names for safe diagnosis. These diagnostics contain relationship names only, never dependency IDs or secret values, and do not weaken UNKNOWN readiness.
 
 Dependency discovery prefers Environment relationship linkage. When Laravel Cloud omits domain linkage or the included Application's default-Environment linkage, LCB uses the documented scoped domain-list and Application-get endpoints to obtain only the existence/count or exact identity needed for destructive readiness.
 

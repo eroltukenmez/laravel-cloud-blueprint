@@ -12,6 +12,8 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableMutationMethod;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencyType;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotStatus;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotType;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
@@ -30,6 +32,86 @@ use Symfony\Component\HttpClient\Response\MockResponse;
 
 final class SymfonyLaravelCloudClientTest extends TestCase
 {
+    public function testDatabaseSnapshotsUseExactClusterScopeAndCompletePagination(): void
+    {
+        $first = new MockResponse(<<<'JSON'
+{"data":[{"id":"snapshot-manual","type":"database-snapshots","attributes":{"type":"manual","status":"available","pitr_enabled":false,"password":"must-not-be-retained"},"relationships":{"database":{"data":{"type":"databases","id":"cluster-1"}}}}],"links":{"next":"https://cloud.laravel.com/api/databases/clusters/cluster-1/snapshots?page=2"},"meta":{"current_page":1,"last_page":2}}
+JSON);
+        $second = new MockResponse(<<<'JSON'
+{"data":[{"id":"snapshot-scheduled","type":"database-snapshots","attributes":{"type":"scheduled","status":"pending","pitr_enabled":true},"relationships":{"database":{"data":{"type":"databases","id":"cluster-1"}}}},{"id":"snapshot-future","type":"database-snapshots","attributes":{"type":"manual","status":"future-status","pitr_enabled":false},"relationships":{"database":{"data":{"type":"databases","id":"cluster-1"}}}}],"links":{"next":null},"meta":{"current_page":2,"last_page":2}}
+JSON);
+
+        $snapshots = $this->client([$first, $second])->databaseSnapshots('cluster-1');
+
+        $byId = [];
+        foreach ($snapshots as $snapshot) {
+            $byId[$snapshot->id] = $snapshot;
+        }
+
+        self::assertCount(3, $snapshots);
+        self::assertSame(DatabaseSnapshotType::MANUAL, $byId['snapshot-manual']->type);
+        self::assertSame(DatabaseSnapshotStatus::AVAILABLE, $byId['snapshot-manual']->status);
+        self::assertSame(DatabaseSnapshotType::SCHEDULED, $byId['snapshot-scheduled']->type);
+        self::assertSame(DatabaseSnapshotStatus::PENDING, $byId['snapshot-scheduled']->status);
+        self::assertTrue($byId['snapshot-scheduled']->pointInTimeRecoveryEnabled);
+        self::assertNull($byId['snapshot-future']->status);
+        self::assertStringContainsString('/databases/clusters/cluster-1/snapshots', $first->getRequestUrl());
+        self::assertSame('GET', $first->getRequestMethod());
+    }
+
+    public function testDatabaseSnapshotsAcceptAuthoritativeCompleteEmptyPage(): void
+    {
+        $response = new MockResponse('{"data":[],"links":{"next":null},"meta":{"current_page":1,"last_page":1}}');
+
+        self::assertSame([], $this->client([$response])->databaseSnapshots('cluster-1'));
+    }
+
+    #[DataProvider('malformedSnapshotResponses')]
+    public function testMalformedSnapshotEvidenceIsRejected(string $response): void
+    {
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse($response)])->databaseSnapshots('cluster-1');
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function malformedSnapshotResponses(): iterable
+    {
+        $page = static fn (string $resource): string => sprintf(
+            '{"data":[%s],"links":{"next":null},"meta":{"current_page":1,"last_page":1}}',
+            $resource,
+        );
+        yield 'missing status' => [$page('{"id":"snapshot-1","attributes":{"type":"manual","pitr_enabled":false},"relationships":{"database":{"data":{"type":"databases","id":"cluster-1"}}}}')];
+        yield 'unknown type' => [$page('{"id":"snapshot-1","attributes":{"type":"future-type","status":"pending","pitr_enabled":false},"relationships":{"database":{"data":{"type":"databases","id":"cluster-1"}}}}')];
+        yield 'parent mismatch' => [$page('{"id":"snapshot-1","attributes":{"type":"manual","status":"pending","pitr_enabled":false},"relationships":{"database":{"data":{"type":"databases","id":"different-cluster"}}}}')];
+        yield 'malformed parent' => [$page('{"id":"snapshot-1","attributes":{"type":"manual","status":"pending","pitr_enabled":false},"relationships":{"database":{"data":null}}}')];
+    }
+
+    #[DataProvider('incompleteSnapshotPaginationResponses')]
+    public function testIncompleteOrMalformedSnapshotPaginationIsRejected(string $response): void
+    {
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse($response)])->databaseSnapshots('cluster-1');
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function incompleteSnapshotPaginationResponses(): iterable
+    {
+        yield 'missing metadata' => ['{"data":[],"links":{"next":null}}'];
+        yield 'premature end' => ['{"data":[],"links":{"next":null},"meta":{"current_page":1,"last_page":2}}'];
+        yield 'invalid page' => ['{"data":[],"links":{"next":null},"meta":{"current_page":2,"last_page":1}}'];
+        yield 'continues after end' => ['{"data":[],"links":{"next":"https://cloud.laravel.com/api/databases/clusters/cluster-1/snapshots?page=2"},"meta":{"current_page":1,"last_page":1}}'];
+        yield 'off-origin next URL' => ['{"data":[],"links":{"next":"https://example.com/api/databases/clusters/cluster-1/snapshots?page=2"},"meta":{"current_page":1,"last_page":2}}'];
+    }
+
+    public function testCyclicSnapshotPaginationIsRejected(): void
+    {
+        $first = '{"data":[],"links":{"next":"https://cloud.laravel.com/api/databases/clusters/cluster-1/snapshots?page=2"},"meta":{"current_page":1,"last_page":3}}';
+        $second = '{"data":[],"links":{"next":"https://cloud.laravel.com/api/databases/clusters/cluster-1/snapshots?page=2"},"meta":{"current_page":2,"last_page":3}}';
+
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse($first), new MockResponse($second)])->databaseSnapshots('cluster-1');
+    }
+
     public function testOrganizationMapsToATypedObjectAndSendsSafeRequiredHeaders(): void
     {
         $response = new MockResponse(self::fixture('organization.json'));
