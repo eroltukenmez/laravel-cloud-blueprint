@@ -12,6 +12,7 @@ use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Blueprint\VariableDefinition;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseLifecycleClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
@@ -21,7 +22,10 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CloudUnknownDatabaseConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseClusterLifecycleReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotType;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
@@ -985,9 +989,9 @@ final readonly class CreatePlan
                     $hasDesiredChild
                         ? 'This Database Cluster is absent from the blueprint but still owns a desired logical Database. Parent deletion is structurally inconsistent.'
                         : match ($dependencies?->readiness()->value) {
-                            'safe' => 'This State-owned Database Cluster is absent from the blueprint and authoritative discovery shows it is empty. Deletion execution remains unsupported.',
-                            'blocked' => 'This State-owned Database Cluster is absent from the blueprint, but deletion is blocked by existing logical Database children. Deletion execution remains unsupported.',
-                            default => 'This State-owned Database Cluster is absent from the blueprint, but child discovery is incomplete and deletion readiness is unknown. Deletion execution remains unsupported.',
+                            'safe' => 'This State-owned Database Cluster is absent from the blueprint and all implemented structural, snapshot/recovery, and lifecycle prerequisites are satisfied. Deletion execution remains unsupported.',
+                            'blocked' => 'This State-owned Database Cluster is absent from the blueprint, but deletion is blocked by discovered dependencies or lifecycle state. Deletion execution remains unsupported.',
+                            default => 'This State-owned Database Cluster is absent from the blueprint, but one or more destructive prerequisites are incomplete or unknown. Deletion execution remains unsupported.',
                         },
                     $resource->remoteId,
                     null,
@@ -1081,14 +1085,69 @@ final readonly class CreatePlan
             }
         }
 
+        $missing = $cluster->missingRelationships;
+        $unknown = $cluster->unknownRelationships;
+        $snapshots = [];
+        $snapshotDiscoveryComplete = true;
+        if (!$cloud instanceof LaravelCloudDatabaseLifecycleClient) {
+            $missing[] = 'snapshots';
+            $snapshotDiscoveryComplete = false;
+        } else {
+            try {
+                $snapshots = $cloud->databaseSnapshots($resource->remoteId);
+            } catch (CloudException) {
+                $missing[] = 'snapshots';
+                $snapshotDiscoveryComplete = false;
+            }
+        }
+        $manualSnapshotCount = 0;
+        $scheduledSnapshotCount = 0;
+        foreach ($snapshots as $snapshot) {
+            if ($snapshot->type === DatabaseSnapshotType::MANUAL) {
+                ++$manualSnapshotCount;
+            } else {
+                ++$scheduledSnapshotCount;
+            }
+            if ($snapshot->status === null) {
+                $unknown[] = 'snapshot_status';
+            }
+        }
+
+        $retainedRecovery = false;
+        $recoveryEvidenceComplete = true;
+        if ($cluster->configuration instanceof CloudLaravelMySqlConfiguration) {
+            $retainedRecovery = $cluster->configuration->retentionDays > 0
+                || $cluster->configuration->usesScheduledSnapshots;
+        } elseif ($cluster->configuration instanceof CloudNeonPostgresConfiguration) {
+            $retainedRecovery = $cluster->configuration->retentionDays > 0;
+        } elseif ($cluster->configuration instanceof CloudUnknownDatabaseConfiguration) {
+            $unknown[] = 'retained_recovery';
+            $recoveryEvidenceComplete = false;
+        }
+
+        $lifecycle = $this->databaseStatuses->destructiveReadiness($cluster->status);
+        if ($lifecycle === DatabaseClusterLifecycleReadiness::UNKNOWN) {
+            $unknown[] = 'cluster_lifecycle';
+        }
+
+        $missing = array_values(array_unique($missing));
+        $unknown = array_values(array_unique($unknown));
+
         return new DatabaseDependencies(
             0,
             $ownedCount,
             $unmanagedCount,
             $ownershipConflict,
             $cluster->childDiscoveryComplete && !$ownershipConflict,
-            $cluster->unknownRelationships,
-            $cluster->missingRelationships,
+            $unknown,
+            $missing,
+            count($snapshots),
+            $retainedRecovery,
+            $manualSnapshotCount,
+            $scheduledSnapshotCount,
+            $snapshotDiscoveryComplete,
+            $recoveryEvidenceComplete,
+            $lifecycle,
         );
     }
 

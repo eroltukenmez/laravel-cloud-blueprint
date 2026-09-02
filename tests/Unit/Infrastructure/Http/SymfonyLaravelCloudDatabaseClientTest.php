@@ -250,6 +250,21 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         self::assertStringNotContainsString(self::SECRET, serialize($cluster));
     }
 
+    public function testMissingOrMalformedClusterLifecycleStatusIsRejectedSafely(): void
+    {
+        $missing = self::withoutAttribute(self::mysqlResource('cluster-1'), 'status');
+        $malformed = self::withAttribute(self::mysqlResource('cluster-1'), 'status', ['secret' => self::SECRET]);
+
+        foreach ([$missing, $malformed] as $resource) {
+            try {
+                $this->client([new MockResponse(self::detail($resource))])->databaseCluster('cluster-1');
+                self::fail('Expected malformed lifecycle status failure.');
+            } catch (CloudResponseException $exception) {
+                self::assertStringNotContainsString(self::SECRET, serialize($exception));
+            }
+        }
+    }
+
     public function testNeonClusterMapsOnlyTypedSafeFields(): void
     {
         $cluster = $this->client([new MockResponse(self::detail(self::neonResource('cluster-2')))])
@@ -581,6 +596,19 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
                 'password' => self::SECRET,
             ],
         ];
+    }
+
+    /**
+     * @param array<string, mixed> $resource
+     * @return array<string, mixed>
+     */
+    private static function withoutAttribute(array $resource, string $name): array
+    {
+        $attributes = $resource['attributes'] ?? null;
+        self::assertIsArray($attributes);
+        unset($attributes[$name]);
+        $resource['attributes'] = $attributes;
+        return $resource;
     }
 
     /** @return array<string, mixed> */

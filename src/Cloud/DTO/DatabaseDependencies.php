@@ -18,6 +18,13 @@ final readonly class DatabaseDependencies
         public bool $complete,
         public array $unknownRelationships = [],
         public array $missingRelationships = [],
+        public int $snapshotCount = 0,
+        public bool $retainedRecovery = false,
+        public int $manualSnapshotCount = 0,
+        public int $scheduledSnapshotCount = 0,
+        public bool $snapshotDiscoveryComplete = true,
+        public bool $recoveryEvidenceComplete = true,
+        public DatabaseClusterLifecycleReadiness $lifecycleReadiness = DatabaseClusterLifecycleReadiness::ELIGIBLE,
     ) {
     }
 
@@ -36,6 +43,15 @@ final readonly class DatabaseDependencies
         }
         if ($this->ownershipConflict) {
             $categories[] = DatabaseDependencyType::OWNERSHIP_CONFLICT;
+        }
+        if ($this->snapshotCount > 0) {
+            $categories[] = DatabaseDependencyType::DATABASE_SNAPSHOT;
+        }
+        if ($this->retainedRecovery) {
+            $categories[] = DatabaseDependencyType::RETAINED_DATABASE_RECOVERY;
+        }
+        if ($this->lifecycleReadiness === DatabaseClusterLifecycleReadiness::INELIGIBLE) {
+            $categories[] = DatabaseDependencyType::DATABASE_CLUSTER_LIFECYCLE;
         }
 
         return $categories;
@@ -59,7 +75,12 @@ final readonly class DatabaseDependencies
             return DatabaseDestructiveReadiness::BLOCKED;
         }
 
-        return !$this->complete || $this->unknownRelationships !== [] || $this->missingRelationships !== []
+        return !$this->complete
+            || !$this->snapshotDiscoveryComplete
+            || !$this->recoveryEvidenceComplete
+            || $this->lifecycleReadiness === DatabaseClusterLifecycleReadiness::UNKNOWN
+            || $this->unknownRelationships !== []
+            || $this->missingRelationships !== []
             ? DatabaseDestructiveReadiness::UNKNOWN
             : DatabaseDestructiveReadiness::SAFE;
     }
