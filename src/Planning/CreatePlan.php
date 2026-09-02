@@ -23,6 +23,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
@@ -1023,6 +1024,8 @@ final readonly class CreatePlan
 
         try {
             $database = $cloud->database($parent->remoteId, $resource->remoteId);
+        } catch (CloudResourceNotFoundException) {
+            return new DatabaseDependencies(0, 0, 0, false, true);
         } catch (CloudException) {
             return new DatabaseDependencies(0, 0, 0, false, false, [], ['exact_database']);
         }
@@ -1147,6 +1150,7 @@ final readonly class CreatePlan
             $managed
                 ? 'Owned remote Database Cluster matches desired state.'
                 : 'Matching remote Database Cluster exists but is unmanaged; future mutation requires import and state ownership.',
+            $managed ? $remote->id : null,
         );
     }
 

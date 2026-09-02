@@ -13,7 +13,12 @@ use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencyType;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateLaravelMySqlConfiguration;
@@ -28,6 +33,7 @@ use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\CreatePlan;
@@ -49,6 +55,7 @@ final readonly class CreateOnlyApply
         private VariableValueResolver $values,
         private DatabaseClusterReadiness $databaseReadiness = new DatabaseClusterReadiness(),
         private EnvironmentDeletionVerification $deletionVerification = new EnvironmentDeletionVerification(),
+        private DatabaseDeletionVerification $databaseDeletionVerification = new DatabaseDeletionVerification(),
     ) {
     }
 
@@ -60,10 +67,16 @@ final readonly class CreateOnlyApply
         ?Closure $lockedBlueprintLoader = null,
     ): ApplyResult {
         $this->assertSupported($plan);
-        if ($plan->countByOperation(PlanOperation::DELETE) > 0
+        if ($this->hasDelete($plan, ResourceType::ENVIRONMENT)
             && !$cloud instanceof LaravelCloudEnvironmentMutationClient) {
             throw new ApplyRefusedException(
                 'The configured Cloud client cannot delete Environment resources. No resources were modified.',
+            );
+        }
+        if ($this->hasDelete($plan, ResourceType::DATABASE)
+            && !$cloud instanceof LaravelCloudLogicalDatabaseDeletionClient) {
+            throw new ApplyRefusedException(
+                'The configured Cloud client cannot delete logical Database resources. No resources were modified.',
             );
         }
         $variableGroups = $this->variableGroups($blueprint, $plan);
@@ -148,6 +161,26 @@ final readonly class CreateOnlyApply
                 }
 
                 if ($action->operation === PlanOperation::DELETE) {
+                    if ($action->resourceType === ResourceType::DATABASE) {
+                        if (!$cloud instanceof LaravelCloudLogicalDatabaseDeletionClient) {
+                            throw new ApplyRefusedException('Logical Database DELETE capability changed during apply.');
+                        }
+                        $deleteResult = $this->deleteDatabaseResource(
+                            $blueprint,
+                            $plan,
+                            $action,
+                            $cloud,
+                            $transaction,
+                            $state,
+                            $outcomes,
+                        );
+                        $state = $deleteResult['state'];
+                        $outcomes = $deleteResult['outcomes'];
+                        if ($deleteResult['failure'] !== null) {
+                            return $deleteResult['failure'];
+                        }
+                        continue;
+                    }
                     if ($action->resourceType !== ResourceType::ENVIRONMENT) {
                         throw new ApplyRefusedException(sprintf(
                             '%s DELETE apply is not supported. No resources were modified.',
@@ -441,11 +474,39 @@ final readonly class CreateOnlyApply
 
         foreach ($plan as $action) {
             if ($action->operation === PlanOperation::DELETE) {
-                if ($action->resourceType !== ResourceType::ENVIRONMENT) {
+                if ($action->resourceType !== ResourceType::ENVIRONMENT
+                    && $action->resourceType !== ResourceType::DATABASE) {
                     throw new ApplyRefusedException(sprintf(
                         '%s DELETE apply is not supported because destructive execution is not enabled for this resource type. No resources were modified.',
                         ucfirst($action->resourceType->value),
                     ));
+                }
+
+                if ($action->resourceType === ResourceType::DATABASE) {
+                    if ($action->databaseDependencies === null) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Logical Database deletion "%s" is refused because dependency discovery is unavailable. No resources were modified.',
+                            (string) $action->address,
+                        ));
+                    }
+                    $readiness = $action->databaseDependencies->readiness();
+                    if ($readiness === DatabaseDestructiveReadiness::BLOCKED) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Logical Database deletion "%s" is blocked by existing dependencies (%s). No resources were modified.',
+                            (string) $action->address,
+                            implode(', ', array_map(
+                                static fn ($cat): string => $cat->value,
+                                $action->databaseDependencies->blockingCategories(),
+                            )),
+                        ));
+                    }
+                    if ($readiness === DatabaseDestructiveReadiness::UNKNOWN) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Logical Database deletion "%s" is refused because dependency discovery is incomplete. No resources were modified.',
+                            (string) $action->address,
+                        ));
+                    }
+                    continue;
                 }
 
                 if ($action->environmentDependencies === null) {
@@ -478,11 +539,14 @@ final readonly class CreateOnlyApply
                 && $action->operation !== PlanOperation::NO_CHANGE) {
                 throw new ApplyRefusedException('Database attachment mutation is not supported. No resources were modified.');
             }
-            if (($action->resourceType === ResourceType::DATABASE_CLUSTER
-                    || $action->resourceType === ResourceType::DATABASE)
+            if ($action->resourceType === ResourceType::DATABASE_CLUSTER
                 && $action->operation !== PlanOperation::NO_CHANGE
                 && $action->operation !== PlanOperation::CREATE) {
-                throw new ApplyRefusedException('Only Database CREATE actions are supported. No resources were modified.');
+                throw new ApplyRefusedException('Database Cluster DELETE apply is not supported. No resources were modified.');
+            }
+            if ($action->resourceType === ResourceType::DATABASE
+                && !in_array($action->operation, [PlanOperation::NO_CHANGE, PlanOperation::CREATE, PlanOperation::DELETE], true)) {
+                throw new ApplyRefusedException('Logical Database operation is not supported. No resources were modified.');
             }
 
             if ($action->operation === PlanOperation::UPDATE && $action->resourceType === ResourceType::APPLICATION) {
@@ -1060,6 +1124,293 @@ final readonly class CreateOnlyApply
                 || $outcome->operation === ApplyOutcomeOperation::UPDATED
                 || $outcome->operation === ApplyOutcomeOperation::DELETED,
         ));
+    }
+
+    private function hasDelete(ExecutionPlan $plan, ResourceType $type): bool
+    {
+        foreach ($plan as $action) {
+            if ($action->resourceType === $type && $action->operation === PlanOperation::DELETE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{state: StateDocument, outcomes: list<ApplyResourceOutcome>, failure: ApplyResult|null}
+     */
+    private function deleteDatabaseResource(
+        Blueprint $blueprint,
+        ExecutionPlan $approvedPlan,
+        PlanAction $action,
+        LaravelCloudLogicalDatabaseDeletionClient $cloud,
+        StateTransaction $transaction,
+        StateDocument $state,
+        array $outcomes,
+    ): array {
+        $failure = function (
+            DestructiveOutcome $destructiveOutcome,
+            string $message,
+            bool|null $deleted = false,
+            bool $confirmed = false,
+            ?CloudValidationException $validation = null,
+            bool $uncertain = false,
+        ) use ($action, $state, $outcomes): array {
+            $failedOutcomes = [...$outcomes, new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                $message,
+                $validation,
+                $destructiveOutcome,
+                $deleted,
+                $confirmed,
+                false,
+            )];
+            $status = $this->confirmedMutationCount($failedOutcomes) > 0 || $uncertain
+                ? ApplyStatus::PARTIAL_FAILURE
+                : ApplyStatus::FAILED;
+            return [
+                'state' => $state,
+                'outcomes' => $failedOutcomes,
+                'failure' => new ApplyResult($status, ...$failedOutcomes),
+            ];
+        };
+
+        $managed = $state->find($action->address);
+        if ($managed === null || $managed->type !== ResourceType::DATABASE) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                sprintf('Local State ownership for "%s" is missing or invalid.', (string) $action->address));
+        }
+        if ($action->remoteId === null || $managed->remoteId !== $action->remoteId) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                sprintf('Local State remote identity for "%s" conflicts with the approved plan.', (string) $action->address));
+        }
+        if ($managed->parent === null || $managed->parent->type !== ResourceType::DATABASE_CLUSTER) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                sprintf('Local State parent for "%s" is invalid.', (string) $action->address));
+        }
+        $parent = $state->find($managed->parent);
+        if ($parent === null || $parent->type !== ResourceType::DATABASE_CLUSTER) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                sprintf('Parent Database Cluster "%s" is not owned in State.', (string) $managed->parent));
+        }
+        $approvedParent = $this->actionAt($approvedPlan, $managed->parent);
+        if ($approvedParent === null
+            || $approvedParent->remoteId === null
+            || $approvedParent->remoteId !== $parent->remoteId) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                sprintf('Parent Database Cluster identity for "%s" changed after approval.', (string) $action->address));
+        }
+        if ($action->parent === null || (string) $action->parent !== (string) $managed->parent) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                sprintf('Parent address for "%s" changed after approval.', (string) $action->address));
+        }
+        foreach ($state->resources() as $resource) {
+            if ((string) $resource->address !== (string) $managed->address
+                && $resource->remoteId === $managed->remoteId) {
+                return $failure(DestructiveOutcome::CONFLICT,
+                    sprintf('Remote identity for "%s" is owned by multiple addresses.', (string) $action->address));
+            }
+        }
+        if ($this->blueprintHasDatabase($blueprint, $action->address)) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                sprintf('Logical Database "%s" is declared in the locked Blueprint and cannot be deleted.', $action->address->name));
+        }
+
+        try {
+            $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+        } catch (CloudException $exception) {
+            return $failure(
+                DestructiveOutcome::UNCERTAIN,
+                'Locked logical Database replanning failed before mutation: ' . $exception->getMessage(),
+            );
+        }
+        $freshAction = $this->actionAt($freshPlan, $action->address);
+        if ($freshAction === null
+            || $freshAction->operation !== PlanOperation::DELETE
+            || $freshAction->remoteId !== $managed->remoteId
+            || $freshAction->parent === null
+            || (string) $freshAction->parent !== (string) $managed->parent) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                'Logical Database deletion assumptions changed during locked replanning; no DELETE was sent.');
+        }
+        $freshDependencies = $freshAction->databaseDependencies;
+        if ($freshDependencies === null || $freshDependencies->readiness() === DatabaseDestructiveReadiness::UNKNOWN) {
+            return $failure(DestructiveOutcome::REFUSED,
+                'Logical Database deletion refused: locked dependency discovery is incomplete or unknown.');
+        }
+        if ($freshDependencies->readiness() === DatabaseDestructiveReadiness::BLOCKED) {
+            if (in_array(DatabaseDependencyType::OWNERSHIP_CONFLICT, $freshDependencies->blockingCategories(), true)) {
+                return $failure(DestructiveOutcome::CONFLICT,
+                    'Logical Database parent or ownership identity conflicted during locked replanning.');
+            }
+            return $failure(DestructiveOutcome::REFUSED, sprintf(
+                'Logical Database deletion refused: locked dependency discovery found: %s.',
+                implode(', ', array_map(
+                    static fn ($category): string => $category->value,
+                    $freshDependencies->blockingCategories(),
+                )),
+            ));
+        }
+        $freshParent = $this->actionAt($freshPlan, $managed->parent);
+        if ($freshParent === null || $freshParent->remoteId !== $parent->remoteId) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                'Parent Database Cluster identity changed during locked replanning; no DELETE was sent.');
+        }
+
+        try {
+            $remote = $cloud->database($parent->remoteId, $managed->remoteId);
+        } catch (CloudResourceNotFoundException) {
+            return $this->checkpointAbsentDatabase(
+                $action,
+                $transaction,
+                $state,
+                $outcomes,
+                false,
+                DestructiveOutcome::ALREADY_ABSENT,
+                'already absent; local State reconciled',
+            );
+        } catch (CloudException $exception) {
+            return $failure(
+                DestructiveOutcome::UNCERTAIN,
+                'Locked exact logical Database rediscovery failed before mutation: ' . $exception->getMessage(),
+            );
+        }
+
+        if ($remote->relationshipClusterId === null) {
+            return $failure(DestructiveOutcome::REFUSED,
+                'Logical Database deletion refused: parent Cluster discovery is incomplete.');
+        }
+        if ($remote->relationshipClusterId !== $parent->remoteId) {
+            return $failure(DestructiveOutcome::CONFLICT,
+                'Logical Database parent Cluster did not match the locked State identity.');
+        }
+        $dependencies = $this->databaseDependencies($remote, $parent->remoteId);
+        if ($dependencies->readiness() === DatabaseDestructiveReadiness::UNKNOWN) {
+            return $failure(DestructiveOutcome::REFUSED,
+                'Logical Database deletion refused: attachment discovery is incomplete or contains unknown relationships.');
+        }
+        if ($dependencies->readiness() === DatabaseDestructiveReadiness::BLOCKED) {
+            return $failure(DestructiveOutcome::REFUSED,
+                'Logical Database deletion refused: one or more Environment attachments exist.');
+        }
+
+        $deleteException = null;
+        try {
+            $cloud->deleteDatabase($parent->remoteId, $managed->remoteId);
+        } catch (CloudException $exception) {
+            $deleteException = $exception;
+        }
+
+        $verification = $this->databaseDeletionVerification->verifyAbsent(
+            $cloud,
+            $parent->remoteId,
+            $managed->remoteId,
+        );
+        if ($verification === 'absent') {
+            return $this->checkpointAbsentDatabase(
+                $action,
+                $transaction,
+                $state,
+                $outcomes,
+                true,
+                DestructiveOutcome::DELETE_CONFIRMED,
+                'deleted and confirmed',
+            );
+        }
+        if ($verification === 'present') {
+            $message = $deleteException === null
+                ? 'Logical Database deletion was not confirmed: exact remote resource remains discoverable.'
+                : 'Logical Database deletion failed: ' . $deleteException->getMessage();
+            return $failure(
+                DestructiveOutcome::UNCERTAIN,
+                $message,
+                false,
+                false,
+                $deleteException instanceof CloudValidationException ? $deleteException : null,
+            );
+        }
+
+        return $failure(
+            DestructiveOutcome::UNCERTAIN,
+            'Logical Database deletion outcome is uncertain: exact post-delete rediscovery failed.',
+            null,
+            false,
+            null,
+            true,
+        );
+    }
+
+    private function databaseDependencies(CloudDatabase $database, string $parentRemoteId): DatabaseDependencies
+    {
+        $parentConflict = $database->relationshipClusterId !== null
+            && $database->relationshipClusterId !== $parentRemoteId;
+        return new DatabaseDependencies(
+            count($database->environmentIds),
+            0,
+            0,
+            $parentConflict,
+            $database->destructiveRelationshipsComplete && !$parentConflict,
+            $database->unknownRelationships,
+            $database->missingRelationships,
+        );
+    }
+
+    private function blueprintHasDatabase(Blueprint $blueprint, ResourceAddress $address): bool
+    {
+        foreach ($blueprint->databaseClusters as $cluster) {
+            foreach ($cluster->databases as $database) {
+                if ($cluster->name . '.' . $database->name === $address->name) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{state: StateDocument, outcomes: list<ApplyResourceOutcome>, failure: ApplyResult|null}
+     */
+    private function checkpointAbsentDatabase(
+        PlanAction $action,
+        StateTransaction $transaction,
+        StateDocument $state,
+        array $outcomes,
+        bool $deleteSent,
+        DestructiveOutcome $destructiveOutcome,
+        string $message,
+    ): array {
+        try {
+            $state = $transaction->save($state->withoutResource($action->address));
+        } catch (StateStorageException $exception) {
+            $outcomes[] = new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                'Logical Database is absent remotely, but State checkpoint failed: ' . $exception->getMessage(),
+                destructiveOutcome: DestructiveOutcome::STATE_CHECKPOINT_FAILED,
+                deleted: $deleteSent,
+                confirmed: true,
+                stateCheckpointed: false,
+            );
+            return [
+                'state' => $state,
+                'outcomes' => $outcomes,
+                'failure' => new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes),
+            ];
+        }
+
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::DELETED,
+            $message,
+            destructiveOutcome: $destructiveOutcome,
+            deleted: $deleteSent,
+            confirmed: true,
+            stateCheckpointed: true,
+        );
+        return ['state' => $state, 'outcomes' => $outcomes, 'failure' => null];
     }
 
     /**

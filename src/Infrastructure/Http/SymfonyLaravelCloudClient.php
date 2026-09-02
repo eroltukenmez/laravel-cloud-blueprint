@@ -7,6 +7,7 @@ namespace LaravelCloudBlueprint\Infrastructure\Http;
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
@@ -41,7 +42,7 @@ use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
-final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudEnvironmentMutationClient
+final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient
 {
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string BASE_URL = 'https://cloud.laravel.com/api';
@@ -360,6 +361,16 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
     public function deleteEnvironment(string $environmentId): void
     {
         $path = sprintf('/environments/%s', rawurlencode($environmentId));
+        $this->delete($path);
+    }
+
+    public function deleteDatabase(string $clusterId, string $databaseId): void
+    {
+        $path = sprintf(
+            '/databases/clusters/%s/databases/%s',
+            rawurlencode($clusterId),
+            rawurlencode($databaseId),
+        );
         $this->delete($path);
     }
 

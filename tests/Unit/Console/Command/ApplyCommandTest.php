@@ -14,17 +14,22 @@ use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariable;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
@@ -311,6 +316,53 @@ final class ApplyCommandTest extends TestCase
         self::assertSame(1, $state->releaseCount);
     }
 
+    public function testLogicalDatabaseDeleteRequiresExplicitApprovalAndRendersStableOutcomes(): void
+    {
+        foreach ([['--json' => true], ['--non-interactive' => true]] as $options) {
+            $cloud = ApplyCommandLogicalDatabaseDeleteClient::matching();
+            [$tester, , $state] = $this->tester($cloud, self::databaseDeletionBlueprint(), self::databaseDeletionState());
+            self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute($options));
+            self::assertSame(0, $cloud->mutationCount);
+            self::assertSame(0, $state->beginCount);
+            self::assertStringContainsString('requires --auto-approve', $tester->getDisplay());
+        }
+
+        $declinedCloud = ApplyCommandLogicalDatabaseDeleteClient::matching();
+        [$declined, , $declinedState] = $this->tester(
+            $declinedCloud,
+            self::databaseDeletionBlueprint(),
+            self::databaseDeletionState(),
+        );
+        $declined->setInputs(['no']);
+        self::assertSame(ExitCode::SUCCESS->value, $declined->execute([]));
+        self::assertSame(0, $declinedCloud->mutationCount);
+        self::assertSame(0, $declinedState->beginCount);
+        self::assertStringContainsString('permanently deletes a Laravel Cloud logical Database', $declined->getDisplay());
+        self::assertStringContainsString('state:unmanage', $declined->getDisplay());
+
+        $approvedCloud = ApplyCommandLogicalDatabaseDeleteClient::matching();
+        [$approved, , $approvedState] = $this->tester(
+            $approvedCloud,
+            self::databaseDeletionBlueprint(),
+            self::databaseDeletionState(),
+        );
+        self::assertSame(ExitCode::SUCCESS->value, $approved->execute([
+            '--json' => true,
+            '--auto-approve' => true,
+        ]));
+        $decoded = json_decode($approved->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame('success', $decoded['status']);
+        self::assertIsArray($decoded['resources']);
+        $resource = $decoded['resources'][0];
+        self::assertIsArray($resource);
+        self::assertSame('database.primary.application', $resource['resource']);
+        self::assertSame('delete_confirmed', $resource['outcome']);
+        self::assertSame(1, $approvedCloud->mutationCount);
+        self::assertNull($approvedState->state->find(new ResourceAddress(ResourceType::DATABASE, 'primary.application')));
+        self::assertStringNotContainsString('database-secret-id', $approved->getDisplay());
+    }
+
     public function testOwnedOnlyLifecycleActionBlocksVariableUpdateWithoutLeakingValues(): void
     {
         $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
@@ -559,6 +611,47 @@ environments:
         sensitive: true
 YAML;
     }
+
+    private static function databaseDeletionBlueprint(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: my-api
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/my-api
+database_clusters:
+  primary:
+    type: laravel_mysql_8
+    region: eu-central-1
+    config:
+      size: db-flex.m-1vcpu-512mb
+      storage: 5
+      retention_days: 1
+      uses_scheduled_snapshots: false
+      is_public: false
+    databases: {}
+environments: {}
+YAML;
+    }
+
+    private static function databaseDeletionState(): StateDocument
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        return StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-existing'))
+            ->withResource(new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-secret-id'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-secret-id',
+                $cluster,
+            ));
+    }
 }
 
 final readonly class ApplyCommandFileReader implements FileReader
@@ -743,6 +836,67 @@ final class ApplyCommandEnvironmentDeleteClient extends ApplyCommandCloudClient 
             $this->environments,
             static fn (CloudEnvironment $environment): bool => $environment->id !== $environmentId,
         ));
+    }
+}
+
+final class ApplyCommandLogicalDatabaseDeleteClient extends ApplyCommandCloudClient implements LaravelCloudLogicalDatabaseDeletionClient
+{
+    private bool $deleted = false;
+
+    public static function matching(): self
+    {
+        return new self(
+            [new CloudApplication('app-existing', 'my-api', 'my-api', 'eu-central-1', 'acme/my-api')],
+            [],
+        );
+    }
+
+    public function databaseClusters(): array
+    {
+        return [new CloudDatabaseCluster(
+            'cluster-secret-id',
+            'primary',
+            'laravel_mysql_8',
+            'available',
+            'eu-central-1',
+            new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+        )];
+    }
+
+    public function databaseCluster(string $clusterId): CloudDatabaseCluster
+    {
+        throw new \LogicException('Unexpected Database Cluster detail request.');
+    }
+
+    public function databases(string $clusterId): array
+    {
+        return $this->deleted ? [] : [$this->remoteDatabase()];
+    }
+
+    public function database(string $clusterId, string $databaseId): CloudDatabase
+    {
+        if ($this->deleted) {
+            throw new CloudResourceNotFoundException('not found', 'GET', '/database', 404);
+        }
+        return $this->remoteDatabase();
+    }
+
+    public function deleteDatabase(string $clusterId, string $databaseId): void
+    {
+        ++$this->mutationCount;
+        $this->deleted = true;
+    }
+
+    private function remoteDatabase(): CloudDatabase
+    {
+        return new CloudDatabase(
+            'database-secret-id',
+            'cluster-secret-id',
+            'application',
+            'cluster-secret-id',
+            [],
+            true,
+        );
     }
 }
 
