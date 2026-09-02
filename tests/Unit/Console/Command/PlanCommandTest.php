@@ -337,6 +337,47 @@ final class PlanCommandTest extends TestCase
         self::assertStringNotContainsString('database-secret-id', $json->getDisplay());
     }
 
+    public function testDatabaseDeleteReadinessIsRenderedWithoutDependencyIdsOrSecrets(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-secret-id'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-secret-id',
+                $cluster,
+            ));
+
+        $text = $this->tester(self::validBlueprint(), cloud: new PlanDatabaseCloudClient(), state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('Destructive readiness: blocked', $text->getDisplay());
+        self::assertStringContainsString('environment_attachment', $text->getDisplay());
+
+        $json = $this->tester(self::validBlueprint(), cloud: new PlanDatabaseCloudClient(), state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['actions']);
+        $database = null;
+        foreach ($decoded['actions'] as $action) {
+            if (is_array($action) && ($action['resource'] ?? null) === 'database.primary.application') {
+                $database = $action;
+                break;
+            }
+        }
+        self::assertIsArray($database);
+        self::assertSame('blocked', $database['destructive_readiness']);
+        self::assertSame(['environment_attachment'], $database['blocking_dependencies']);
+        self::assertSame([], $database['missing_dependency_relationships']);
+
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
+            self::assertStringNotContainsString('cluster-secret-id', $output);
+            self::assertStringNotContainsString('database-secret-id', $output);
+            self::assertStringNotContainsString('environment-secret-id', $output);
+        }
+    }
+
     private function tester(
         string $blueprint,
         ?CloudApiToken $token = new CloudApiToken('super-secret-token'),
@@ -670,12 +711,14 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
             'available',
             'eu-central-1',
             new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+            ['database-secret-id'],
+            true,
         )];
     }
 
     public function databaseCluster(string $clusterId): CloudDatabaseCluster
     {
-        throw new LogicException('Unexpected detail read.');
+        return $this->databaseClusters()[0];
     }
 
     public function databases(string $clusterId): array
@@ -685,6 +728,13 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
 
     public function database(string $clusterId, string $databaseId): CloudDatabase
     {
-        throw new LogicException('Unexpected detail read.');
+        return new CloudDatabase(
+            $databaseId,
+            $clusterId,
+            'application',
+            $clusterId,
+            ['environment-secret-id'],
+            true,
+        );
     }
 }

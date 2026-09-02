@@ -87,6 +87,25 @@ final class BlueprintValidatorTest extends TestCase
         self::assertTrue((new BlueprintValidator())->validate(self::data(omitVariables: true))->isValid());
     }
 
+    public function testEnvironmentCannotReferenceAnOmittedLogicalDatabase(): void
+    {
+        $data = self::data(omitVariables: true);
+        $environments = $data['environments'];
+        self::assertIsArray($environments);
+        $production = $environments['production'];
+        self::assertIsArray($production);
+        $production['database'] = 'primary.application';
+        $environments['production'] = $production;
+        $data['environments'] = $environments;
+
+        $errors = iterator_to_array((new BlueprintValidator())->validate($data), false);
+
+        self::assertCount(1, $errors);
+        self::assertSame('environments.production.database', $errors[0]->path);
+        self::assertSame(ValidationErrorCode::INVALID_DATABASE_REFERENCE, $errors[0]->code);
+        self::assertSame('Referenced Database Cluster does not exist.', $errors[0]->message);
+    }
+
     /** @return iterable<string, array{string}> */
     public static function supportedProviderProvider(): iterable
     {

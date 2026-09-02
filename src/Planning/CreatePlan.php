@@ -21,6 +21,8 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
+use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
@@ -898,7 +900,7 @@ final readonly class CreatePlan
             }
         }
 
-        $this->ownedOnlyDatabaseActions($clusterActions, $databaseActions, $blueprint, $state);
+        $this->ownedOnlyDatabaseActions($clusterActions, $databaseActions, $blueprint, $state, $cloud);
 
         $attachmentActions = $this->databaseAttachmentActions(
             $blueprint,
@@ -949,6 +951,7 @@ final readonly class CreatePlan
         array &$databaseActions,
         Blueprint $blueprint,
         StateDocument $state,
+        LaravelCloudDatabaseClient $cloud,
     ): void {
         $desiredClusters = [];
         $desiredDatabases = [];
@@ -972,25 +975,118 @@ final readonly class CreatePlan
                         break;
                     }
                 }
+                $dependencies = $hasDesiredChild
+                    ? null
+                    : $this->databaseClusterDependencies($resource, $state, $cloud);
                 $clusterActions[] = $this->databaseClusterAction(
                     $resource->address->name,
                     $hasDesiredChild ? PlanOperation::UNSUPPORTED : PlanOperation::DELETE,
                     $hasDesiredChild
                         ? 'This Database Cluster is absent from the blueprint but still owns a desired logical Database. Parent deletion is structurally inconsistent.'
-                        : 'This State-owned Database Cluster is absent from the blueprint. Deletion is planned child-first, but destructive execution is not enabled yet.',
+                        : match ($dependencies?->readiness()->value) {
+                            'safe' => 'This State-owned Database Cluster is absent from the blueprint and authoritative discovery shows it is empty. Deletion execution remains unsupported.',
+                            'blocked' => 'This State-owned Database Cluster is absent from the blueprint, but deletion is blocked by existing logical Database children.',
+                            default => 'This State-owned Database Cluster is absent from the blueprint, but child discovery is incomplete and deletion readiness is unknown.',
+                        },
                     $resource->remoteId,
+                    null,
+                    $dependencies,
                 );
             }
             if ($resource->type === ResourceType::DATABASE && !isset($desiredDatabases[$address])) {
+                $dependencies = $this->logicalDatabaseDependencies($resource, $state, $cloud);
                 $databaseActions[] = $this->databaseAction(
                     $resource->address->name,
                     PlanOperation::DELETE,
-                    'This State-owned logical Database is absent from the blueprint. Deletion is planned, but destructive execution and attachment mutation are not enabled yet.',
+                    match ($dependencies->readiness()->value) {
+                        'safe' => 'This State-owned logical Database is absent from the blueprint. Dependency discovery is complete and deletion readiness is safe, but execution is not supported yet.',
+                        'blocked' => 'This State-owned logical Database is absent from the blueprint, but deletion is blocked by discovered dependencies and execution is not supported.',
+                        default => 'This State-owned logical Database is absent from the blueprint, but deletion readiness is unknown because dependency discovery is incomplete.',
+                    },
                     $resource->remoteId,
                     $resource->parent,
+                    $dependencies,
                 );
             }
         }
+    }
+
+    private function logicalDatabaseDependencies(
+        StateResource $resource,
+        StateDocument $state,
+        LaravelCloudDatabaseClient $cloud,
+    ): DatabaseDependencies {
+        $parent = $resource->parent === null ? null : $state->find($resource->parent);
+        if ($parent === null) {
+            return new DatabaseDependencies(0, 0, 0, true, false, [], ['database']);
+        }
+
+        try {
+            $database = $cloud->database($parent->remoteId, $resource->remoteId);
+        } catch (CloudException) {
+            return new DatabaseDependencies(0, 0, 0, false, false, [], ['exact_database']);
+        }
+
+        $parentConflict = $database->relationshipClusterId !== null
+            && $database->relationshipClusterId !== $parent->remoteId;
+
+        return new DatabaseDependencies(
+            count($database->environmentIds),
+            0,
+            0,
+            $parentConflict,
+            $database->destructiveRelationshipsComplete && !$parentConflict,
+            $database->unknownRelationships,
+            $database->missingRelationships,
+        );
+    }
+
+    private function databaseClusterDependencies(
+        StateResource $resource,
+        StateDocument $state,
+        LaravelCloudDatabaseClient $cloud,
+    ): DatabaseDependencies {
+        try {
+            $cluster = $cloud->databaseCluster($resource->remoteId);
+        } catch (CloudException) {
+            return new DatabaseDependencies(0, 0, 0, false, false, [], ['exact_database_cluster']);
+        }
+
+        $ownedIds = [];
+        foreach ($state->childrenOf($resource->address) as $child) {
+            if ($child->type === ResourceType::DATABASE) {
+                $ownedIds[$child->remoteId] = true;
+            }
+        }
+        $databaseOwners = [];
+        foreach ($state->resources() as $owned) {
+            if ($owned->type === ResourceType::DATABASE) {
+                $databaseOwners[$owned->remoteId] = (string) $owned->parent;
+            }
+        }
+
+        $ownedCount = 0;
+        $unmanagedCount = 0;
+        $ownershipConflict = false;
+        foreach ($cluster->databaseIds as $databaseId) {
+            if (isset($ownedIds[$databaseId])) {
+                ++$ownedCount;
+            } elseif (isset($databaseOwners[$databaseId])) {
+                $ownershipConflict = true;
+            } else {
+                ++$unmanagedCount;
+            }
+        }
+
+        return new DatabaseDependencies(
+            0,
+            $ownedCount,
+            $unmanagedCount,
+            $ownershipConflict,
+            $cluster->childDiscoveryComplete && !$ownershipConflict,
+            $cluster->unknownRelationships,
+            $cluster->missingRelationships,
+        );
     }
 
     private function compareDatabaseCluster(
@@ -1009,6 +1105,7 @@ final readonly class CreatePlan
                 'Remote Database Cluster type differs or is not safely supported.',
                 null,
                 null,
+                null,
                 new PlanChange('type', $remote->type, $desired->type->value),
             );
         }
@@ -1017,6 +1114,7 @@ final readonly class CreatePlan
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote Database Cluster region differs. Database Cluster updates are not supported yet.',
+                null,
                 null,
                 null,
                 new PlanChange('region', $remote->region, $desired->region),
@@ -1036,6 +1134,7 @@ final readonly class CreatePlan
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
                 'Remote Database Cluster configuration differs. Database Cluster updates are not supported yet.',
+                null,
                 null,
                 null,
                 ...$changes,
@@ -1194,6 +1293,7 @@ final readonly class CreatePlan
         string $reason,
         ?string $remoteId = null,
         ?ResourceAddress $parent = null,
+        ?DatabaseDependencies $dependencies = null,
         PlanChange ...$changes,
     ): PlanAction {
         return new PlanAction(
@@ -1202,7 +1302,7 @@ final readonly class CreatePlan
             $operation,
             $reason,
             $remoteId,
-            ...($parent === null ? $changes : [$parent, ...$changes]),
+            ...array_values(array_filter([$parent, $dependencies, ...$changes])),
         );
     }
 
@@ -1212,6 +1312,7 @@ final readonly class CreatePlan
         string $reason,
         ?string $remoteId = null,
         ?ResourceAddress $parent = null,
+        ?DatabaseDependencies $dependencies = null,
     ): PlanAction
     {
         return new PlanAction(
@@ -1220,7 +1321,7 @@ final readonly class CreatePlan
             $operation,
             $reason,
             $remoteId,
-            ...($parent === null ? [] : [$parent]),
+            ...array_values(array_filter([$parent, $dependencies])),
         );
     }
 
