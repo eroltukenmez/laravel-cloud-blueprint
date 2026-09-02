@@ -177,7 +177,7 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame('size', $action->changes[0]->field);
     }
 
-    public function testOwnedDatabaseResourcesAbsentFromBlueprintArePlannedChildFirstButRemainNonExecutable(): void
+    public function testOwnedDatabaseResourcesAbsentFromBlueprintArePlannedChildFirstAndClusterRemainsNonExecutable(): void
     {
         $plan = self::plan(self::blueprint(database: false), self::matchingCloud(), self::databaseState());
 
@@ -187,6 +187,8 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame('database.primary.application', (string) $actions[0]->address);
         self::assertSame('database_cluster.primary', (string) $actions[1]->address);
         self::assertSame('database_cluster.primary', (string) $actions[0]->parent);
+        self::assertStringNotContainsString('not supported', $actions[0]->reason);
+        self::assertStringContainsString('execution remains unsupported', $actions[1]->reason);
         self::assertNull(self::findAction($plan, 'database_attachment.production'));
     }
 
@@ -202,6 +204,8 @@ final class DatabasePlanningTest extends TestCase
             self::databaseState(),
         ), 'database.primary.application');
         self::assertSame(DatabaseDestructiveReadiness::SAFE, $safe->databaseDependencies?->readiness());
+        self::assertStringContainsString('eligible for guarded deletion', $safe->reason);
+        self::assertStringNotContainsString('not supported', $safe->reason);
         self::assertSame([['cluster-1', 'database-1']], $safeCloud->destructiveDatabaseCalls);
 
         $attachedDatabase = new CloudDatabase(
@@ -220,6 +224,8 @@ final class DatabasePlanningTest extends TestCase
             $dependencies->blockingCategories(),
         );
         self::assertSame(2, $dependencies->environmentAttachmentCount);
+        self::assertStringContainsString('guarded deletion is blocked', $attached->reason);
+        self::assertStringNotContainsString('not supported', $attached->reason);
     }
 
     public function testLogicalDatabaseMissingOrMalformedDiscoveryIsUnknown(): void
@@ -234,6 +240,8 @@ final class DatabasePlanningTest extends TestCase
                 self::databaseState(),
             ), 'database.primary.application');
             self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $action->databaseDependencies?->readiness());
+            self::assertStringContainsString('readiness is unknown', $action->reason);
+            self::assertStringNotContainsString('not supported', $action->reason);
         }
     }
 
