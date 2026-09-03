@@ -15,6 +15,8 @@ final readonly class StateResource
         public ResourceType $type,
         public string $remoteId,
         public ?ResourceAddress $parent = null,
+        public StateOwnershipClassification $classification = StateOwnershipClassification::MANAGED,
+        public ?StateProvenance $provenance = null,
     ) {
         if (!in_array($type, [
             ResourceType::APPLICATION,
@@ -48,5 +50,19 @@ final readonly class StateResource
             && ($parent === null || $parent->type !== ResourceType::DATABASE_CLUSTER)) {
             throw new InvalidArgumentException('Logical Database state resources require a Database Cluster parent.');
         }
+        if ($classification === StateOwnershipClassification::DERIVED && $provenance === null) {
+            throw new InvalidArgumentException('Derived state resources require provenance.');
+        }
+        if ($classification === StateOwnershipClassification::MANAGED && $provenance !== null) {
+            throw new InvalidArgumentException('Ordinary managed state resources must not carry derived provenance.');
+        }
+        if ($provenance === StateProvenance::CLUSTER_CREATE_RESPONSE && $type !== ResourceType::DATABASE) {
+            throw new InvalidArgumentException('Cluster create response provenance is valid only for logical Databases.');
+        }
+    }
+
+    public function isDerived(): bool
+    {
+        return $this->classification === StateOwnershipClassification::DERIVED;
     }
 }

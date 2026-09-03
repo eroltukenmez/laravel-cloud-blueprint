@@ -6,11 +6,14 @@ This project uses a Keep a Changelog-inspired format.
 
 ### Added
 
+- Added canonical State V2 with typed `managed` and `derived` ownership classifications and typed provenance for future Cluster-create-derived logical Databases.
+- Added deterministic, read-only V1-to-V2 in-memory migration; existing identities and parents remain ordinary managed resources, and canonical V2 is written only after a material State mutation.
 - Added guarded DELETE execution for exact State-owned logical Databases omitted from the Blueprint when parent identity and reverse Environment attachment discovery are complete and safe.
 - Added read-only, Cluster-scoped snapshot discovery and conservative Database Cluster lifecycle readiness covering complete pagination, retained recovery configuration, and lifecycle status.
 
 ### Security
 
+- Derived resources require recognized provenance, participate in the existing parent/child ownership graph, and fail closed in planning; no provenance is inferred from resource names or Cloud discovery. Cluster CREATE capture of the platform default Database is not implemented yet.
 - Logical Database deletion requires explicit approval, locked Blueprint/State/Cloud replanning, an exact State-owned Cluster and Database identity, complete empty attachments, at most one DELETE transmission, authoritative exact-ID absence, and an immediate atomic State checkpoint.
 - Destructive logical Database discovery explicitly requests the authoritative parent Database and reverse Environment relationships; missing or malformed relationship data remains non-executable.
 - Database Cluster deletion and automatic detach remain unsupported; `state:unmanage` remains local-only.

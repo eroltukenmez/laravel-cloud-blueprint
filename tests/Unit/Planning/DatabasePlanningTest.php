@@ -54,6 +54,8 @@ use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 use LaravelCloudBlueprint\State\StateVersion;
 use LaravelCloudBlueprint\State\Contract\StateStore;
@@ -308,6 +310,39 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $unmanaged->databaseDependencies?->readiness());
         self::assertContains(DatabaseDependencyType::UNMANAGED_DATABASE_CHILD, $unmanaged->databaseDependencies->categories());
         self::assertNull(self::findAction($unmanagedPlan, 'database.primary.reporting'));
+    }
+
+    public function testDerivedDatabaseCannotEnterOrdinaryBlueprintOmissionDeletePath(): void
+    {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $derivedAddress = new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default');
+        $state = new StateDocument(
+            StateVersion::V2,
+            0,
+            'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                $derivedAddress,
+                ResourceType::DATABASE,
+                'database-derived',
+                $clusterAddress,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ),
+        );
+        $cloud = self::matchingCloud(databases: [
+            new CloudDatabase('database-derived', 'cluster-1', 'any-cloud-name'),
+        ]);
+
+        $action = self::action(
+            self::plan(self::blueprint(database: false), $cloud, $state),
+            'database.primary.__derived_default',
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertStringContainsString('derived logical Database', $action->reason);
+        self::assertNull($action->databaseDependencies);
+        self::assertSame([], $cloud->destructiveDatabaseCalls);
     }
 
     public function testClusterSnapshotsAndRetainedRecoveryBlockReadinessWithoutExposingSnapshotIdentity(): void

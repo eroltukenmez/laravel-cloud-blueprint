@@ -13,6 +13,8 @@ use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 use LaravelCloudBlueprint\State\StateVersion;
 use Throwable;
@@ -78,7 +80,7 @@ final readonly class LocalFileStateStore implements StateStore
         }
 
         $saved = new StateDocument(
-            StateVersion::V1,
+            StateVersion::CURRENT,
             $current->serial + 1,
             $state->organization,
             ...$state->resources(),
@@ -112,8 +114,12 @@ final readonly class LocalFileStateStore implements StateStore
         $this->requireExactFields($root, ['version', 'serial', 'organization', 'resources'], 'state');
 
         $version = $this->requiredInt($root, 'version', 'state');
-        if (StateVersion::tryFrom($version) !== StateVersion::V1) {
-            throw new StateCorruptedException(sprintf('Unsupported state version "%d".', $version));
+        $stateVersion = StateVersion::tryFrom($version);
+        if ($stateVersion === null) {
+            throw new StateCorruptedException(sprintf(
+                'Unsupported state version "%d"; this build can read versions 1 and 2.',
+                $version,
+            ));
         }
 
         $serial = $this->requiredInt($root, 'serial', 'state');
@@ -127,18 +133,33 @@ final readonly class LocalFileStateStore implements StateStore
         foreach ($this->requiredMapping($root, 'resources', 'state') as $addressValue => $resourceValue) {
             $context = sprintf('resource "%s"', $addressValue);
             $resource = $this->documentAsMapping($resourceValue, $context);
-            $this->requireAllowedAndRequiredFields($resource, ['type', 'remote_id', 'parent'], ['type', 'remote_id'], $context);
+            $allowed = $stateVersion === StateVersion::V1
+                ? ['type', 'remote_id', 'parent']
+                : ['type', 'remote_id', 'parent', 'classification', 'provenance'];
+            $required = $stateVersion === StateVersion::V1
+                ? ['type', 'remote_id']
+                : ['type', 'remote_id', 'classification'];
+            $this->requireAllowedAndRequiredFields($resource, $allowed, $required, $context);
 
             try {
                 $address = ResourceAddress::fromString($addressValue);
                 $type = ResourceType::from($this->requiredString($resource, 'type', $context));
                 $parentValue = $this->optionalString($resource, 'parent', $context);
                 $parent = $parentValue === null ? null : ResourceAddress::fromString($parentValue);
+                $classification = $stateVersion === StateVersion::V1
+                    ? StateOwnershipClassification::MANAGED
+                    : StateOwnershipClassification::from($this->requiredString($resource, 'classification', $context));
+                $provenanceValue = $stateVersion === StateVersion::V1
+                    ? null
+                    : $this->optionalString($resource, 'provenance', $context);
+                $provenance = $provenanceValue === null ? null : StateProvenance::from($provenanceValue);
                 $resources[] = new StateResource(
                     $address,
                     $type,
                     $this->requiredString($resource, 'remote_id', $context),
                     $parent,
+                    $classification,
+                    $provenance,
                 );
             } catch (Throwable $exception) {
                 if ($exception instanceof StateCorruptedException) {
@@ -149,7 +170,7 @@ final readonly class LocalFileStateStore implements StateStore
         }
 
         try {
-            return new StateDocument(StateVersion::V1, $serial, $organization, ...$resources);
+            return new StateDocument(StateVersion::CURRENT, $serial, $organization, ...$resources);
         } catch (Throwable $exception) {
             throw new StateCorruptedException('Local state document is malformed.', previous: $exception);
         }
@@ -162,9 +183,13 @@ final readonly class LocalFileStateStore implements StateStore
             $entry = [
                 'type' => $resource->type->value,
                 'remote_id' => $resource->remoteId,
+                'classification' => $resource->classification->value,
             ];
             if ($resource->parent !== null) {
                 $entry['parent'] = (string) $resource->parent;
+            }
+            if ($resource->provenance !== null) {
+                $entry['provenance'] = $resource->provenance->value;
             }
             $resources[(string) $resource->address] = $entry;
         }

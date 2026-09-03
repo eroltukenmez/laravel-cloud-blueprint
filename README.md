@@ -234,15 +234,17 @@ Successful application and environment creations are checkpointed as work progre
 
 ## State
 
-Local state is stored in `.lcb/state.json`. It contains remote IDs for LCB-managed Application, Environment, Database Cluster, and logical Database resources. Variables and Database attachments are not state resources, and secret values are never stored.
+Local state is stored in `.lcb/state.json`. Canonical State schema V2 contains remote IDs for LCB-managed Application, Environment, Database Cluster, and logical Database resources. Each resource has a typed ownership classification: ordinary resources are `managed`, while `derived` resources must carry a recognized provenance such as `cluster_create_response`. Resource type and ownership origin remain separate, and secret values are never stored. Variables and Database attachments are not state resources.
 
-State uses local locking and atomic replacement and should not be edited manually. `init --from-cloud` neither creates state nor adopts remote resources into existing state.
+State uses local locking and atomic replacement and should not be edited manually. V1 documents remain readable and migrate deterministically in memory: every V1 resource retains its address, remote identity, and parent as ordinary managed ownership, with no provenance inferred from names or Cloud discovery. Read-only loading does not rewrite a V1 file; the next material State mutation writes canonical V2. Future versions remain rejected. `init --from-cloud` neither creates state nor adopts remote resources into existing state.
 
 Managed Application and Environment addresses are resolved by their stored remote IDs. Planning validates their expected type, Environment parent address, and conflicting reuse of a remote ID. State ownership is not silently reassigned when Cloud contains another resource with the same name.
 
-`lcb import` is the only explicit state-adoption workflow. It atomically records matching Application, Environment, Database Cluster, and logical Database identities using state schema v1. Cluster and logical Database identities are state-owned; Database attachments remain derived read-only relationships and are never persisted. Import does not adopt variables, repair conflicts, or modify remote configuration. Normal plan and apply matching never adopt unmanaged resources implicitly.
+`lcb import` is the only explicit state-adoption workflow. It atomically records matching Application, Environment, Database Cluster, and logical Database identities as ordinary managed resources using State V2. Cluster and logical Database identities are state-owned; Database attachments remain derived read-only relationships and are never persisted. Import does not adopt variables, infer derived provenance, repair conflicts, or modify remote configuration. Normal plan and apply matching never adopt unmanaged resources implicitly.
 
-`lcb state:unmanage <address>` is the explicit inverse ownership operation. It atomically removes only the selected local identity, preserves State V1 and its normal serial progression, makes no Cloud request, and refuses parents with owned children. It never recursively removes ownership or deletes the remote resource.
+`lcb state:unmanage <address>` is the explicit inverse ownership operation. It atomically removes only the selected local identity, preserves normal State serial progression, makes no Cloud request, and refuses parents with owned children, including derived children. It never recursively removes ownership or deletes the remote resource.
+
+State V2 is only the typed foundation for derived infrastructure. Database Cluster CREATE does not yet capture or State-own Laravel Cloud's automatically created default logical Database; existing or newly observed default children remain unmanaged, and no classification may be inferred from a name such as `production`.
 
 ## Security
 

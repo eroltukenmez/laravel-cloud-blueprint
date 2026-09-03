@@ -8,6 +8,8 @@ use InvalidArgumentException;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 use LaravelCloudBlueprint\State\StateVersion;
 use OutOfBoundsException;
@@ -15,6 +17,60 @@ use PHPUnit\Framework\TestCase;
 
 final class StateDocumentTest extends TestCase
 {
+    public function testEmptyStateUsesCanonicalVersionTwo(): void
+    {
+        self::assertSame(StateVersion::V2, StateDocument::empty()->version);
+    }
+
+    public function testDerivedResourcesRequireCompatibleTypedProvenance(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $database = new ResourceAddress(ResourceType::DATABASE, 'primary.derived');
+
+        $this->expectException(InvalidArgumentException::class);
+        new StateResource(
+            $database,
+            ResourceType::DATABASE,
+            'database-1',
+            $cluster,
+            StateOwnershipClassification::DERIVED,
+        );
+    }
+
+    public function testOrdinaryResourcesRejectDerivedProvenance(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        new StateResource(
+            new ResourceAddress(ResourceType::APPLICATION, 'api'),
+            ResourceType::APPLICATION,
+            'app-1',
+            null,
+            StateOwnershipClassification::MANAGED,
+            StateProvenance::CLUSTER_CREATE_RESPONSE,
+        );
+    }
+
+    public function testVersionOneDocumentCannotContainDerivedResources(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+
+        $this->expectException(InvalidArgumentException::class);
+        new StateDocument(
+            StateVersion::V1,
+            0,
+            'acme',
+            new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.derived'),
+                ResourceType::DATABASE,
+                'database-1',
+                $cluster,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ),
+        );
+    }
+
     public function testEmptyStateAndAddressBasedLookupAreDeterministic(): void
     {
         $state = StateDocument::empty();

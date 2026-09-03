@@ -13,6 +13,8 @@ use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateLockedException;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -53,6 +55,30 @@ final class ReleaseStateOwnershipTest extends TestCase
         }
     }
 
+    public function testDerivedChildCanBeReleasedLocallyAndBlocksParentUntilReleased(): void
+    {
+        $derivedAddress = new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default');
+        $state = self::state()
+            ->withoutResource(self::databaseAddress())
+            ->withResource(new StateResource(
+                $derivedAddress,
+                ResourceType::DATABASE,
+                'database-derived',
+                self::clusterAddress(),
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ));
+        $states = new ReleaseStateStore($state);
+        $service = new ReleaseStateOwnership();
+
+        self::assertFalse($service->preview(self::clusterAddress(), $states)->canRelease());
+        $result = $service->execute($service->preview($derivedAddress, $states), $states);
+
+        self::assertNull($result->state->find($derivedAddress));
+        self::assertNotNull($result->state->find(self::clusterAddress()));
+        self::assertSame(1, $states->saveCount);
+    }
+
     /** @return iterable<string, array{ResourceAddress, StateDocument, callable(StateDocument): StateDocument}> */
     public static function concurrentChangeProvider(): iterable
     {
@@ -79,6 +105,18 @@ final class ReleaseStateOwnershipTest extends TestCase
                         self::environmentAddress(), ResourceType::ENVIRONMENT, 'env-1', $other,
                     ));
             },
+        ];
+        yield 'classification changed' => [
+            self::databaseAddress(),
+            self::state(),
+            static fn (StateDocument $state): StateDocument => $state->withResource(new StateResource(
+                self::databaseAddress(),
+                ResourceType::DATABASE,
+                'database-1',
+                self::clusterAddress(),
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            )),
         ];
         yield 'child added' => [
             self::applicationAddress(),
@@ -142,7 +180,7 @@ final class ReleaseStateOwnershipTest extends TestCase
     private static function state(): StateDocument
     {
         return new StateDocument(
-            \LaravelCloudBlueprint\State\StateVersion::V1,
+            \LaravelCloudBlueprint\State\StateVersion::V2,
             0,
             'acme',
             new StateResource(self::applicationAddress(), ResourceType::APPLICATION, 'app-1'),

@@ -30,6 +30,9 @@ final readonly class StateDocument
             if (isset($indexed[$address])) {
                 throw new InvalidArgumentException(sprintf('Duplicate state resource "%s".', $address));
             }
+            if ($version === StateVersion::V1 && $resource->isDerived()) {
+                throw new InvalidArgumentException('State V1 cannot contain derived resource provenance.');
+            }
             $indexed[$address] = $resource;
         }
         /** @var array<string, array{string, ResourceType}> $remoteIds */
@@ -63,7 +66,7 @@ final readonly class StateDocument
 
     public static function empty(): self
     {
-        return new self(StateVersion::V1, 0, null);
+        return new self(StateVersion::CURRENT, 0, null);
     }
 
     public function find(ResourceAddress $address): ?StateResource
@@ -148,7 +151,9 @@ final readonly class StateDocument
             if ($resource->type !== $candidate->type
                 || $resource->remoteId !== $candidate->remoteId
                 || ($resource->parent === null ? null : (string) $resource->parent)
-                    !== ($candidate->parent === null ? null : (string) $candidate->parent)) {
+                    !== ($candidate->parent === null ? null : (string) $candidate->parent)
+                || $resource->classification !== $candidate->classification
+                || $resource->provenance !== $candidate->provenance) {
                 return false;
             }
         }

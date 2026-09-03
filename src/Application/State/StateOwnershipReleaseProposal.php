@@ -43,7 +43,7 @@ final readonly class StateOwnershipReleaseProposal
                 === array_map($this->resourceSignature(...), $other->children);
     }
 
-    /** @return array{string, string, string, string|null}|null */
+    /** @return array{string, string, string, string|null, string, string|null}|null */
     private function resourceSignature(?StateResource $resource): ?array
     {
         if ($resource === null) {
@@ -55,6 +55,8 @@ final readonly class StateOwnershipReleaseProposal
             $resource->type->value,
             $resource->remoteId,
             $resource->parent === null ? null : (string) $resource->parent,
+            $resource->classification->value,
+            $resource->provenance?->value,
         ];
     }
 }

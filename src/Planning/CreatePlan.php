@@ -858,6 +858,16 @@ final readonly class CreatePlan
                 $name = $desiredCluster->name . '.' . $desiredDatabase->name;
                 $databaseAddress = new ResourceAddress(ResourceType::DATABASE, $name);
                 $managedDatabase = $state->find($databaseAddress);
+                if ($managedDatabase?->isDerived() === true) {
+                    $databaseActions[] = $this->databaseAction(
+                        $name,
+                        PlanOperation::UNSUPPORTED,
+                        'A derived logical Database occupies a Blueprint-declared address. Derived-resource reconciliation is not implemented.',
+                        $managedDatabase->remoteId,
+                        $managedDatabase->parent,
+                    );
+                    continue;
+                }
                 $databaseMatches = $managedDatabase === null
                     ? array_values(array_filter(
                         $remoteDatabases,
@@ -999,6 +1009,16 @@ final readonly class CreatePlan
                 );
             }
             if ($resource->type === ResourceType::DATABASE && !isset($desiredDatabases[$address])) {
+                if ($resource->isDerived()) {
+                    $databaseActions[] = $this->databaseAction(
+                        $resource->address->name,
+                        PlanOperation::UNSUPPORTED,
+                        'This derived logical Database has typed State provenance and cannot enter the ordinary Blueprint-omission deletion lifecycle.',
+                        $resource->remoteId,
+                        $resource->parent,
+                    );
+                    continue;
+                }
                 $dependencies = $this->logicalDatabaseDependencies($resource, $state, $cloud);
                 $databaseActions[] = $this->databaseAction(
                     $resource->address->name,
