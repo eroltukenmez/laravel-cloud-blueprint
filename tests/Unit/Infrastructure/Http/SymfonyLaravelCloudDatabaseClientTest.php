@@ -92,6 +92,113 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         );
     }
 
+    public function testClusterCreateCanonicalizesNumericResourceRelationshipIncludedAndParentIds(): void
+    {
+        $created = $this->client([new MockResponse(self::clusterCreateDetail(
+            self::mysqlResource(100),
+            relationshipId: 200,
+            includedId: 200,
+            includedParentId: 100,
+        ), ['http_code' => 201])])->createDatabaseCluster(new CreateDatabaseClusterRequest(
+            'Primary',
+            'laravel_mysql_8',
+            'eu-central-1',
+            new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+        ));
+
+        self::assertSame('100', $created->cluster->id);
+        self::assertSame('200', $created->defaultDatabaseId);
+    }
+
+    public function testClusterCreateCorrelatesMixedNumericAndStringIdsCanonically(): void
+    {
+        $created = $this->client([new MockResponse(self::clusterCreateDetail(
+            self::mysqlResource('100'),
+            relationshipId: 200,
+            includedId: '200',
+            includedParentId: 100,
+        ), ['http_code' => 201])])->createDatabaseCluster(new CreateDatabaseClusterRequest(
+            'Primary',
+            'laravel_mysql_8',
+            'eu-central-1',
+            new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+        ));
+
+        self::assertSame('100', $created->cluster->id);
+        self::assertSame('200', $created->defaultDatabaseId);
+    }
+
+    /** @return iterable<string, array{string, mixed}> */
+    public static function invalidCreateIdentifierBoundaries(): iterable
+    {
+        yield 'top-level Cluster ID' => ['cluster', []];
+        yield 'included child ID' => ['included', 1.5];
+        yield 'included parent ID' => ['parent', false];
+    }
+
+    #[DataProvider('invalidCreateIdentifierBoundaries')]
+    public function testClusterCreateIdentifierBoundaryErrorsAreSanitized(string $boundary, mixed $id): void
+    {
+        $resource = self::mysqlResource('cluster-1');
+        if ($boundary === 'cluster') {
+            $resource['id'] = $id;
+        }
+        $document = self::clusterCreateDetail(
+            $resource,
+            includedId: $boundary === 'included' ? $id : 'default-database',
+            includedParentId: $boundary === 'parent' ? $id : null,
+        );
+
+        try {
+            $this->client([new MockResponse($document, ['http_code' => 201])])
+                ->createDatabaseCluster(new CreateDatabaseClusterRequest(
+                    'Primary',
+                    'laravel_mysql_8',
+                    'eu-central-1',
+                    new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+                ));
+            self::fail('Expected malformed identifier rejection.');
+        } catch (CloudResponseException $exception) {
+            self::assertStringNotContainsString(self::SECRET, serialize($exception));
+        }
+    }
+
+    /** @return iterable<string, array{mixed}> */
+    public static function invalidResourceIdentifiers(): iterable
+    {
+        yield 'null' => [null];
+        yield 'empty string' => [''];
+        yield 'whitespace string' => ['   '];
+        yield 'float' => [1.5];
+        yield 'boolean' => [true];
+        yield 'array' => [['id']];
+        yield 'object' => [(object) ['id' => 1]];
+    }
+
+    #[DataProvider('invalidResourceIdentifiers')]
+    public function testClusterCreateRejectsInvalidRelationshipIdentifierForms(mixed $id): void
+    {
+        $document = json_decode(
+            self::clusterCreateDetail(self::mysqlResource('cluster-1'), includeDefault: false),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        self::assertIsArray($document);
+        self::assertIsArray($document['data']);
+        $document['data']['relationships'] = [
+            'databases' => ['data' => [['type' => 'databaseSchemas', 'id' => $id]]],
+        ];
+
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse(json_encode($document, JSON_THROW_ON_ERROR), ['http_code' => 201])])
+            ->createDatabaseCluster(new CreateDatabaseClusterRequest(
+                'Primary',
+                'laravel_mysql_8',
+                'eu-central-1',
+                new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+            ));
+    }
+
     /** @return iterable<string, array{mixed}> */
     public static function malformedDefaultRelationships(): iterable
     {
@@ -103,8 +210,8 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         ]];
         yield 'wrong type' => [[['type' => 'databases', 'id' => 'default-database']]];
         yield 'duplicate identity' => [[
-            ['type' => 'databaseSchemas', 'id' => 'default-database'],
-            ['type' => 'databaseSchemas', 'id' => 'default-database'],
+            ['type' => 'databaseSchemas', 'id' => 200],
+            ['type' => 'databaseSchemas', 'id' => '200'],
         ]];
         yield 'empty identity' => [[['type' => 'databaseSchemas', 'id' => '']]];
     }
@@ -205,6 +312,16 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         self::assertSame('/api/databases/clusters/cluster-1/databases', parse_url($response->getRequestUrl(), PHP_URL_PATH));
         self::assertSame(['name' => 'application'], self::requestBody($response));
         self::assertStringNotContainsString(self::SECRET, serialize($created));
+    }
+
+    public function testLogicalDatabaseCreateCanonicalizesNumericResourceId(): void
+    {
+        $created = $this->client([new MockResponse(
+            self::detail(self::databaseResource(300, 'application')),
+            ['http_code' => 201],
+        )])->createDatabase('cluster-1', new CreateDatabaseRequest('application'));
+
+        self::assertSame('300', $created->id);
     }
 
     public function testDatabaseCreateApiErrorsAreSanitizedAndNeverRetried(): void
@@ -678,7 +795,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
     }
 
     /** @return array<string, mixed> */
-    private static function mysqlResource(string $id): array
+    private static function mysqlResource(string|int $id): array
     {
         return [
             'id' => $id,
@@ -739,7 +856,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
     }
 
     /** @return array<string, mixed> */
-    private static function databaseResource(string $id, string $name): array
+    private static function databaseResource(mixed $id, string $name): array
     {
         return ['id' => $id, 'type' => 'databaseSchemas', 'attributes' => ['name' => $name]];
     }
@@ -775,20 +892,21 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         array $resource,
         bool $includeDefault = true,
         string $includedType = 'databaseSchemas',
-        ?string $includedParentId = null,
+        mixed $includedParentId = null,
         bool $duplicateIncluded = false,
-        string $includedId = 'default-database',
+        mixed $includedId = 'default-database',
+        mixed $relationshipId = 'default-database',
     ): string {
         $resource['relationships'] = [
             'databases' => [
-                'data' => [['type' => 'databaseSchemas', 'id' => 'default-database']],
+                'data' => [['type' => 'databaseSchemas', 'id' => $relationshipId]],
             ],
         ];
         $default = self::databaseResource($includedId, 'safe-informational-name');
         $default['type'] = $includedType;
         $default['relationships'] = [
             'database' => ['data' => [
-                'type' => 'databases',
+                'type' => 'databaseClusters',
                 'id' => $includedParentId ?? $resource['id'],
             ]],
         ];

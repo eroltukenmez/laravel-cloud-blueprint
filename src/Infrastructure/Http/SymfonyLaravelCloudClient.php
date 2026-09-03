@@ -68,7 +68,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $attributes = $this->mappingAt($resource, 'attributes', $path);
 
         return new CloudOrganization(
-            $this->requiredString($resource, 'id', $path),
+            $this->requiredResourceId($resource, 'id', $path),
             $this->requiredString($attributes, 'name', $path),
             $this->requiredString($attributes, 'slug', $path),
         );
@@ -85,7 +85,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
                 $repository = $this->optionalMapping($attributes, 'repository', $path);
 
                 $applications[] = new CloudApplication(
-                    $this->requiredString($resource, 'id', $path),
+                    $this->requiredResourceId($resource, 'id', $path),
                     $this->requiredString($attributes, 'name', $path),
                     $this->optionalString($attributes, 'slug', $path),
                     $this->requiredString($attributes, 'region', $path),
@@ -114,7 +114,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
 
                 $dependencies = $this->environmentDependencies($resource, $document, $path, $applicationId);
                 $environments[] = new CloudEnvironment(
-                    $this->requiredString($resource, 'id', $path),
+                    $this->requiredResourceId($resource, 'id', $path),
                     $applicationId,
                     $this->requiredString($attributes, 'name', $path),
                     $this->branch($resource, $document, $path),
@@ -136,7 +136,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         );
         $document = $this->get($path);
         $resource = $this->mappingAt($document, 'data', $path);
-        $id = $this->requiredString($resource, 'id', $path);
+        $id = $this->requiredResourceId($resource, 'id', $path);
         if ($id !== $environmentId) {
             throw $this->malformed($path, 'Environment response identity does not match the requested environment.');
         }
@@ -329,7 +329,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $repository = $this->optionalMapping($attributes, 'repository', $path);
 
         return new CloudApplication(
-            $this->requiredString($resource, 'id', $path),
+            $this->requiredResourceId($resource, 'id', $path),
             $this->requiredString($attributes, 'name', $path),
             $this->optionalString($attributes, 'slug', $path),
             $this->requiredString($attributes, 'region', $path),
@@ -356,7 +356,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $attributes = $this->mappingAt($resource, 'attributes', $path);
 
         return new CloudEnvironment(
-            $this->requiredString($resource, 'id', $path),
+            $this->requiredResourceId($resource, 'id', $path),
             $applicationId,
             $this->requiredString($attributes, 'name', $path),
             $request->branch,
@@ -370,7 +370,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $path = sprintf('/environments/%s', rawurlencode($environmentId));
         $document = $this->patch($path, ['branch' => $request->branch]);
         $resource = $this->mappingAt($document, 'data', $path);
-        $id = $this->requiredString($resource, 'id', $path);
+        $id = $this->requiredResourceId($resource, 'id', $path);
         if ($id !== $environmentId) {
             throw new CloudResponseException(
                 'Environment update response identity does not match the requested environment.',
@@ -787,6 +787,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             'databases',
             'databaseSchemas',
             true,
+            $path,
         );
         $unknown = array_values(array_unique([...$unknown, ...$this->unknownDatabaseRelationships($resource, ['databases'])]));
         if ($unknown !== []) {
@@ -794,7 +795,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         }
 
         return new CloudDatabaseCluster(
-            $this->requiredNonEmptyString($resource, 'id', $path),
+            $this->requiredResourceId($resource, 'id', $path),
             $this->requiredNonEmptyString($attributes, 'name', $path),
             $type,
             $this->requiredNonEmptyString($attributes, 'status', $path),
@@ -822,7 +823,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         foreach ($this->listAt($document, 'included', $path) as $value) {
             $included = $this->valueAsMapping($value, $path);
             $type = $this->optionalString($included, 'type', $path);
-            $id = $this->optionalString($included, 'id', $path);
+            $id = $this->optionalResourceId($included, 'id', $path);
             if ($id === $defaultDatabaseId && $type !== 'databaseSchemas') {
                 throw $this->malformed($path, 'Default Database included identity has an unexpected resource type.');
             }
@@ -851,8 +852,9 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
                 [$parentIds, $complete] = $this->databaseRelationshipIds(
                     $included,
                     'database',
-                    'databases',
+                    'databaseClusters',
                     false,
+                    $path,
                 );
                 if (!$complete || $parentIds !== [$clusterId]) {
                     throw $this->malformed(
@@ -879,7 +881,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $database = $this->mappingAt($relationships, 'database', $path);
         $parent = $this->mappingAt($database, 'data', $path);
         if ($this->requiredNonEmptyString($parent, 'type', $path) !== 'databases'
-            || $this->requiredNonEmptyString($parent, 'id', $path) !== $clusterId) {
+            || $this->requiredResourceId($parent, 'id', $path) !== $clusterId) {
             throw $this->malformed($path, 'Snapshot parent identity does not match the requested Cluster.');
         }
 
@@ -889,7 +891,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         }
 
         return new CloudDatabaseSnapshot(
-            $this->requiredNonEmptyString($resource, 'id', $path),
+            $this->requiredResourceId($resource, 'id', $path),
             $clusterId,
             $type,
             DatabaseSnapshotStatus::tryFrom($this->requiredNonEmptyString($attributes, 'status', $path)),
@@ -934,13 +936,14 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             'database',
             'databases',
             false,
+            $path,
         );
         [$environmentIds, $environmentComplete, $environmentMissing, $environmentUnknown] =
-            $this->databaseRelationshipIds($resource, 'environments', 'environments', true);
+            $this->databaseRelationshipIds($resource, 'environments', 'environments', true, $path);
         $unexpected = $this->unknownDatabaseRelationships($resource, ['database', 'environments']);
 
         return new CloudDatabase(
-            $this->requiredNonEmptyString($resource, 'id', $path),
+            $this->requiredResourceId($resource, 'id', $path),
             $clusterId,
             $this->requiredNonEmptyString($this->mappingAt($resource, 'attributes', $path), 'name', $path),
             count($parentIds) === 1 ? $parentIds[0] : null,
@@ -963,6 +966,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         string $name,
         string $expectedType,
         bool $many,
+        string $path,
     ): array {
         if (!array_key_exists('relationships', $resource)) {
             return [[], false, [$name], []];
@@ -986,18 +990,23 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
 
         $ids = [];
         foreach ($items as $item) {
-            if (!is_array($item)
-                || ($item['type'] ?? null) !== $expectedType
-                || !isset($item['id'])
-                || !is_string($item['id'])
-                || trim($item['id']) === ''
-                || isset($ids[$item['id']])) {
+            try {
+                $item = $this->valueAsMapping($item, $path);
+                if (($item['type'] ?? null) !== $expectedType) {
+                    return [[], false, [], [$name]];
+                }
+                $id = $this->requiredResourceId($item, 'id', $path);
+            } catch (CloudResponseException) {
                 return [[], false, [], [$name]];
             }
-            $ids[$item['id']] = true;
+            $identityKey = 'id:' . $id;
+            if (isset($ids[$identityKey])) {
+                return [[], false, [], [$name]];
+            }
+            $ids[$identityKey] = $id;
         }
 
-        $values = array_keys($ids);
+        $values = array_values($ids);
         sort($values, SORT_STRING);
         return [$values, true, [], []];
     }
@@ -1052,7 +1061,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             $path,
             $complete,
         );
-        $environmentId = $this->requiredNonEmptyString($resource, 'id', $path);
+        $environmentId = $this->requiredResourceId($resource, 'id', $path);
         if (array_key_exists('domains', $relationships)) {
             $domainCount = $this->dependencyCount($relationships, 'domains', 'domains', $path, $complete);
         } elseif (array_values(array_diff($missing, ['domains'])) === []) {
@@ -1133,7 +1142,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         if ($this->requiredNonEmptyString($identifier, 'type', $path) !== $type) {
             throw $this->malformed($path, sprintf('Environment relationship "%s" has an unexpected type.', $name));
         }
-        return $this->requiredNonEmptyString($identifier, 'id', $path);
+        return $this->requiredResourceId($identifier, 'id', $path);
     }
 
     /** @param array<string, mixed> $relationships */
@@ -1158,7 +1167,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             if ($this->requiredNonEmptyString($identifier, 'type', $path) !== $type) {
                 throw $this->malformed($path, sprintf('Environment relationship "%s" has an unexpected type.', $name));
             }
-            $this->requiredNonEmptyString($identifier, 'id', $path);
+            $this->requiredResourceId($identifier, 'id', $path);
         }
         return count($identifiers);
     }
@@ -1184,7 +1193,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         foreach (array_key_exists('included', $document) ? $this->listAt($document, 'included', $path) : [] as $value) {
             $included = $this->valueAsMapping($value, $path);
             if ($this->optionalString($included, 'type', $path) !== 'applications'
-                || $this->optionalString($included, 'id', $path) !== $applicationId) {
+                || $this->optionalResourceId($included, 'id', $path) !== $applicationId) {
                 continue;
             }
             $relationships = $this->optionalMapping($included, 'relationships', $path);
@@ -1199,7 +1208,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
                     $path,
                     $complete,
                 );
-                return $defaultId !== null && $defaultId === $this->requiredNonEmptyString($environment, 'id', $path);
+                return $defaultId !== null && $defaultId === $this->requiredResourceId($environment, 'id', $path);
             }
             break;
         }
@@ -1217,7 +1226,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         }
         $missing = array_values(array_diff($missing, ['application.defaultEnvironment']));
 
-        return $defaultId !== null && $defaultId === $this->requiredNonEmptyString($environment, 'id', $path);
+        return $defaultId !== null && $defaultId === $this->requiredResourceId($environment, 'id', $path);
     }
 
     private function environmentDomainCount(string $environmentId): int
@@ -1230,7 +1239,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
                 if ($this->requiredNonEmptyString($domain, 'type', $path) !== 'domains') {
                     throw $this->malformed($path, 'Domain response has an unexpected resource type.');
                 }
-                $this->requiredNonEmptyString($domain, 'id', $path);
+                $this->requiredResourceId($domain, 'id', $path);
                 ++$count;
             }
         }
@@ -1245,7 +1254,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $document = $this->get($path);
         $application = $this->mappingAt($document, 'data', $path);
         if ($this->requiredNonEmptyString($application, 'type', $path) !== 'applications'
-            || $this->requiredNonEmptyString($application, 'id', $path) !== $applicationId) {
+            || $this->requiredResourceId($application, 'id', $path) !== $applicationId) {
             throw $this->malformed($path, 'Application response identity does not match the Environment parent.');
         }
         $relationships = $this->mappingAt($application, 'relationships', $path);
@@ -1281,7 +1290,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $relationships = $this->optionalMapping($resource, 'relationships', $path);
         $branch = $relationships === null ? null : $this->optionalMapping($relationships, 'branch', $path);
         $identifier = $branch === null ? null : $this->optionalMapping($branch, 'data', $path);
-        $branchId = $identifier === null ? null : $this->optionalString($identifier, 'id', $path);
+        $branchId = $identifier === null ? null : $this->optionalResourceId($identifier, 'id', $path);
 
         if ($branchId === null) {
             return null;
@@ -1290,7 +1299,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         foreach ($this->listAt($document, 'included', $path) as $included) {
             $included = $this->valueAsMapping($included, $path);
             if ($this->optionalString($included, 'type', $path) !== 'branches'
-                || $this->optionalString($included, 'id', $path) !== $branchId) {
+                || $this->optionalResourceId($included, 'id', $path) !== $branchId) {
                 continue;
             }
 
@@ -1402,6 +1411,37 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         }
 
         return $value;
+    }
+
+    /** @param array<string, mixed> $data */
+    private function requiredResourceId(array $data, string $key, string $path): string
+    {
+        if (!array_key_exists($key, $data)) {
+            throw $this->malformed($path, sprintf('Required resource identifier "%s" is missing.', $key));
+        }
+
+        $value = $data[$key];
+        if (is_int($value)) {
+            return (string) $value;
+        }
+        if (!is_string($value) || trim($value) === '') {
+            throw $this->malformed(
+                $path,
+                sprintf('Required resource identifier "%s" must be a non-empty string or integer.', $key),
+            );
+        }
+
+        return $value;
+    }
+
+    /** @param array<string, mixed> $data */
+    private function optionalResourceId(array $data, string $key, string $path): ?string
+    {
+        if (!array_key_exists($key, $data) || $data[$key] === null) {
+            return null;
+        }
+
+        return $this->requiredResourceId($data, $key, $path);
     }
 
     /** @param array<string, mixed> $data */
