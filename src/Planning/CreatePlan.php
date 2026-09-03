@@ -33,6 +33,8 @@ use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\State\StateDocument;
 use LaravelCloudBlueprint\State\StateResource;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 
 final readonly class CreatePlan
 {
@@ -865,6 +867,9 @@ final readonly class CreatePlan
                         'A derived logical Database occupies a Blueprint-declared address. Derived-resource reconciliation is not implemented.',
                         $managedDatabase->remoteId,
                         $managedDatabase->parent,
+                        null,
+                        $managedDatabase->classification,
+                        $managedDatabase->provenance,
                     );
                     continue;
                 }
@@ -1010,13 +1015,7 @@ final readonly class CreatePlan
             }
             if ($resource->type === ResourceType::DATABASE && !isset($desiredDatabases[$address])) {
                 if ($resource->isDerived()) {
-                    $databaseActions[] = $this->databaseAction(
-                        $resource->address->name,
-                        PlanOperation::UNSUPPORTED,
-                        'This derived logical Database has typed State provenance and cannot enter the ordinary Blueprint-omission deletion lifecycle.',
-                        $resource->remoteId,
-                        $resource->parent,
-                    );
+                    $databaseActions[] = $this->derivedDatabaseAction($resource, $state, $cloud);
                     continue;
                 }
                 $dependencies = $this->logicalDatabaseDependencies($resource, $state, $cloud);
@@ -1034,6 +1033,87 @@ final readonly class CreatePlan
                 );
             }
         }
+    }
+
+    private function derivedDatabaseAction(
+        StateResource $resource,
+        StateDocument $state,
+        LaravelCloudDatabaseClient $cloud,
+    ): PlanAction {
+        $parent = $resource->parent === null ? null : $state->find($resource->parent);
+        if ($parent === null || $parent->type !== ResourceType::DATABASE_CLUSTER) {
+            return $this->databaseAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'Derived logical Database ownership has an invalid parent and cannot be reconciled safely.',
+                $resource->remoteId,
+                $resource->parent,
+                null,
+                $resource->classification,
+                $resource->provenance,
+            );
+        }
+
+        try {
+            $remoteCluster = $cloud->databaseCluster($parent->remoteId);
+            $relationshipMatches = array_values(array_filter(
+                $remoteCluster->databaseIds,
+                static fn (string $databaseId): bool => $databaseId === $resource->remoteId,
+            ));
+            if ($remoteCluster->id !== $parent->remoteId
+                || !$remoteCluster->childDiscoveryComplete
+                || count($relationshipMatches) !== 1) {
+                throw new CloudResponseException(
+                    'Derived Database relationship discovery is incomplete or conflicted.',
+                    'GET',
+                    '/databases/clusters/{id}',
+                );
+            }
+            $matches = array_values(array_filter(
+                $cloud->databases($parent->remoteId),
+                static fn (CloudDatabase $database): bool => $database->id === $resource->remoteId,
+            ));
+        } catch (CloudException) {
+            $matches = [];
+        }
+        if (count($matches) !== 1) {
+            return $this->databaseAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'Derived logical Database identity is missing or ambiguous under its exact State-owned Cluster; automatic recreation or adoption is forbidden.',
+                $resource->remoteId,
+                $resource->parent,
+                null,
+                $resource->classification,
+                $resource->provenance,
+            );
+        }
+
+        $remote = $matches[0];
+        if ($remote->clusterId !== $parent->remoteId
+            || ($remote->relationshipClusterId !== null && $remote->relationshipClusterId !== $parent->remoteId)) {
+            return $this->databaseAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'Derived logical Database parent identity conflicts with its exact State-owned Cluster.',
+                $resource->remoteId,
+                $resource->parent,
+                null,
+                $resource->classification,
+                $resource->provenance,
+            );
+        }
+
+        return $this->databaseAction(
+            $resource->address->name,
+            PlanOperation::NO_CHANGE,
+            'Cloud-created default Database is retained as derived infrastructure.',
+            $resource->remoteId,
+            $resource->parent,
+            null,
+            $resource->classification,
+            $resource->provenance,
+        );
     }
 
     private function logicalDatabaseDependencies(
@@ -1396,6 +1476,8 @@ final readonly class CreatePlan
         ?string $remoteId = null,
         ?ResourceAddress $parent = null,
         ?DatabaseDependencies $dependencies = null,
+        ?StateOwnershipClassification $classification = null,
+        ?StateProvenance $provenance = null,
     ): PlanAction
     {
         return new PlanAction(
@@ -1404,7 +1486,7 @@ final readonly class CreatePlan
             $operation,
             $reason,
             $remoteId,
-            ...array_values(array_filter([$parent, $dependencies])),
+            ...array_values(array_filter([$parent, $dependencies, $classification, $provenance])),
         );
     }
 

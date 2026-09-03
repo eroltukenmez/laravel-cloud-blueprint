@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\Apply;
 
 use Closure;
+use InvalidArgumentException;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
 use LaravelCloudBlueprint\Apply\Exception\StateIdentityConflictException;
 use LaravelCloudBlueprint\Blueprint\Blueprint;
@@ -43,10 +44,13 @@ use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
+use LaravelCloudBlueprint\Resource\DerivedResource;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 
 final readonly class CreateOnlyApply
@@ -670,9 +674,10 @@ final readonly class CreateOnlyApply
                 return $this->databaseCloudFailure($action, $exception, $state, $clusterIds, $outcomes);
             }
 
-            if ($created->name !== $desired->name
-                || $created->type !== $desired->type->value
-                || $created->region !== $desired->region) {
+            $createdCluster = $created->cluster;
+            if ($createdCluster->name !== $desired->name
+                || $createdCluster->type !== $desired->type->value
+                || $createdCluster->region !== $desired->region) {
                 return $this->databaseCreateFailure(
                     $action,
                     'Database Cluster create returned an incompatible identity; the remote outcome requires inspection and explicit import.',
@@ -684,16 +689,24 @@ final readonly class CreateOnlyApply
             }
 
             try {
-                $state = $this->checkpointDatabaseResource(
+                $state = $this->checkpointDatabaseResources(
                     $blueprint,
                     $transaction,
                     $state,
-                    new StateResource($action->address, ResourceType::DATABASE_CLUSTER, $created->id),
+                    new StateResource($action->address, ResourceType::DATABASE_CLUSTER, $createdCluster->id),
+                    new StateResource(
+                        DerivedResource::defaultDatabaseAddress($action->address),
+                        ResourceType::DATABASE,
+                        $created->defaultDatabaseId,
+                        $action->address,
+                        StateOwnershipClassification::DERIVED,
+                        StateProvenance::CLUSTER_CREATE_RESPONSE,
+                    ),
                 );
-            } catch (StateStorageException $exception) {
+            } catch (InvalidArgumentException|StateStorageException $exception) {
                 return $this->databaseCreateFailure(
                     $action,
-                    'Remote Database Cluster was created but its local ownership checkpoint failed; inspect Cloud and use import before retrying.',
+                    'Remote Database Cluster and its default Database were created but their combined local ownership checkpoint failed; inspect Cloud and use import before retrying.',
                     $state,
                     $clusterIds,
                     $outcomes,
@@ -701,10 +714,10 @@ final readonly class CreateOnlyApply
                 );
             }
 
-            $clusterIds[$desired->name] = $created->id;
+            $clusterIds[$desired->name] = $createdCluster->id;
             $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
             try {
-                $this->databaseReadiness->wait($cloud, $created);
+                $this->databaseReadiness->wait($cloud, $createdCluster);
             } catch (CloudException $exception) {
                 $next = $this->firstDatabaseCreateForCluster($blueprint, $desired->name);
                 if ($next !== null) {
@@ -815,10 +828,22 @@ final readonly class CreateOnlyApply
         StateDocument $state,
         StateResource $resource,
     ): StateDocument {
+        return $this->checkpointDatabaseResources($blueprint, $transaction, $state, $resource);
+    }
+
+    private function checkpointDatabaseResources(
+        Blueprint $blueprint,
+        StateTransaction $transaction,
+        StateDocument $state,
+        StateResource ...$resources,
+    ): StateDocument {
         if ($state->organization === null) {
             $state = $state->withOrganization($blueprint->organization);
         }
-        return $transaction->save($state->withResource($resource));
+        foreach ($resources as $resource) {
+            $state = $state->withResource($resource);
+        }
+        return $transaction->save($state);
     }
 
     private function firstDatabaseCreateForCluster(Blueprint $blueprint, string $cluster): ?ResourceAddress

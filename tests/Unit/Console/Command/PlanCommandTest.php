@@ -41,6 +41,8 @@ use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Tester\CommandTester;
@@ -338,6 +340,55 @@ final class PlanCommandTest extends TestCase
         self::assertSame('database_attachment', $decoded['actions'][4]['type']);
         self::assertStringNotContainsString('cluster-secret-id', $json->getDisplay());
         self::assertStringNotContainsString('database-secret-id', $json->getDisplay());
+    }
+
+    public function testDerivedDefaultDatabaseIsVisibleInTextAndJsonWithoutRemoteIdentity(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-secret-id'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-secret-id',
+                $cluster,
+            ))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default'),
+                ResourceType::DATABASE,
+                'derived-secret-id',
+                $cluster,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ));
+        $cloud = new PlanDatabaseCloudClient(databases: [
+            new CloudDatabase('database-secret-id', 'cluster-secret-id', 'application'),
+            new CloudDatabase('derived-secret-id', 'cluster-secret-id', 'any-cloud-name', 'cluster-secret-id'),
+        ]);
+
+        $text = $this->tester(self::databaseBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('= database.primary.__derived_default', $text->getDisplay());
+        self::assertStringContainsString('retained as derived infrastructure', $text->getDisplay());
+
+        $json = $this->tester(self::databaseBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['actions']);
+        $derived = array_values(array_filter(
+            $decoded['actions'],
+            static fn ($action): bool => is_array($action)
+                && ($action['resource'] ?? null) === 'database.primary.__derived_default',
+        ));
+        self::assertCount(1, $derived);
+        self::assertSame('derived', $derived[0]['classification']);
+        self::assertSame('cluster_create_response', $derived[0]['provenance']);
+
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
+            self::assertStringNotContainsString('derived-secret-id', $output);
+            self::assertStringNotContainsString('any-cloud-name', $output);
+        }
     }
 
     public function testDatabaseDeleteReadinessIsRenderedWithoutDependencyIdsOrSecrets(): void
@@ -800,10 +851,14 @@ final class PlanInvalidUtf8CloudClient extends PlanCommandCloudClient
 
 final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements LaravelCloudDatabaseLifecycleClient
 {
-    /** @param list<CloudDatabaseSnapshot> $snapshots */
+    /**
+     * @param list<CloudDatabaseSnapshot> $snapshots
+     * @param list<CloudDatabase> $databases
+     */
     public function __construct(
         private readonly ?CloudDatabase $databaseDetail = null,
         private readonly array $snapshots = [],
+        private readonly array $databases = [],
     )
     {
     }
@@ -815,6 +870,9 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
 
     public function databaseClusters(): array
     {
+        $databaseIds = $this->databases === []
+            ? ['database-secret-id']
+            : array_map(static fn (CloudDatabase $database): string => $database->id, $this->databases);
         return [new CloudDatabaseCluster(
             'cluster-secret-id',
             'primary',
@@ -822,7 +880,7 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
             'available',
             'eu-central-1',
             new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
-            ['database-secret-id'],
+            $databaseIds,
             true,
         )];
     }
@@ -834,7 +892,9 @@ final class PlanDatabaseCloudClient extends PlanCommandCloudClient implements La
 
     public function databases(string $clusterId): array
     {
-        return [new CloudDatabase('database-secret-id', $clusterId, 'application')];
+        return $this->databases !== []
+            ? $this->databases
+            : [new CloudDatabase('database-secret-id', $clusterId, 'application')];
     }
 
     public function databaseSnapshots(string $clusterId): array

@@ -21,6 +21,7 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Infrastructure\Http\SymfonyLaravelCloudClient;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Symfony\Component\HttpClient\MockHttpClient;
 use Symfony\Component\HttpClient\Response\MockResponse;
 use Symfony\Component\HttpClient\Exception\TransportException;
@@ -32,7 +33,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
     public function testCreatesLaravelMysqlClusterWithVerifiedPayloadAndDiscardsCredentials(): void
     {
         $resource = self::mysqlResource('created-cluster');
-        $response = new MockResponse(self::detail($resource), ['http_code' => 201]);
+        $response = new MockResponse(self::clusterCreateDetail($resource), ['http_code' => 201]);
         $created = $this->client([$response])->createDatabaseCluster(new CreateDatabaseClusterRequest(
             'Primary',
             'laravel_mysql_8',
@@ -40,7 +41,9 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
             new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
         ));
 
-        self::assertSame('created-cluster', $created->id);
+        self::assertSame('created-cluster', $created->cluster->id);
+        self::assertSame('default-database', $created->defaultDatabaseId);
+        self::assertSame('safe-informational-name', $created->defaultDatabaseName);
         self::assertSame('/api/databases/clusters', parse_url($response->getRequestUrl(), PHP_URL_PATH));
         self::assertSame([
             'type' => 'laravel_mysql_8',
@@ -59,7 +62,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
 
     public function testCreatesNeonClusterWithVerifiedPayload(): void
     {
-        $response = new MockResponse(self::detail(self::neonResource('created-neon')), ['http_code' => 201]);
+        $response = new MockResponse(self::clusterCreateDetail(self::neonResource('created-neon')), ['http_code' => 201]);
         $this->client([$response])->createDatabaseCluster(new CreateDatabaseClusterRequest(
             'Primary',
             'neon_serverless_postgres_18',
@@ -76,7 +79,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         ], $body['config']);
 
         $neon17 = self::withAttribute(self::neonResource('created-neon-17'), 'type', 'neon_serverless_postgres_17');
-        $response17 = new MockResponse(self::detail($neon17), ['http_code' => 201]);
+        $response17 = new MockResponse(self::clusterCreateDetail($neon17), ['http_code' => 201]);
         $this->client([$response17])->createDatabaseCluster(new CreateDatabaseClusterRequest(
             'Primary',
             'neon_serverless_postgres_17',
@@ -87,6 +90,107 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
             'neon_serverless_postgres_17',
             self::requestBody($response17)['type'],
         );
+    }
+
+    /** @return iterable<string, array{mixed}> */
+    public static function malformedDefaultRelationships(): iterable
+    {
+        yield 'missing relationship' => [null];
+        yield 'zero children' => [[]];
+        yield 'multiple children' => [[
+            ['type' => 'databaseSchemas', 'id' => 'default-database'],
+            ['type' => 'databaseSchemas', 'id' => 'another-database'],
+        ]];
+        yield 'wrong type' => [[['type' => 'databases', 'id' => 'default-database']]];
+        yield 'duplicate identity' => [[
+            ['type' => 'databaseSchemas', 'id' => 'default-database'],
+            ['type' => 'databaseSchemas', 'id' => 'default-database'],
+        ]];
+        yield 'empty identity' => [[['type' => 'databaseSchemas', 'id' => '']]];
+    }
+
+    #[DataProvider('malformedDefaultRelationships')]
+    public function testClusterCreateRejectsMalformedDefaultDatabaseRelationship(mixed $relationshipData): void
+    {
+        $document = json_decode(
+            self::clusterCreateDetail(self::mysqlResource('cluster-1')),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        self::assertIsArray($document);
+        self::assertIsArray($document['data']);
+        if ($relationshipData === null) {
+            unset($document['data']['relationships']);
+        } else {
+            $document['data']['relationships'] = ['databases' => ['data' => $relationshipData]];
+        }
+
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse(json_encode($document, JSON_THROW_ON_ERROR), ['http_code' => 201])])
+            ->createDatabaseCluster(new CreateDatabaseClusterRequest(
+                'Primary',
+                'laravel_mysql_8',
+                'eu-central-1',
+                new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+            ));
+    }
+
+    public function testClusterCreateAcceptsValidRelationshipWithoutIncludedDefault(): void
+    {
+        $created = $this->client([new MockResponse(
+            self::clusterCreateDetail(self::mysqlResource('cluster-1'), false),
+            ['http_code' => 201],
+        )])->createDatabaseCluster(new CreateDatabaseClusterRequest(
+            'Primary',
+            'laravel_mysql_8',
+            'eu-central-1',
+            new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+        ));
+
+        self::assertSame('default-database', $created->defaultDatabaseId);
+        self::assertNull($created->defaultDatabaseName);
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function conflictingIncludedDefaults(): iterable
+    {
+        yield 'wrong resource type' => ['wrong_type'];
+        yield 'wrong parent' => ['wrong_parent'];
+        yield 'duplicate included identity' => ['duplicate'];
+        yield 'unlinked included database' => ['unlinked'];
+    }
+
+    #[DataProvider('conflictingIncludedDefaults')]
+    public function testClusterCreateRejectsConflictingIncludedDefault(string $conflict): void
+    {
+        $document = match ($conflict) {
+            'wrong_type' => self::clusterCreateDetail(
+                self::mysqlResource('cluster-1'),
+                includedType: 'databases',
+            ),
+            'wrong_parent' => self::clusterCreateDetail(
+                self::mysqlResource('cluster-1'),
+                includedParentId: 'other-cluster',
+            ),
+            'duplicate' => self::clusterCreateDetail(
+                self::mysqlResource('cluster-1'),
+                duplicateIncluded: true,
+            ),
+            'unlinked' => self::clusterCreateDetail(
+                self::mysqlResource('cluster-1'),
+                includedId: 'another-database',
+            ),
+            default => throw new \LogicException('Unknown fixture conflict.'),
+        };
+
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse($document, ['http_code' => 201])])
+            ->createDatabaseCluster(new CreateDatabaseClusterRequest(
+                'Primary',
+                'laravel_mysql_8',
+                'eu-central-1',
+                new CreateLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+            ));
     }
 
     public function testCreatesLogicalDatabaseWithVerifiedEndpointPayloadAndSafeResponse(): void
@@ -150,7 +254,7 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         foreach ([200, 202, 204] as $unexpectedStatus) {
             try {
                 $this->client([new MockResponse(
-                    self::detail(self::mysqlResource('cluster-1')),
+                    self::clusterCreateDetail(self::mysqlResource('cluster-1')),
                     ['http_code' => $unexpectedStatus],
                 )])->createDatabaseCluster(new CreateDatabaseClusterRequest(
                     'Primary',
@@ -664,6 +768,36 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
     private static function detail(array $resource): string
     {
         return json_encode(['data' => $resource], JSON_THROW_ON_ERROR);
+    }
+
+    /** @param array<string, mixed> $resource */
+    private static function clusterCreateDetail(
+        array $resource,
+        bool $includeDefault = true,
+        string $includedType = 'databaseSchemas',
+        ?string $includedParentId = null,
+        bool $duplicateIncluded = false,
+        string $includedId = 'default-database',
+    ): string {
+        $resource['relationships'] = [
+            'databases' => [
+                'data' => [['type' => 'databaseSchemas', 'id' => 'default-database']],
+            ],
+        ];
+        $default = self::databaseResource($includedId, 'safe-informational-name');
+        $default['type'] = $includedType;
+        $default['relationships'] = [
+            'database' => ['data' => [
+                'type' => 'databases',
+                'id' => $includedParentId ?? $resource['id'],
+            ]],
+        ];
+        $included = $duplicateIncluded ? [$default, $default] : [$default];
+
+        return json_encode([
+            'data' => $resource,
+            ...($includeDefault ? ['included' => $included] : []),
+        ], JSON_THROW_ON_ERROR);
     }
 
     /** @param list<array<string, mixed>> $resources */

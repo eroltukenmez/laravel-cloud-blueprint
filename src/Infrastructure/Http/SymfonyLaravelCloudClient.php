@@ -28,6 +28,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudUnknownDatabaseConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CreatedCloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
@@ -281,7 +282,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         return $database;
     }
 
-    public function createDatabaseCluster(CreateDatabaseClusterRequest $request): CloudDatabaseCluster
+    public function createDatabaseCluster(CreateDatabaseClusterRequest $request): CreatedCloudDatabaseCluster
     {
         $path = '/databases/clusters';
         $document = $this->post($path, [
@@ -291,7 +292,19 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             'config' => $request->configuration->payload(),
         ]);
 
-        return $this->databaseClusterFromResource($this->mappingAt($document, 'data', $path), $path);
+        $resource = $this->mappingAt($document, 'data', $path);
+        $cluster = $this->databaseClusterFromResource($resource, $path);
+        if (!$cluster->childDiscoveryComplete || count($cluster->databaseIds) !== 1) {
+            throw $this->malformed(
+                $path,
+                'Database Cluster create response must contain exactly one valid default Database relationship.',
+            );
+        }
+
+        $defaultId = $cluster->databaseIds[0];
+        $defaultName = $this->createdDefaultDatabaseName($document, $cluster->id, $defaultId, $path);
+
+        return new CreatedCloudDatabaseCluster($cluster, $defaultId, $defaultName);
     }
 
     public function createDatabase(string $clusterId, CreateDatabaseRequest $request): CloudDatabase
@@ -792,6 +805,70 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             $missing,
             $unknown,
         );
+    }
+
+    /** @param array<string, mixed> $document */
+    private function createdDefaultDatabaseName(
+        array $document,
+        string $clusterId,
+        string $defaultDatabaseId,
+        string $path,
+    ): ?string {
+        if (!array_key_exists('included', $document)) {
+            return null;
+        }
+
+        $matching = [];
+        foreach ($this->listAt($document, 'included', $path) as $value) {
+            $included = $this->valueAsMapping($value, $path);
+            $type = $this->optionalString($included, 'type', $path);
+            $id = $this->optionalString($included, 'id', $path);
+            if ($id === $defaultDatabaseId && $type !== 'databaseSchemas') {
+                throw $this->malformed($path, 'Default Database included identity has an unexpected resource type.');
+            }
+            if ($type !== 'databaseSchemas') {
+                continue;
+            }
+            if ($id !== $defaultDatabaseId) {
+                throw $this->malformed($path, 'Cluster create response includes an unlinked logical Database.');
+            }
+            $matching[] = $included;
+        }
+
+        if (count($matching) > 1) {
+            throw $this->malformed($path, 'Cluster create response contains duplicate included default Databases.');
+        }
+        if ($matching === []) {
+            return null;
+        }
+
+        $included = $matching[0];
+        if (array_key_exists('relationships', $included)) {
+            if (!is_array($included['relationships'])) {
+                throw $this->malformed($path, 'Included default Database relationships are malformed.');
+            }
+            if (array_key_exists('database', $included['relationships'])) {
+                [$parentIds, $complete] = $this->databaseRelationshipIds(
+                    $included,
+                    'database',
+                    'databases',
+                    false,
+                );
+                if (!$complete || $parentIds !== [$clusterId]) {
+                    throw $this->malformed(
+                        $path,
+                        'Included default Database belongs to an unexpected Database Cluster.',
+                    );
+                }
+            }
+        }
+
+        $attributes = $this->optionalMapping($included, 'attributes', $path);
+        if ($attributes === null || !array_key_exists('name', $attributes)) {
+            return null;
+        }
+
+        return $this->requiredNonEmptyString($attributes, 'name', $path);
     }
 
     /** @param array<string, mixed> $resource */

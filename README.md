@@ -244,7 +244,9 @@ Managed Application and Environment addresses are resolved by their stored remot
 
 `lcb state:unmanage <address>` is the explicit inverse ownership operation. It atomically removes only the selected local identity, preserves normal State serial progression, makes no Cloud request, and refuses parents with owned children, including derived children. It never recursively removes ownership or deletes the remote resource.
 
-State V2 is only the typed foundation for derived infrastructure. Database Cluster CREATE does not yet capture or State-own Laravel Cloud's automatically created default logical Database; existing or newly observed default children remain unmanaged, and no classification may be inferred from a name such as `production`.
+When LCB creates a Database Cluster, the successful CREATE response must contain exactly one valid default logical Database relationship. LCB atomically checkpoints the Cluster and that child at the reserved internal address `database.<cluster>.__derived_default`, classified as `derived` with `cluster_create_response` provenance, before creating Blueprint-declared Databases. The address and provenance never depend on the Cloud name. Missing, ambiguous, malformed, or conflicting response evidence fails closed, and a valid relationship identity remains sufficient when the corresponding included resource is absent.
+
+Blueprint logical Database keys may not use the reserved `__derived_default` segment. Legacy and imported Clusters do not gain derived provenance through names or later discovery; their existing default children remain unmanaged unless a future authoritative recovery workflow is introduced. Database Cluster DELETE remains unsupported.
 
 ## Security
 

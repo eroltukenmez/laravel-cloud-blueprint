@@ -148,6 +148,18 @@ final class DatabaseBlueprintTest extends TestCase
         self::assertValidationError(self::withCluster($cluster), 'database_clusters.primary.databases', ValidationErrorCode::EMPTY_VALUE);
     }
 
+    public function testDerivedDefaultLogicalDatabaseNameIsReserved(): void
+    {
+        $cluster = self::mysqlCluster();
+        $cluster['databases'] = ['__derived_default' => []];
+
+        self::assertValidationError(
+            self::withCluster($cluster),
+            'database_clusters.primary.databases.__derived_default',
+            ValidationErrorCode::UNKNOWN_PROPERTY,
+        );
+    }
+
     public function testUnknownLogicalDatabasePropertyIsRejected(): void
     {
         $cluster = self::mysqlCluster();

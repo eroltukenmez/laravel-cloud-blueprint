@@ -25,6 +25,7 @@ use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -129,14 +130,19 @@ final class PlanCommand extends Command
         $unsupported = $plan->countByOperation(PlanOperation::UNSUPPORTED);
 
         $hasUnmanagedMatches = false;
+        $hasDerivedResources = false;
         foreach ($plan as $action) {
+            if ($action->ownershipClassification === StateOwnershipClassification::DERIVED) {
+                $hasDerivedResources = true;
+            }
             if (str_contains($action->reason, 'unmanaged')) {
                 $hasUnmanagedMatches = true;
                 break;
             }
         }
 
-        if ($create === 0 && $update === 0 && $delete === 0 && $unsupported === 0 && !$hasUnmanagedMatches) {
+        if ($create === 0 && $update === 0 && $delete === 0 && $unsupported === 0
+            && !$hasUnmanagedMatches && !$hasDerivedResources) {
             $output->writeln('No changes.');
             $output->writeln('');
             $output->writeln('Laravel Cloud infrastructure matches the blueprint.');
@@ -238,6 +244,8 @@ final class PlanCommand extends Command
                         'operation' => $action->operation->value,
                         'reason' => $action->reason,
                         'parent' => $action->parent === null ? null : (string) $action->parent,
+                        'classification' => $action->ownershipClassification?->value,
+                        'provenance' => $action->provenance?->value,
                         'destructive_readiness' => $dependencies?->readiness()->value,
                         'dependencies' => $dependencies === null ? null : array_map(
                             static fn ($dependency): string => $dependency->value,

@@ -312,7 +312,7 @@ final class DatabasePlanningTest extends TestCase
         self::assertNull(self::findAction($unmanagedPlan, 'database.primary.reporting'));
     }
 
-    public function testDerivedDatabaseCannotEnterOrdinaryBlueprintOmissionDeletePath(): void
+    public function testDerivedDatabaseReconcilesByExactIdentityWithoutEnteringDeletePath(): void
     {
         $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
         $derivedAddress = new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default');
@@ -330,19 +330,76 @@ final class DatabasePlanningTest extends TestCase
                 StateProvenance::CLUSTER_CREATE_RESPONSE,
             ),
         );
-        $cloud = self::matchingCloud(databases: [
-            new CloudDatabase('database-derived', 'cluster-1', 'any-cloud-name'),
-        ]);
+        $cloud = self::matchingCloud(
+            self::mysqlCluster(databaseIds: ['database-derived'], childDiscoveryComplete: true),
+            [new CloudDatabase('database-derived', 'cluster-1', 'any-cloud-name')],
+        );
 
         $action = self::action(
             self::plan(self::blueprint(database: false), $cloud, $state),
             'database.primary.__derived_default',
         );
 
-        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertStringContainsString('derived logical Database', $action->reason);
+        self::assertSame(PlanOperation::NO_CHANGE, $action->operation);
+        self::assertStringContainsString('retained as derived infrastructure', $action->reason);
+        self::assertSame(StateOwnershipClassification::DERIVED, $action->ownershipClassification);
+        self::assertSame(StateProvenance::CLUSTER_CREATE_RESPONSE, $action->provenance);
         self::assertNull($action->databaseDependencies);
         self::assertSame([], $cloud->destructiveDatabaseCalls);
+    }
+
+    /** @return iterable<string, array{list<CloudDatabase>, string}> */
+    public static function unsafeDerivedDatabaseDiscoveries(): iterable
+    {
+        yield 'missing' => [[], 'missing or ambiguous'];
+        yield 'same-name replacement' => [[
+            new CloudDatabase('replacement-id', 'cluster-1', 'any-cloud-name'),
+        ], 'missing or ambiguous'];
+        yield 'duplicate exact identity' => [[
+            new CloudDatabase('database-derived', 'cluster-1', 'first'),
+            new CloudDatabase('database-derived', 'cluster-1', 'second'),
+        ], 'missing or ambiguous'];
+        yield 'wrong parent relationship' => [[
+            new CloudDatabase('database-derived', 'cluster-1', 'any', 'other-cluster'),
+        ], 'parent identity conflicts'];
+    }
+
+    /** @param list<CloudDatabase> $databases */
+    #[DataProvider('unsafeDerivedDatabaseDiscoveries')]
+    public function testDerivedDatabaseDiscoveryFailsClosedWithoutNameFallback(
+        array $databases,
+        string $reason,
+    ): void {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(
+            StateVersion::V2,
+            0,
+            'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default'),
+                ResourceType::DATABASE,
+                'database-derived',
+                $clusterAddress,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ),
+        );
+        $action = self::action(
+            self::plan(
+                self::blueprint(database: false),
+                self::matchingCloud(
+                    self::mysqlCluster(databaseIds: ['database-derived'], childDiscoveryComplete: true),
+                    $databases,
+                ),
+                $state,
+            ),
+            'database.primary.__derived_default',
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertStringContainsString($reason, $action->reason);
+        self::assertSame(StateOwnershipClassification::DERIVED, $action->ownershipClassification);
     }
 
     public function testClusterSnapshotsAndRetainedRecoveryBlockReadinessWithoutExposingSnapshotIdentity(): void
