@@ -186,7 +186,7 @@ final class ImportCommandTest extends TestCase
         self::assertCount(2, $decoded['resources']);
         self::assertSame(0, $states->beginCount);
         self::assertSame(0, $states->saveCount);
-        self::assertSame(StateVersion::V1, $states->state->version);
+        self::assertSame(StateVersion::V2, $states->state->version);
         self::assertStringNotContainsString('literal-secret-value', $tester->getDisplay());
         self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
     }

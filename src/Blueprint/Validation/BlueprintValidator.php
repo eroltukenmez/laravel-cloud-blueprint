@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Blueprint\Validation;
 
+use LaravelCloudBlueprint\Resource\DerivedResource;
+
 final readonly class BlueprintValidator
 {
     /** @param array<string, mixed> $data */
@@ -249,6 +251,14 @@ final readonly class BlueprintValidator
 
         $references = [];
         foreach ($databases as $name => $definitionValue) {
+            if ($name === DerivedResource::DEFAULT_DATABASE_NAME) {
+                $errors[] = $this->error(
+                    $path . '.' . $name,
+                    ValidationErrorCode::UNKNOWN_PROPERTY,
+                    sprintf('Logical Database name "%s" is reserved for derived infrastructure.', $name),
+                );
+                continue;
+            }
             if (trim($name) === '' || str_contains($name, '.')) {
                 $errors[] = $this->error(
                     $path,

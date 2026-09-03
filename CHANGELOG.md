@@ -4,17 +4,34 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-09-03
+
 ### Added
 
-- Added guarded DELETE execution for exact State-owned logical Databases omitted from the Blueprint when parent identity and reverse Environment attachment discovery are complete and safe.
-- Added read-only, Cluster-scoped snapshot discovery and conservative Database Cluster lifecycle readiness covering complete pagination, retained recovery configuration, and lifecycle status.
+- Canonical State V2 with typed `managed` and `derived` ownership classifications, typed provenance, deterministic read-only V1 migration, and V2 persistence on the next material State mutation.
+- Database Cluster CREATE provenance capture for the exact Cloud-created default logical Database at the reserved derived address.
+- Explicitly approved guarded Database Cluster deletion with ordinary logical Database actions executed and checkpointed child-first, followed by the derived parent-lifecycle dependency and then the Cluster.
+- Typed derived parent-lifecycle dependency metadata in human and JSON plans without remote identities or Cloud names.
+- Exact already-absent recovery for confirmed logical Database and Database Cluster absence, plus bounded exact-ID Cluster absence verification.
+- Sanitized destructive diagnostics that distinguish missing, unknown, and conflicting readiness evidence.
 
-### Security
+### Fixed
 
-- Logical Database deletion requires explicit approval, locked Blueprint/State/Cloud replanning, an exact State-owned Cluster and Database identity, complete empty attachments, at most one DELETE transmission, authoritative exact-ID absence, and an immediate atomic State checkpoint.
-- Destructive logical Database discovery explicitly requests the authoritative parent Database and reverse Environment relationships; missing or malformed relationship data remains non-executable.
-- Database Cluster deletion and automatic detach remain unsupported; `state:unmanage` remains local-only.
-- Any discovered Database snapshot blocks Cluster destructive readiness, incomplete snapshot or lifecycle evidence remains unknown, and snapshots are never automatically deleted.
+- Normalized numeric Laravel Cloud resource identifiers at the HTTP boundary without weakening exact identity matching.
+- Scoped Database-list rows may omit redundant parent metadata without creating a false derived ownership conflict; explicit contradictory parent evidence remains a conflict.
+
+### Safety
+
+- Guarded deletion requires exact State identity and, for the derived default, exact `cluster_create_response` provenance; names and default-looking topology never grant authorization.
+- Every confirmed child absence is checkpointed before parent work. Cloud deletion is not claimed to be transactional or cascading.
+- Potentially destructive requests are transmitted at most once; uncertain mutation outcomes are never retried automatically and retain State unless exact absence is proven.
+- Cluster topology, complete logical Database enumeration, snapshots, recovery configuration, and lifecycle are freshly rediscovered after child deletion and before the Cluster DELETE.
+- Cluster deletion requires zero remaining children, zero snapshots, safe disabled retained recovery, and an explicitly eligible lifecycle state.
+- Legacy, imported, released, and otherwise unmanaged default Databases remain blockers. `state:unmanage` is local-only and removes derived deletion authorization.
+
+### Verified
+
+- The guarded Database Cluster lifecycle was validated against a disposable real Laravel Cloud resource: two ordinary children, the derived default, and the Cluster were each deleted, exactly verified absent, and checkpointed in order; the resulting State and plan converged without exposing Cloud identifiers or credentials.
 
 ## [0.1.0-alpha.7] - 2026-09-01
 

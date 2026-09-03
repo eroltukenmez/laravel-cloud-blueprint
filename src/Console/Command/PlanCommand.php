@@ -25,6 +25,7 @@ use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -129,14 +130,19 @@ final class PlanCommand extends Command
         $unsupported = $plan->countByOperation(PlanOperation::UNSUPPORTED);
 
         $hasUnmanagedMatches = false;
+        $hasDerivedResources = false;
         foreach ($plan as $action) {
+            if ($action->ownershipClassification === StateOwnershipClassification::DERIVED) {
+                $hasDerivedResources = true;
+            }
             if (str_contains($action->reason, 'unmanaged')) {
                 $hasUnmanagedMatches = true;
                 break;
             }
         }
 
-        if ($create === 0 && $update === 0 && $delete === 0 && $unsupported === 0 && !$hasUnmanagedMatches) {
+        if ($create === 0 && $update === 0 && $delete === 0 && $unsupported === 0
+            && !$hasUnmanagedMatches && !$hasDerivedResources) {
             $output->writeln('No changes.');
             $output->writeln('');
             $output->writeln('Laravel Cloud infrastructure matches the blueprint.');
@@ -157,7 +163,11 @@ final class PlanCommand extends Command
                     '  Destructive readiness: %s%s.',
                     $action->databaseDependencies->readiness()->value,
                     $action->resourceType === ResourceType::DATABASE_CLUSTER
-                        ? ' (Database Cluster DELETE execution is not supported)'
+                        ? match ($action->databaseDependencies->readiness()->value) {
+                            'safe' => ' (eligible for guarded child-first deletion)',
+                            'blocked' => ' (guarded deletion is blocked)',
+                            default => ' (guarded deletion is not eligible)',
+                        }
                         : match ($action->databaseDependencies->readiness()->value) {
                             'safe' => ' (eligible for guarded deletion)',
                             'blocked' => ' (guarded deletion is blocked)',
@@ -184,6 +194,19 @@ final class PlanCommand extends Command
                     ));
                 }
                 if ($action->resourceType === ResourceType::DATABASE_CLUSTER) {
+                    $output->writeln(sprintf(
+                        '  Structural readiness: %s.',
+                        $action->databaseDependencies->structuralReadiness()->value,
+                    ));
+                    $output->writeln(sprintf(
+                        '  Derived parent dependencies: %d.',
+                        $action->databaseDependencies->derivedParentDependencyCount,
+                    ));
+                    if ($action->parentLifecycleDependency !== null) {
+                        $output->writeln('  Derived parent dependency:');
+                        $output->writeln('    ' . (string) $action->parentLifecycleDependency->address);
+                        $output->writeln('    Will be deleted only during this approved guarded parent lifecycle.');
+                    }
                     $output->writeln($action->databaseDependencies->snapshotDiscoveryComplete
                         ? sprintf(
                             '  Discovered snapshots: %d (%d manual, %d scheduled).',
@@ -238,6 +261,9 @@ final class PlanCommand extends Command
                         'operation' => $action->operation->value,
                         'reason' => $action->reason,
                         'parent' => $action->parent === null ? null : (string) $action->parent,
+                        'classification' => $action->ownershipClassification?->value,
+                        'provenance' => $action->provenance?->value,
+                        'destructive_role' => $action->destructiveRole?->value,
                         'destructive_readiness' => $dependencies?->readiness()->value,
                         'dependencies' => $dependencies === null ? null : array_map(
                             static fn ($dependency): string => $dependency->value,
@@ -265,6 +291,15 @@ final class PlanCommand extends Command
                             : null,
                         'recovery_evidence_complete' => $clusterDependencies?->recoveryEvidenceComplete,
                         'cluster_lifecycle_readiness' => $clusterDependencies?->lifecycleReadiness->value,
+                        'structural_readiness' => $clusterDependencies?->structuralReadiness()->value,
+                        'derived_parent_dependency_count' => $clusterDependencies?->derivedParentDependencyCount,
+                        'parent_lifecycle_dependency' => $action->parentLifecycleDependency === null ? null : [
+                            'address' => (string) $action->parentLifecycleDependency->address,
+                            'classification' => $action->parentLifecycleDependency->classification->value,
+                            'provenance' => $action->parentLifecycleDependency->provenance->value,
+                            'destructive_role' => $action->parentLifecycleDependency->destructiveRole->value,
+                            'planned_lifecycle_effect' => $action->parentLifecycleDependency->plannedLifecycleEffect,
+                        ],
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,

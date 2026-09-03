@@ -352,6 +352,7 @@ final readonly class CreateImportProposal
     ): bool {
         return $managed->type === $type
             && $managed->remoteId === $remoteId
+            && !$managed->isDerived()
             && ($managed->parent === null ? null : (string) $managed->parent)
                 === ($parent === null ? null : (string) $parent);
     }

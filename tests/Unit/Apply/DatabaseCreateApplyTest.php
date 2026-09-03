@@ -30,6 +30,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
+use LaravelCloudBlueprint\Cloud\DTO\CreatedCloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
@@ -46,6 +47,8 @@ use LaravelCloudBlueprint\Planning\VariableValueResolver;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 use LaravelCloudBlueprint\State\StateVersion;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
@@ -65,6 +68,20 @@ final class DatabaseCreateApplyTest extends TestCase
         self::assertSame(['cluster:primary', 'database:application', 'database:reporting'], $cloud->mutations);
         self::assertSame(3, $states->saveCount);
         self::assertNotNull($states->state->find(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary')));
+        $derived = $states->state->get(new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default'));
+        self::assertSame(StateOwnershipClassification::DERIVED, $derived->classification);
+        self::assertSame(StateProvenance::CLUSTER_CREATE_RESPONSE, $derived->provenance);
+        self::assertSame('database_cluster.primary', (string) $derived->parent);
+        self::assertSame([
+            ['database.primary.__derived_default', 'database_cluster.primary'],
+            ['database.primary.__derived_default', 'database.primary.application', 'database_cluster.primary'],
+            [
+                'database.primary.__derived_default',
+                'database.primary.application',
+                'database.primary.reporting',
+                'database_cluster.primary',
+            ],
+        ], $states->savedAddresses);
         self::assertNotNull($states->state->find(new ResourceAddress(ResourceType::DATABASE, 'primary.application')));
         self::assertNotNull($states->state->find(new ResourceAddress(ResourceType::DATABASE, 'primary.reporting')));
     }
@@ -356,16 +373,31 @@ final class DatabaseMutationCloud implements LaravelCloudDatabaseMutationClient
     public function database(string $clusterId, string $databaseId): CloudDatabase { throw new \LogicException('Unexpected.'); }
     public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase { throw new \LogicException('Unexpected.'); }
 
-    public function createDatabaseCluster(CreateDatabaseClusterRequest $request): CloudDatabaseCluster
+    public function createDatabaseCluster(CreateDatabaseClusterRequest $request): CreatedCloudDatabaseCluster
     {
         ++$this->clusterCreateCalls;
         if ($this->clusterTransportFailure) {
             throw new CloudTransportException('Cluster create outcome is uncertain; inspect Cloud and import before retrying.', 'POST', '/databases/clusters');
         }
         $this->mutations[] = 'cluster:' . $request->name;
-        $cluster = self::clusterWithStatus('cluster-1', $this->createdClusterStatus);
+        $cluster = new CloudDatabaseCluster(
+            'cluster-1',
+            'primary',
+            'laravel_mysql_8',
+            $this->createdClusterStatus,
+            'eu-central-1',
+            new CloudLaravelMySqlConfiguration('size', 5, 1, false, false),
+            ['default-database'],
+            true,
+        );
         $this->clusters[] = $cluster;
-        return $cluster;
+        $this->createdDatabases[] = new CloudDatabase(
+            'default-database',
+            'cluster-1',
+            'safe-informational-name',
+            'cluster-1',
+        );
+        return new CreatedCloudDatabaseCluster($cluster, 'default-database', 'safe-informational-name');
     }
 
     public function createDatabase(string $clusterId, CreateDatabaseRequest $request): CloudDatabase
@@ -389,6 +421,8 @@ final class DatabaseMutationCloud implements LaravelCloudDatabaseMutationClient
 final class DatabaseMutationStateStore implements StateStore, StateTransaction
 {
     public int $saveCount = 0;
+    /** @var list<list<string>> */
+    public array $savedAddresses = [];
     public function __construct(
         public StateDocument $state,
         private readonly ?int $failSaveAt = null,
@@ -409,6 +443,10 @@ final class DatabaseMutationStateStore implements StateStore, StateTransaction
         if ($this->failSaveAt === $this->saveCount) {
             throw new StateStorageException('Simulated state checkpoint failure.');
         }
-        return $this->state = new StateDocument(StateVersion::V1, $this->state->serial + 1, $state->organization, ...$state->resources());
+        $this->savedAddresses[] = array_map(
+            static fn (StateResource $resource): string => (string) $resource->address,
+            $state->resources(),
+        );
+        return $this->state = new StateDocument(StateVersion::V2, $this->state->serial + 1, $state->organization, ...$state->resources());
     }
 }

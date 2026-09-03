@@ -8,6 +8,8 @@ use LaravelCloudBlueprint\Apply\ApplyStatus;
 use LaravelCloudBlueprint\Apply\Contract\Delay;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
 use LaravelCloudBlueprint\Apply\DatabaseDeletionVerification;
+use LaravelCloudBlueprint\Apply\DatabaseClusterDeletionVerification;
+use LaravelCloudBlueprint\Apply\DatabaseClusterDeletionReadiness;
 use LaravelCloudBlueprint\Apply\DestructiveOutcome;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
 use LaravelCloudBlueprint\Blueprint\ApplicationDefinition;
@@ -22,6 +24,7 @@ use LaravelCloudBlueprint\Blueprint\LogicalDatabaseDefinitionCollection;
 use LaravelCloudBlueprint\Blueprint\SourceDefinition;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClusterDeletionClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
@@ -39,6 +42,8 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
+use LaravelCloudBlueprint\Planning\DatabaseDestructiveRole;
+use LaravelCloudBlueprint\Planning\DatabaseParentLifecycleDependency;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
@@ -49,10 +54,139 @@ use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
 use LaravelCloudBlueprint\State\StateResource;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use PHPUnit\Framework\TestCase;
 
 final class LogicalDatabaseDeleteApplyTest extends TestCase
 {
+    public function testSafeEmptyClusterIsDeletedOnceVerifiedAndCheckpointed(): void
+    {
+        $cloud = self::cloud([]);
+        $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1')));
+        $plan = (new \LaravelCloudBlueprint\Planning\CreatePlan(new VariableValueResolver(new LogicalDatabaseDeleteValues())))
+            ->create(self::blueprintWithoutCluster(), $cloud, $states->state);
+
+        $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(['cluster-1'], $cloud->clusterDeletes);
+        self::assertNull($states->state->find(self::clusterAddress()));
+        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+    }
+
+    public function testDerivedChildIsDeletedAndCheckpointedBeforeCluster(): void
+    {
+        $derivedAddress = self::databaseAddress('__derived_default');
+        $exact = self::database(id: 'derived-1', name: 'production');
+        $listed = self::database(id: 'derived-1', name: 'production', parentId: null);
+        $cloud = self::cloud(['derived-1' => [$exact, self::notFound()]], [$listed]);
+        $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1'))
+            ->withResource(new StateResource($derivedAddress, ResourceType::DATABASE, 'derived-1', self::clusterAddress(), StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE)));
+        $dependency = new DatabaseParentLifecycleDependency($derivedAddress, StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY);
+        $plan = new ExecutionPlan(
+            new PlanAction(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, PlanOperation::DELETE, 'delete', 'cluster-1', new DatabaseDependencies(0, 0, 0, false, true, derivedParentDependencyCount: 1), $dependency),
+            new PlanAction($derivedAddress, ResourceType::DATABASE, PlanOperation::NO_CHANGE, 'derived', 'derived-1', self::clusterAddress(), StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY),
+        );
+
+        $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame([['cluster-1', 'derived-1']], $cloud->deletes);
+        self::assertSame(['cluster-1'], $cloud->clusterDeletes);
+        self::assertSame(2, $states->saveCount);
+        self::assertSame([], $states->state->resources());
+    }
+
+    public function testDerivedExactDetailStillFailsClosedForUnsafeParentOrAttachments(): void
+    {
+        $cases = [
+            'wrong parent' => new CloudDatabase('derived-1', 'cluster-1', 'production', 'other-cluster', [], true),
+            'incomplete relationships' => new CloudDatabase('derived-1', 'cluster-1', 'production', 'cluster-1', [], false, ['environments']),
+            'attached environment' => new CloudDatabase('derived-1', 'cluster-1', 'production', 'cluster-1', ['environment-1'], true),
+            'detail unavailable' => new CloudTransportException('unavailable', 'GET', '/database'),
+        ];
+
+        foreach ($cases as $case => $detail) {
+            $derivedAddress = self::databaseAddress('__derived_default');
+            $listed = self::database(id: 'derived-1', name: 'production', parentId: null);
+            $cloud = self::cloud(['derived-1' => [$detail]], [$listed]);
+            $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+                ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1'))
+                ->withResource(new StateResource($derivedAddress, ResourceType::DATABASE, 'derived-1', self::clusterAddress(), StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE)));
+            $dependency = new DatabaseParentLifecycleDependency($derivedAddress, StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY);
+            $plan = new ExecutionPlan(
+                new PlanAction(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, PlanOperation::DELETE, 'delete', 'cluster-1', new DatabaseDependencies(0, 0, 0, false, true, derivedParentDependencyCount: 1), $dependency),
+                new PlanAction($derivedAddress, ResourceType::DATABASE, PlanOperation::NO_CHANGE, 'derived', 'derived-1', self::clusterAddress(), StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY),
+            );
+
+            $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+            self::assertNotSame(ApplyStatus::SUCCESS, $result->status, $case);
+            self::assertSame([], $cloud->deletes, $case);
+            self::assertSame([], $cloud->clusterDeletes, $case);
+            self::assertNotNull($states->state->find($derivedAddress), $case);
+            self::assertNotNull($states->state->find(self::clusterAddress()), $case);
+        }
+    }
+
+    public function testClusterAbsenceVerificationUsesBoundedGetOnlyPolling(): void
+    {
+        $cloud = self::cloud([]);
+        $verification = new DatabaseClusterDeletionVerification(new LogicalDatabaseDeleteDelay(), 3, 0);
+
+        self::assertSame('present', $verification->verifyAbsent($cloud, 'cluster-1'));
+        self::assertSame(3, $cloud->clusterDiscoveries);
+        self::assertSame([], $cloud->clusterDeletes);
+
+        $cloud->deleteDatabaseCluster('cluster-1');
+        self::assertSame('absent', $verification->verifyAbsent($cloud, 'cluster-1'));
+        self::assertSame(4, $cloud->clusterDiscoveries);
+        self::assertSame(['cluster-1'], $cloud->clusterDeletes);
+    }
+
+    public function testClusterDeleteTransportUncertaintyDoesNotRetryOrCheckpoint(): void
+    {
+        $failure = new CloudTransportException('timeout', 'DELETE', '/cluster');
+        $cloud = self::cloud([], clusterDeleteFailure: $failure);
+        $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1')));
+        $plan = (new \LaravelCloudBlueprint\Planning\CreatePlan(new VariableValueResolver(new LogicalDatabaseDeleteValues())))
+            ->create(self::blueprintWithoutCluster(), $cloud, $states->state);
+
+        $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(['cluster-1'], $cloud->clusterDeletes);
+        self::assertNotNull($states->state->find(self::clusterAddress()));
+        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($result)[0]->destructiveOutcome);
+    }
+
+    public function testClusterCheckpointFailureRecoversByExact404WithoutSecondDelete(): void
+    {
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1'));
+        $cloud = self::cloud([]);
+        $planner = new \LaravelCloudBlueprint\Planning\CreatePlan(new VariableValueResolver(new LogicalDatabaseDeleteValues()));
+        $plan = $planner->create(self::blueprintWithoutCluster(), $cloud, $state);
+        $failedStore = new LogicalDatabaseDeleteStateStore($state, true);
+
+        $failed = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $failedStore);
+        self::assertSame(DestructiveOutcome::STATE_CHECKPOINT_FAILED, iterator_to_array($failed)[0]->destructiveOutcome);
+        self::assertNotNull($failedStore->state->find(self::clusterAddress()));
+        self::assertSame(['cluster-1'], $cloud->clusterDeletes);
+
+        $recoveryStore = new LogicalDatabaseDeleteStateStore($failedStore->state);
+        $recoveryPlan = $planner->create(self::blueprintWithoutCluster(), $cloud, $recoveryStore->state);
+        $recovered = self::apply()->execute(self::blueprintWithoutCluster(), $recoveryPlan, $cloud, $recoveryStore);
+
+        self::assertSame(DestructiveOutcome::ALREADY_ABSENT, iterator_to_array($recovered)[0]->destructiveOutcome);
+        self::assertSame(['cluster-1'], $cloud->clusterDeletes);
+        self::assertNull($recoveryStore->state->find(self::clusterAddress()));
+    }
+
     public function testSafeDatabaseIsDeletedOnceVerifiedAndCheckpointed(): void
     {
         $cloud = self::cloud(['database-1' => [self::database(), self::database(), self::notFound()]]);
@@ -260,19 +394,19 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         ], $cloud->deletes);
     }
 
-    public function testDatabaseClusterDeleteRemainsUnsupportedEvenWhenStructurallySafe(): void
+    public function testDatabaseClusterDeleteIsSupportedWhenApprovalGraphAndReadinessAreSafe(): void
     {
         $plan = new ExecutionPlan(new PlanAction(
             self::clusterAddress(),
             ResourceType::DATABASE_CLUSTER,
             PlanOperation::DELETE,
-            'structurally safe but unsupported',
+            'structurally safe',
             'cluster-1',
             new DatabaseDependencies(0, 0, 0, false, true),
         ));
 
-        $this->expectException(ApplyRefusedException::class);
         self::apply()->assertSupported($plan);
+        self::addToAssertionCount(1);
     }
 
     private static function apply(): CreateOnlyApply
@@ -280,6 +414,8 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         return new CreateOnlyApply(
             new VariableValueResolver(new LogicalDatabaseDeleteValues()),
             databaseDeletionVerification: new DatabaseDeletionVerification(new LogicalDatabaseDeleteDelay(), 3, 0),
+            databaseClusterDeletionVerification: new DatabaseClusterDeletionVerification(new LogicalDatabaseDeleteDelay(), 12, 0),
+            databaseClusterDeletionReadiness: new DatabaseClusterDeletionReadiness(new LogicalDatabaseDeleteDelay(), 12, 0),
         );
     }
 
@@ -332,6 +468,17 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         );
     }
 
+    private static function blueprintWithoutCluster(): Blueprint
+    {
+        return new Blueprint(
+            BlueprintSchemaVersion::V1,
+            'acme',
+            new ApplicationDefinition('my-api', 'eu-central-1', new SourceDefinition(SourceProvider::GITHUB, 'acme/api')),
+            new EnvironmentDefinitionCollection(),
+            new DatabaseClusterDefinitionCollection(),
+        );
+    }
+
     /**
      * @param array<string, list<CloudDatabase|CloudException>> $discoveries
      * @param list<CloudDatabase> $listed
@@ -342,15 +489,16 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         array $listed = [],
         ?CloudException $deleteFailure = null,
         array $deleteFailures = [],
+        ?CloudException $clusterDeleteFailure = null,
     ): LogicalDatabaseDeleteCloud {
-        return new LogicalDatabaseDeleteCloud($discoveries, $listed, $deleteFailure, $deleteFailures);
+        return new LogicalDatabaseDeleteCloud($discoveries, $listed, $deleteFailure, $deleteFailures, $clusterDeleteFailure);
     }
 
     /** @param list<string> $environmentIds */
     private static function database(
         string $id = 'database-1',
         string $name = 'application',
-        string $parentId = 'cluster-1',
+        ?string $parentId = 'cluster-1',
         array $environmentIds = [],
     ): CloudDatabase {
         return new CloudDatabase($id, 'cluster-1', $name, $parentId, $environmentIds, true);
@@ -377,7 +525,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
     }
 }
 
-final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDeletionClient
+final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDeletionClient, LaravelCloudDatabaseClusterDeletionClient
 {
     /** @var array<string, list<CloudDatabase|CloudException>> */
     private array $discoveries;
@@ -389,6 +537,10 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
 
     /** @var list<array{string, string}> */
     public array $verificationDiscoveries = [];
+    /** @var list<string> */
+    public array $clusterDeletes = [];
+    private bool $clusterDeleted = false;
+    public int $clusterDiscoveries = 0;
 
     /**
      * @param array<string, list<CloudDatabase|CloudException>> $discoveries
@@ -397,9 +549,10 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
      */
     public function __construct(
         array $discoveries,
-        private readonly array $listed,
+        private array $listed,
         private readonly ?CloudException $deleteFailure,
         private readonly array $deleteFailures,
+        private readonly ?CloudException $clusterDeleteFailure,
     ) {
         $this->discoveries = $discoveries;
     }
@@ -416,6 +569,9 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
     }
     public function databaseClusters(): array
     {
+        if ($this->clusterDeleted) {
+            return [];
+        }
         return [new CloudDatabaseCluster(
             'cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1',
             new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
@@ -423,8 +579,18 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
     }
     public function databaseCluster(string $clusterId): CloudDatabaseCluster
     {
-        throw new \LogicException('Cluster detail must not be used for logical Database deletion.');
+        ++$this->clusterDiscoveries;
+        if ($this->clusterDeleted) {
+            throw new CloudResourceNotFoundException('not found', 'GET', '/cluster', 404);
+        }
+        return new CloudDatabaseCluster(
+            'cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1',
+            new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false),
+            array_map(static fn (CloudDatabase $database): string => $database->id, $this->listed),
+            true,
+        );
     }
+    public function databaseSnapshots(string $clusterId): array { return []; }
     public function databases(string $clusterId): array { return $this->listed; }
     public function database(string $clusterId, string $databaseId): CloudDatabase
     {
@@ -454,6 +620,15 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
         if ($failure !== null) {
             throw $failure;
         }
+        $this->listed = array_values(array_filter($this->listed, static fn (CloudDatabase $database): bool => $database->id !== $databaseId));
+    }
+    public function deleteDatabaseCluster(string $clusterId): void
+    {
+        $this->clusterDeletes[] = $clusterId;
+        if ($this->clusterDeleteFailure !== null) {
+            throw $this->clusterDeleteFailure;
+        }
+        $this->clusterDeleted = true;
     }
     public function createApplication(CreateApplicationRequest $request): CloudApplication
     {

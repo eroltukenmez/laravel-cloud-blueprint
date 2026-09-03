@@ -40,6 +40,8 @@ use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 use LaravelCloudBlueprint\State\StateVersion;
 use PHPUnit\Framework\TestCase;
@@ -102,6 +104,30 @@ final class DatabaseImportTest extends TestCase
 
         self::assertSame(ImportStatus::ALREADY_MANAGED, self::candidate($proposal, 'database_cluster.primary')->status);
         self::assertSame(ImportStatus::ALREADY_MANAGED, self::candidate($proposal, 'database.primary.application')->status);
+    }
+
+    public function testDerivedDatabaseIsNotReclassifiedAsOrdinaryManagedByImport(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(
+            StateVersion::V2,
+            0,
+            null,
+            new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-1',
+                $cluster,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ),
+        );
+
+        self::assertSame(
+            ImportStatus::CONFLICT,
+            self::candidate(self::proposal(state: $state), 'database.primary.application')->status,
+        );
     }
 
     public function testReverseRemoteIdentityOwnershipConflicts(): void

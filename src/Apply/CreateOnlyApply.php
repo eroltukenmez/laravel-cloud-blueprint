@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\Apply;
 
 use Closure;
+use InvalidArgumentException;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
 use LaravelCloudBlueprint\Apply\Exception\StateIdentityConflictException;
 use LaravelCloudBlueprint\Blueprint\Blueprint;
@@ -12,12 +13,14 @@ use LaravelCloudBlueprint\Blueprint\LaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClusterDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencyType;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseClusterLifecycleReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
@@ -31,6 +34,7 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
@@ -41,12 +45,16 @@ use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
+use LaravelCloudBlueprint\Planning\DatabaseDestructiveRole;
 use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
+use LaravelCloudBlueprint\Resource\DerivedResource;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\State\StateOwnershipClassification;
+use LaravelCloudBlueprint\State\StateProvenance;
 use LaravelCloudBlueprint\State\StateResource;
 
 final readonly class CreateOnlyApply
@@ -56,6 +64,8 @@ final readonly class CreateOnlyApply
         private DatabaseClusterReadiness $databaseReadiness = new DatabaseClusterReadiness(),
         private EnvironmentDeletionVerification $deletionVerification = new EnvironmentDeletionVerification(),
         private DatabaseDeletionVerification $databaseDeletionVerification = new DatabaseDeletionVerification(),
+        private DatabaseClusterDeletionVerification $databaseClusterDeletionVerification = new DatabaseClusterDeletionVerification(),
+        private DatabaseClusterDeletionReadiness $databaseClusterDeletionReadiness = new DatabaseClusterDeletionReadiness(),
     ) {
     }
 
@@ -78,6 +88,10 @@ final readonly class CreateOnlyApply
             throw new ApplyRefusedException(
                 'The configured Cloud client cannot delete logical Database resources. No resources were modified.',
             );
+        }
+        if ($this->hasDelete($plan, ResourceType::DATABASE_CLUSTER)
+            && !$cloud instanceof LaravelCloudDatabaseClusterDeletionClient) {
+            throw new ApplyRefusedException('The configured Cloud client cannot delete Database Cluster resources. No resources were modified.');
         }
         $variableGroups = $this->variableGroups($blueprint, $plan);
 
@@ -146,6 +160,14 @@ final readonly class CreateOnlyApply
                 $this->assertSupported($plan);
             }
             $this->verifyState($blueprint, $plan, $state);
+            if ($this->hasDelete($plan, ResourceType::DATABASE_CLUSTER)) {
+                try {
+                    $lockedPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                } catch (CloudException $exception) {
+                    throw new ApplyRefusedException('Locked Database Cluster approval-graph revalidation failed; no mutation was sent.');
+                }
+                $this->assertClusterApprovalGraphUnchanged($plan, $lockedPlan);
+            }
             $variableGroups = $this->variableGroups($blueprint, $plan);
             $outcomes = [];
             $applicationId = null;
@@ -161,6 +183,18 @@ final readonly class CreateOnlyApply
                 }
 
                 if ($action->operation === PlanOperation::DELETE) {
+                    if ($action->resourceType === ResourceType::DATABASE_CLUSTER) {
+                        if (!$cloud instanceof LaravelCloudDatabaseClusterDeletionClient) {
+                            throw new ApplyRefusedException('Database Cluster DELETE capability changed during apply.');
+                        }
+                        $deleteResult = $this->deleteDatabaseClusterResource($blueprint, $action, $cloud, $transaction, $state, $outcomes);
+                        $state = $deleteResult['state'];
+                        $outcomes = $deleteResult['outcomes'];
+                        if ($deleteResult['failure'] !== null) {
+                            return $deleteResult['failure'];
+                        }
+                        continue;
+                    }
                     if ($action->resourceType === ResourceType::DATABASE) {
                         if (!$cloud instanceof LaravelCloudLogicalDatabaseDeletionClient) {
                             throw new ApplyRefusedException('Logical Database DELETE capability changed during apply.');
@@ -207,6 +241,10 @@ final readonly class CreateOnlyApply
                 }
 
                 if ($action->operation === PlanOperation::NO_CHANGE) {
+                    if ($action->destructiveRole === DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY
+                        && $state->find($action->address) === null) {
+                        continue;
+                    }
                     $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UNCHANGED);
                     if ($action->resourceType === ResourceType::APPLICATION) {
                         $applicationId = $action->remoteId;
@@ -475,7 +513,8 @@ final readonly class CreateOnlyApply
         foreach ($plan as $action) {
             if ($action->operation === PlanOperation::DELETE) {
                 if ($action->resourceType !== ResourceType::ENVIRONMENT
-                    && $action->resourceType !== ResourceType::DATABASE) {
+                    && $action->resourceType !== ResourceType::DATABASE
+                    && $action->resourceType !== ResourceType::DATABASE_CLUSTER) {
                     throw new ApplyRefusedException(sprintf(
                         '%s DELETE apply is not supported because destructive execution is not enabled for this resource type. No resources were modified.',
                         ucfirst($action->resourceType->value),
@@ -505,6 +544,58 @@ final readonly class CreateOnlyApply
                             'Logical Database deletion "%s" is refused because dependency discovery is incomplete. No resources were modified.',
                             (string) $action->address,
                         ));
+                    }
+                    continue;
+                }
+
+                if ($action->resourceType === ResourceType::DATABASE_CLUSTER) {
+                    $dependencies = $action->databaseDependencies;
+                    if ($dependencies === null) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Database Cluster deletion "%s" is refused because destructive discovery is incomplete: dependency evidence unavailable. No resources were modified.',
+                            (string) $action->address,
+                        ));
+                    }
+                    if ($dependencies->ownershipConflict) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Database Cluster deletion "%s" has a destructive ownership conflict: ownership_conflict. No resources were modified.',
+                            (string) $action->address,
+                        ));
+                    }
+                    if (!$dependencies->complete
+                        || !$dependencies->snapshotDiscoveryComplete || !$dependencies->recoveryEvidenceComplete
+                        || $dependencies->unknownRelationships !== [] || $dependencies->missingRelationships !== []) {
+                        $detail = match (true) {
+                            $dependencies->missingRelationships !== [] => 'missing relationship evidence: ' . implode(', ', $dependencies->missingRelationships),
+                            $dependencies->unknownRelationships !== [] => 'unknown relationship evidence: ' . implode(', ', $dependencies->unknownRelationships),
+                            !$dependencies->snapshotDiscoveryComplete => 'missing relationship evidence: snapshots',
+                            !$dependencies->recoveryEvidenceComplete => 'unknown relationship evidence: retained_recovery',
+                            default => 'incomplete structural evidence',
+                        };
+                        throw new ApplyRefusedException(sprintf(
+                            'Database Cluster deletion "%s" is refused because destructive discovery is incomplete: %s. No resources were modified.',
+                            (string) $action->address,
+                            $detail,
+                        ));
+                    }
+                    if ($dependencies->unmanagedChildCount > 0
+                        || $dependencies->snapshotCount > 0 || $dependencies->retainedRecovery
+                        || $dependencies->lifecycleReadiness !== DatabaseClusterLifecycleReadiness::ELIGIBLE) {
+                        throw new ApplyRefusedException(sprintf('Database Cluster deletion "%s" is blocked by destructive dependencies or lifecycle state. No resources were modified.', (string) $action->address));
+                    }
+                    $approvedChildren = 0;
+                    foreach ($plan as $candidate) {
+                        if ($candidate->resourceType === ResourceType::DATABASE
+                            && $candidate->operation === PlanOperation::DELETE
+                            && $candidate->parent !== null
+                            && (string) $candidate->parent === (string) $action->address) {
+                            ++$approvedChildren;
+                        }
+                    }
+                    if ($approvedChildren !== $dependencies->ownedChildCount
+                        || ($dependencies->derivedParentDependencyCount === 1) !== ($action->parentLifecycleDependency !== null)
+                        || $dependencies->derivedParentDependencyCount > 1) {
+                        throw new ApplyRefusedException(sprintf('Database Cluster deletion "%s" approval graph is incomplete. No resources were modified.', (string) $action->address));
                     }
                     continue;
                 }
@@ -541,7 +632,8 @@ final readonly class CreateOnlyApply
             }
             if ($action->resourceType === ResourceType::DATABASE_CLUSTER
                 && $action->operation !== PlanOperation::NO_CHANGE
-                && $action->operation !== PlanOperation::CREATE) {
+                && $action->operation !== PlanOperation::CREATE
+                && $action->operation !== PlanOperation::DELETE) {
                 throw new ApplyRefusedException('Database Cluster DELETE apply is not supported. No resources were modified.');
             }
             if ($action->resourceType === ResourceType::DATABASE
@@ -670,9 +762,10 @@ final readonly class CreateOnlyApply
                 return $this->databaseCloudFailure($action, $exception, $state, $clusterIds, $outcomes);
             }
 
-            if ($created->name !== $desired->name
-                || $created->type !== $desired->type->value
-                || $created->region !== $desired->region) {
+            $createdCluster = $created->cluster;
+            if ($createdCluster->name !== $desired->name
+                || $createdCluster->type !== $desired->type->value
+                || $createdCluster->region !== $desired->region) {
                 return $this->databaseCreateFailure(
                     $action,
                     'Database Cluster create returned an incompatible identity; the remote outcome requires inspection and explicit import.',
@@ -684,16 +777,24 @@ final readonly class CreateOnlyApply
             }
 
             try {
-                $state = $this->checkpointDatabaseResource(
+                $state = $this->checkpointDatabaseResources(
                     $blueprint,
                     $transaction,
                     $state,
-                    new StateResource($action->address, ResourceType::DATABASE_CLUSTER, $created->id),
+                    new StateResource($action->address, ResourceType::DATABASE_CLUSTER, $createdCluster->id),
+                    new StateResource(
+                        DerivedResource::defaultDatabaseAddress($action->address),
+                        ResourceType::DATABASE,
+                        $created->defaultDatabaseId,
+                        $action->address,
+                        StateOwnershipClassification::DERIVED,
+                        StateProvenance::CLUSTER_CREATE_RESPONSE,
+                    ),
                 );
-            } catch (StateStorageException $exception) {
+            } catch (InvalidArgumentException|StateStorageException $exception) {
                 return $this->databaseCreateFailure(
                     $action,
-                    'Remote Database Cluster was created but its local ownership checkpoint failed; inspect Cloud and use import before retrying.',
+                    'Remote Database Cluster and its default Database were created but their combined local ownership checkpoint failed; inspect Cloud and use import before retrying.',
                     $state,
                     $clusterIds,
                     $outcomes,
@@ -701,10 +802,10 @@ final readonly class CreateOnlyApply
                 );
             }
 
-            $clusterIds[$desired->name] = $created->id;
+            $clusterIds[$desired->name] = $createdCluster->id;
             $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
             try {
-                $this->databaseReadiness->wait($cloud, $created);
+                $this->databaseReadiness->wait($cloud, $createdCluster);
             } catch (CloudException $exception) {
                 $next = $this->firstDatabaseCreateForCluster($blueprint, $desired->name);
                 if ($next !== null) {
@@ -815,10 +916,22 @@ final readonly class CreateOnlyApply
         StateDocument $state,
         StateResource $resource,
     ): StateDocument {
+        return $this->checkpointDatabaseResources($blueprint, $transaction, $state, $resource);
+    }
+
+    private function checkpointDatabaseResources(
+        Blueprint $blueprint,
+        StateTransaction $transaction,
+        StateDocument $state,
+        StateResource ...$resources,
+    ): StateDocument {
         if ($state->organization === null) {
             $state = $state->withOrganization($blueprint->organization);
         }
-        return $transaction->save($state->withResource($resource));
+        foreach ($resources as $resource) {
+            $state = $state->withResource($resource);
+        }
+        return $transaction->save($state);
     }
 
     private function firstDatabaseCreateForCluster(Blueprint $blueprint, string $cluster): ?ResourceAddress
@@ -1136,6 +1249,31 @@ final readonly class CreateOnlyApply
         return false;
     }
 
+    private function assertClusterApprovalGraphUnchanged(ExecutionPlan $approved, ExecutionPlan $fresh): void
+    {
+        foreach ($fresh as $candidate) {
+            if ($candidate->operation !== PlanOperation::DELETE) {
+                continue;
+            }
+            $original = $this->actionAt($approved, $candidate->address);
+            if ($original === null || $original->operation !== PlanOperation::DELETE
+                || $original->remoteId !== $candidate->remoteId
+                || ($original->parent === null ? null : (string) $original->parent)
+                    !== ($candidate->parent === null ? null : (string) $candidate->parent)) {
+                throw new ApplyRefusedException('The locked destructive graph differs from the approved plan; no mutation was sent.');
+            }
+            if ($candidate->resourceType === ResourceType::DATABASE_CLUSTER) {
+                if (($original->parentLifecycleDependency === null ? null : (string) $original->parentLifecycleDependency->address)
+                    !== ($candidate->parentLifecycleDependency === null ? null : (string) $candidate->parentLifecycleDependency->address)
+                    || $original->databaseDependencies?->categories() !== $candidate->databaseDependencies?->categories()
+                    || $original->databaseDependencies?->missingRelationships !== $candidate->databaseDependencies?->missingRelationships
+                    || $original->databaseDependencies?->unknownRelationships !== $candidate->databaseDependencies?->unknownRelationships) {
+                    throw new ApplyRefusedException('The locked Database Cluster dependencies differ from the approved graph; no mutation was sent.');
+                }
+            }
+        }
+    }
+
     /**
      * @param list<ApplyResourceOutcome> $outcomes
      * @return array{state: StateDocument, outcomes: list<ApplyResourceOutcome>, failure: ApplyResult|null}
@@ -1410,6 +1548,218 @@ final readonly class CreateOnlyApply
             confirmed: true,
             stateCheckpointed: true,
         );
+        return ['state' => $state, 'outcomes' => $outcomes, 'failure' => null];
+    }
+
+    /**
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{state: StateDocument, outcomes: list<ApplyResourceOutcome>, failure: ApplyResult|null}
+     */
+    private function deleteDatabaseClusterResource(
+        Blueprint $blueprint,
+        PlanAction $action,
+        LaravelCloudDatabaseClusterDeletionClient $cloud,
+        StateTransaction $transaction,
+        StateDocument $state,
+        array $outcomes,
+    ): array {
+        $failure = function (DestructiveOutcome $kind, string $message, bool|null $deleted = false, bool $confirmed = false, ?CloudValidationException $validation = null, bool $uncertain = false) use ($action, $state, $outcomes): array {
+            $failed = [...$outcomes, new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $message, $validation, $kind, $deleted, $confirmed, false)];
+            return ['state' => $state, 'outcomes' => $failed, 'failure' => new ApplyResult(
+                $this->confirmedMutationCount($failed) > 0 || $uncertain ? ApplyStatus::PARTIAL_FAILURE : ApplyStatus::FAILED,
+                ...$failed,
+            )];
+        };
+
+        $managed = $state->find($action->address);
+        if ($managed === null || $managed->type !== ResourceType::DATABASE_CLUSTER
+            || $action->remoteId === null || $action->remoteId !== $managed->remoteId) {
+            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster State identity conflicts with the approved deletion.');
+        }
+        foreach ($state->resources() as $candidate) {
+            if ((string) $candidate->address !== (string) $managed->address && $candidate->remoteId === $managed->remoteId) {
+                return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster remote identity is owned by multiple State addresses.');
+            }
+        }
+        foreach ($blueprint->databaseClusters as $desired) {
+            if ($desired->name === $action->address->name) {
+                return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster is still declared in the locked Blueprint; no DELETE was sent.');
+            }
+        }
+
+        try {
+            $cluster = $cloud->databaseCluster($managed->remoteId);
+        } catch (CloudResourceNotFoundException) {
+            if ($state->childrenOf($managed->address) !== []) {
+                return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster is absent remotely but owned child State remains; parent State was retained.');
+            }
+            return $this->checkpointAbsentCluster($action, $transaction, $state, $outcomes, false, DestructiveOutcome::ALREADY_ABSENT, 'already absent; local State reconciled');
+        } catch (CloudException $exception) {
+            return $failure(DestructiveOutcome::UNCERTAIN, 'Locked exact Database Cluster rediscovery failed before mutation: ' . $exception->getMessage());
+        }
+        if ($cluster->id !== $managed->remoteId || !$cluster->childDiscoveryComplete) {
+            return $failure(DestructiveOutcome::REFUSED, 'Database Cluster deletion refused: exact child relationship discovery is incomplete or conflicted.');
+        }
+
+        $children = $state->childrenOf($managed->address);
+        $derived = array_values(array_filter($children, static fn (StateResource $child): bool => $child->type === ResourceType::DATABASE && $child->isDerived()));
+        $ordinary = array_values(array_filter($children, static fn (StateResource $child): bool => !$child->isDerived()));
+        if ($ordinary !== [] || count($derived) > 1) {
+            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster still has owned child State entries after ordinary child execution.');
+        }
+        try {
+            $listed = $cloud->databases($managed->remoteId);
+        } catch (CloudException $exception) {
+            return $failure(DestructiveOutcome::REFUSED, 'Database Cluster deletion refused: complete logical Database listing failed.');
+        }
+        $listedIds = array_map(static fn (CloudDatabase $database): string => $database->id, $listed);
+        if (count($listedIds) !== count(array_unique($listedIds))
+            || count($cluster->databaseIds) !== count(array_unique($cluster->databaseIds))
+            || array_values(array_diff($listedIds, $cluster->databaseIds)) !== []
+            || array_values(array_diff($cluster->databaseIds, $listedIds)) !== []) {
+            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster child relationship and complete listing disagree.');
+        }
+
+        if ($derived !== []) {
+            $child = $derived[0];
+            $approved = $action->parentLifecycleDependency;
+            if ($child->classification !== StateOwnershipClassification::DERIVED
+                || $child->provenance !== StateProvenance::CLUSTER_CREATE_RESPONSE
+                || $child->parent === null || (string) $child->parent !== (string) $managed->address
+                || $approved === null || (string) $approved->address !== (string) $child->address) {
+                return $failure(DestructiveOutcome::CONFLICT, 'Derived Database authorization no longer matches the approved parent lifecycle dependency.');
+            }
+            $matches = count(array_filter($listedIds, static fn (string $id): bool => $id === $child->remoteId));
+            if ($matches === 0) {
+                if ($listed !== []) {
+                    return $failure(DestructiveOutcome::CONFLICT, 'Derived Database is absent but a replacement or unmanaged Cluster child exists; no mutation was sent.');
+                }
+                try {
+                    $cloud->databaseWithDestructiveRelationships($managed->remoteId, $child->remoteId);
+                    return $failure(DestructiveOutcome::CONFLICT, 'Derived Database exact discovery conflicts with complete Cluster topology.');
+                } catch (CloudResourceNotFoundException) {
+                    $derivedAction = new PlanAction($child->address, ResourceType::DATABASE, PlanOperation::NO_CHANGE, '', $child->remoteId, $managed->address, $child->classification, $child->provenance, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY);
+                    $checkpoint = $this->checkpointAbsentDatabase($derivedAction, $transaction, $state, $outcomes, false, DestructiveOutcome::ALREADY_ABSENT, 'derived parent dependency already absent; local State reconciled');
+                    if ($checkpoint['failure'] !== null) {
+                        return $checkpoint;
+                    }
+                    $state = $checkpoint['state'];
+                    $outcomes = $checkpoint['outcomes'];
+                } catch (CloudException $exception) {
+                    return $failure(DestructiveOutcome::UNCERTAIN, 'Derived Database exact absence could not be proven.');
+                }
+            } elseif ($matches === 1 && count($listed) === 1) {
+                try {
+                    $remote = $cloud->databaseWithDestructiveRelationships($managed->remoteId, $child->remoteId);
+                } catch (CloudException $exception) {
+                    return $failure(DestructiveOutcome::UNCERTAIN, 'Derived Database exact destructive rediscovery failed before mutation.');
+                }
+                if ($remote->id !== $child->remoteId || $remote->relationshipClusterId !== $managed->remoteId
+                    || !$remote->destructiveRelationshipsComplete || $remote->unknownRelationships !== []
+                    || $remote->missingRelationships !== [] || $remote->environmentIds !== []) {
+                    return $failure(DestructiveOutcome::REFUSED, 'Derived Database deletion refused: exact parent or Environment attachment evidence is unsafe.');
+                }
+                $deleteException = null;
+                try {
+                    $cloud->deleteDatabase($managed->remoteId, $child->remoteId);
+                } catch (CloudException $exception) {
+                    $deleteException = $exception;
+                }
+                $verified = $this->databaseDeletionVerification->verifyAbsent($cloud, $managed->remoteId, $child->remoteId);
+                if ($verified !== 'absent') {
+                    $refused = $verified === 'present'
+                        && ($deleteException instanceof CloudAuthenticationException || $deleteException instanceof CloudValidationException);
+                    return $failure(
+                        $refused ? DestructiveOutcome::REFUSED : DestructiveOutcome::UNCERTAIN,
+                        $refused
+                            ? 'Derived Database deletion was refused and the exact child remains present.'
+                            : 'Derived Database deletion outcome is uncertain; exact absence was not proven.',
+                        $verified === 'failed' ? null : false,
+                        false,
+                        $deleteException instanceof CloudValidationException ? $deleteException : null,
+                        $verified === 'failed',
+                    );
+                }
+                $derivedAction = new PlanAction($child->address, ResourceType::DATABASE, PlanOperation::NO_CHANGE, '', $child->remoteId, $managed->address, $child->classification, $child->provenance, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY);
+                $checkpoint = $this->checkpointAbsentDatabase($derivedAction, $transaction, $state, $outcomes, true, DestructiveOutcome::DELETE_CONFIRMED, 'derived parent dependency deleted and confirmed');
+                if ($checkpoint['failure'] !== null) {
+                    return $checkpoint;
+                }
+                $state = $checkpoint['state'];
+                $outcomes = $checkpoint['outcomes'];
+            } else {
+                return $failure(DestructiveOutcome::CONFLICT, 'Derived Database identity is not the sole exact Cluster child; no DELETE was sent.');
+            }
+        } elseif ($listed !== []) {
+            return $failure(DestructiveOutcome::REFUSED, 'Database Cluster deletion blocked by an unmanaged logical Database child.');
+        }
+
+        $postChildFailure = function (DestructiveOutcome $kind, string $message, bool|null $deleted = false, bool $confirmed = false, ?CloudValidationException $validation = null, bool $uncertain = false) use ($action, $state, $outcomes): array {
+            $failed = [...$outcomes, new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $message, $validation, $kind, $deleted, $confirmed, false)];
+            return ['state' => $state, 'outcomes' => $failed, 'failure' => new ApplyResult(
+                $this->confirmedMutationCount($failed) > 0 || $uncertain ? ApplyStatus::PARTIAL_FAILURE : ApplyStatus::FAILED,
+                ...$failed,
+            )];
+        };
+
+        try {
+            $cluster = $this->databaseClusterDeletionReadiness->wait($cloud, $cloud->databaseCluster($managed->remoteId));
+            $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+        } catch (CloudException $exception) {
+            return $postChildFailure(DestructiveOutcome::REFUSED, 'Post-child Database Cluster readiness could not be proven: ' . $exception->getMessage());
+        }
+        $fresh = $this->actionAt($freshPlan, $action->address);
+        $dependencies = $fresh?->databaseDependencies;
+        if ($cluster->id !== $managed->remoteId || $fresh === null || $fresh->operation !== PlanOperation::DELETE
+            || $fresh->remoteId !== $managed->remoteId || $dependencies === null
+            || $dependencies->readiness() !== DatabaseDestructiveReadiness::SAFE
+            || $dependencies->ownedChildCount !== 0 || $dependencies->derivedParentDependencyCount !== 0
+            || $dependencies->unmanagedChildCount !== 0 || $dependencies->ownershipConflict
+            || $dependencies->snapshotCount !== 0 || $dependencies->retainedRecovery
+            || !$dependencies->snapshotDiscoveryComplete || !$dependencies->recoveryEvidenceComplete
+            || $dependencies->lifecycleReadiness !== DatabaseClusterLifecycleReadiness::ELIGIBLE) {
+            return $postChildFailure(DestructiveOutcome::REFUSED, 'Post-child Database Cluster destructive rediscovery is not completely safe; no parent DELETE was sent.');
+        }
+
+        $deleteException = null;
+        try {
+            $cloud->deleteDatabaseCluster($managed->remoteId);
+        } catch (CloudException $exception) {
+            $deleteException = $exception;
+        }
+        $verified = $this->databaseClusterDeletionVerification->verifyAbsent($cloud, $managed->remoteId);
+        if ($verified === 'absent') {
+            return $this->checkpointAbsentCluster($action, $transaction, $state, $outcomes, $deleteException === null, $deleteException instanceof CloudResourceNotFoundException ? DestructiveOutcome::ALREADY_ABSENT : DestructiveOutcome::DELETE_CONFIRMED, $deleteException instanceof CloudResourceNotFoundException ? 'already absent and confirmed' : 'deleted and confirmed');
+        }
+        if ($verified === 'present'
+            && ($deleteException instanceof CloudAuthenticationException || $deleteException instanceof CloudValidationException)) {
+            return $postChildFailure(
+                DestructiveOutcome::REFUSED,
+                'Database Cluster deletion was refused and the exact Cluster remains present.',
+                false,
+                false,
+                $deleteException instanceof CloudValidationException ? $deleteException : null,
+            );
+        }
+        return $postChildFailure(DestructiveOutcome::UNCERTAIN, 'Database Cluster deletion outcome is uncertain; exact absence was not proven.', $verified === 'unknown' ? null : false, false, $deleteException instanceof CloudValidationException ? $deleteException : null, true);
+    }
+
+    /**
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{state: StateDocument, outcomes: list<ApplyResourceOutcome>, failure: ApplyResult|null}
+     */
+    private function checkpointAbsentCluster(PlanAction $action, StateTransaction $transaction, StateDocument $state, array $outcomes, bool $deleteSent, DestructiveOutcome $kind, string $message): array
+    {
+        if ($state->childrenOf($action->address) !== []) {
+            throw new ApplyRefusedException('Database Cluster State cannot be removed while owned child State remains.');
+        }
+        try {
+            $state = $transaction->save($state->withoutResource($action->address));
+        } catch (StateStorageException $exception) {
+            $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, 'Database Cluster is absent remotely, but State checkpoint failed: ' . $exception->getMessage(), destructiveOutcome: DestructiveOutcome::STATE_CHECKPOINT_FAILED, deleted: $deleteSent, confirmed: true, stateCheckpointed: false);
+            return ['state' => $state, 'outcomes' => $outcomes, 'failure' => new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes)];
+        }
+        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::DELETED, $message, destructiveOutcome: $kind, deleted: $deleteSent, confirmed: true, stateCheckpointed: true);
         return ['state' => $state, 'outcomes' => $outcomes, 'failure' => null];
     }
 
