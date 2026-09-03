@@ -4,27 +4,34 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-09-03
+
 ### Added
 
-- Added explicitly approved, guarded Database Cluster deletion with ordinary-child-first checkpoints, exact derived-child provenance authorization, complete topology/snapshot/recovery/lifecycle revalidation, a single non-retried parent DELETE, and bounded exact-ID absence verification.
-- Database Cluster plans now disclose the derived parent-lifecycle dependency in human and typed JSON output without remote identities or Cloud names; legacy, imported, released, and unmanaged children remain blockers.
-- Added canonical State V2 with typed `managed` and `derived` ownership classifications and typed provenance for future Cluster-create-derived logical Databases.
-- Added deterministic, read-only V1-to-V2 in-memory migration; existing identities and parents remain ordinary managed resources, and canonical V2 is written only after a material State mutation.
-- Database Cluster CREATE now validates exactly one default Database relationship and atomically checkpoints its exact identity at the reserved `database.<cluster>.__derived_default` address with typed create-response provenance before creating declared Databases.
-- Added guarded DELETE execution for exact State-owned logical Databases omitted from the Blueprint when parent identity and reverse Environment attachment discovery are complete and safe.
-- Added read-only, Cluster-scoped snapshot discovery and conservative Database Cluster lifecycle readiness covering complete pagination, retained recovery configuration, and lifecycle status.
-- Database Cluster destructive-readiness now recognizes an exactly proven Cluster-create-derived default Database as a typed informational parent-lifecycle dependency while keeping ordinary owned children, unmanaged children, and conflicts distinct.
+- Canonical State V2 with typed `managed` and `derived` ownership classifications, typed provenance, deterministic read-only V1 migration, and V2 persistence on the next material State mutation.
+- Database Cluster CREATE provenance capture for the exact Cloud-created default logical Database at the reserved derived address.
+- Explicitly approved guarded Database Cluster deletion with ordinary logical Database actions executed and checkpointed child-first, followed by the derived parent-lifecycle dependency and then the Cluster.
+- Typed derived parent-lifecycle dependency metadata in human and JSON plans without remote identities or Cloud names.
+- Exact already-absent recovery for confirmed logical Database and Database Cluster absence, plus bounded exact-ID Cluster absence verification.
+- Sanitized destructive diagnostics that distinguish missing, unknown, and conflicting readiness evidence.
 
-### Security
+### Fixed
 
-- Derived Cluster lifecycle planning now accepts omitted parent metadata on scoped Database-list rows when exact State provenance and complete Cluster/list membership agree; explicit contradictory parent evidence remains a conflict, and exact destructive detail must still prove the parent and empty attachments before mutation.
-- Derived resources require recognized provenance, participate in the existing parent/child ownership graph, and fail closed in planning; no provenance is inferred from resource names or later Cloud discovery.
-- Default-child capture never uses the Cloud Database name, rejects malformed or ambiguous CREATE evidence, and does not retroactively classify legacy or imported Cluster children.
-- Derived parent dependencies require exact State provenance, exact parent ownership, complete matching Cluster and Database discovery, and conflict-free identity evidence. They remain non-actionable outside an approved guarded Cluster lifecycle; releasing their State ownership makes the live child unmanaged again.
-- Logical Database deletion requires explicit approval, locked Blueprint/State/Cloud replanning, an exact State-owned Cluster and Database identity, complete empty attachments, at most one DELETE transmission, authoritative exact-ID absence, and an immediate atomic State checkpoint.
-- Destructive logical Database discovery explicitly requests the authoritative parent Database and reverse Environment relationships; missing or malformed relationship data remains non-executable.
-- Automatic Database detach remains unsupported; `state:unmanage` remains local-only.
-- Any discovered Database snapshot blocks Cluster destructive readiness, incomplete snapshot or lifecycle evidence remains unknown, and snapshots are never automatically deleted.
+- Normalized numeric Laravel Cloud resource identifiers at the HTTP boundary without weakening exact identity matching.
+- Scoped Database-list rows may omit redundant parent metadata without creating a false derived ownership conflict; explicit contradictory parent evidence remains a conflict.
+
+### Safety
+
+- Guarded deletion requires exact State identity and, for the derived default, exact `cluster_create_response` provenance; names and default-looking topology never grant authorization.
+- Every confirmed child absence is checkpointed before parent work. Cloud deletion is not claimed to be transactional or cascading.
+- Potentially destructive requests are transmitted at most once; uncertain mutation outcomes are never retried automatically and retain State unless exact absence is proven.
+- Cluster topology, complete logical Database enumeration, snapshots, recovery configuration, and lifecycle are freshly rediscovered after child deletion and before the Cluster DELETE.
+- Cluster deletion requires zero remaining children, zero snapshots, safe disabled retained recovery, and an explicitly eligible lifecycle state.
+- Legacy, imported, released, and otherwise unmanaged default Databases remain blockers. `state:unmanage` is local-only and removes derived deletion authorization.
+
+### Verified
+
+- The guarded Database Cluster lifecycle was validated against a disposable real Laravel Cloud resource: two ordinary children, the derived default, and the Cluster were each deleted, exactly verified absent, and checkpointed in order; the resulting State and plan converged without exposing Cloud identifiers or credentials.
 
 ## [0.1.0-alpha.7] - 2026-09-01
 
