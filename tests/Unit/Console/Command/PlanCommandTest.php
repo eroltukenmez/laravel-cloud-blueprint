@@ -414,7 +414,8 @@ final class PlanCommandTest extends TestCase
         self::assertStringContainsString('Structural readiness: satisfied.', $text->getDisplay());
         self::assertStringContainsString('Derived parent dependencies: 1.', $text->getDisplay());
         self::assertStringContainsString('eligible only within guarded parent destruction', $text->getDisplay());
-        self::assertStringContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
+        self::assertStringContainsString('Will be deleted only during this approved guarded parent lifecycle.', $text->getDisplay());
+        self::assertStringNotContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
 
         $json = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
         self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
@@ -428,6 +429,13 @@ final class PlanCommandTest extends TestCase
                 && ($action['resource'] ?? null) === 'database_cluster.primary',
         ));
         self::assertCount(1, $clusterActions);
+        self::assertSame([
+            'address' => 'database.primary.__derived_default',
+            'classification' => 'derived',
+            'provenance' => 'cluster_create_response',
+            'destructive_role' => 'parent_lifecycle_dependency',
+            'planned_lifecycle_effect' => 'delete_during_guarded_parent_lifecycle',
+        ], $clusterActions[0]['parent_lifecycle_dependency']);
         $clusterAction = $clusterActions[0];
         self::assertSame('satisfied', $clusterAction['structural_readiness']);
         self::assertSame(1, $clusterAction['derived_parent_dependency_count']);
@@ -462,7 +470,7 @@ final class PlanCommandTest extends TestCase
         self::assertStringContainsString('Destructive readiness: blocked', $text->getDisplay());
         self::assertStringContainsString('guarded deletion is blocked', $text->getDisplay());
         self::assertStringNotContainsString('Database DELETE execution is not supported', $text->getDisplay());
-        self::assertStringContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
+        self::assertStringNotContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
         self::assertStringContainsString('environment_attachment', $text->getDisplay());
 
         $json = $this->tester(self::validBlueprint(), cloud: new PlanDatabaseCloudClient(), state: $state);
@@ -490,7 +498,7 @@ final class PlanCommandTest extends TestCase
         self::assertSame([], $database['missing_dependency_relationships']);
         self::assertIsArray($databaseCluster);
         self::assertIsString($databaseCluster['reason']);
-        self::assertStringContainsString('execution remains unsupported', $databaseCluster['reason']);
+        self::assertStringContainsString('guarded deletion is blocked', $databaseCluster['reason']);
 
         foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
             self::assertStringNotContainsString('cluster-secret-id', $output);
@@ -561,7 +569,7 @@ final class PlanCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
         self::assertStringContainsString('database_snapshot', $text->getDisplay());
         self::assertStringContainsString('Discovered snapshots: 1 (1 manual, 0 scheduled).', $text->getDisplay());
-        self::assertStringContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
+        self::assertStringNotContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
 
         $json = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
         self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));

@@ -1004,13 +1004,14 @@ final readonly class CreatePlan
                     $hasDesiredChild
                         ? 'This Database Cluster is absent from the blueprint but still owns a desired logical Database. Parent deletion is structurally inconsistent.'
                         : match ($dependencies?->readiness()->value) {
-                            'safe' => 'This State-owned Database Cluster is absent from the blueprint and all implemented structural, snapshot/recovery, and lifecycle prerequisites are satisfied. Deletion execution remains unsupported.',
-                            'blocked' => 'This State-owned Database Cluster is absent from the blueprint, but deletion is blocked by discovered dependencies or lifecycle state. Deletion execution remains unsupported.',
-                            default => 'This State-owned Database Cluster is absent from the blueprint, but one or more destructive prerequisites are incomplete or unknown. Deletion execution remains unsupported.',
+                            'safe' => 'This State-owned Database Cluster is absent from the blueprint and is eligible for guarded child-first deletion.',
+                            'blocked' => 'This State-owned Database Cluster is absent from the blueprint, but guarded deletion is blocked by discovered dependencies or lifecycle state.',
+                            default => 'This State-owned Database Cluster is absent from the blueprint, but guarded deletion readiness is unknown because one or more prerequisites are incomplete.',
                         },
                     $resource->remoteId,
                     null,
                     $dependencies,
+                    ...array_filter([$this->parentLifecycleDependency($resource, $state)]),
                 );
             }
             if ($resource->type === ResourceType::DATABASE && !isset($desiredDatabases[$address])) {
@@ -1156,6 +1157,11 @@ final readonly class CreatePlan
     ): DatabaseDependencies {
         try {
             $cluster = $cloud->databaseCluster($resource->remoteId);
+        } catch (CloudResourceNotFoundException) {
+            if ($state->childrenOf($resource->address) === []) {
+                return new DatabaseDependencies(0, 0, 0, false, true);
+            }
+            return new DatabaseDependencies(0, 0, 0, false, false, [], ['exact_database_cluster']);
         } catch (CloudException) {
             return new DatabaseDependencies(0, 0, 0, false, false, [], ['exact_database_cluster']);
         }
@@ -1530,7 +1536,7 @@ final readonly class CreatePlan
         ?string $remoteId = null,
         ?ResourceAddress $parent = null,
         ?DatabaseDependencies $dependencies = null,
-        PlanChange ...$changes,
+        PlanChange|DatabaseParentLifecycleDependency ...$details,
     ): PlanAction {
         return new PlanAction(
             new ResourceAddress(ResourceType::DATABASE_CLUSTER, $name),
@@ -1538,7 +1544,26 @@ final readonly class CreatePlan
             $operation,
             $reason,
             $remoteId,
-            ...array_values(array_filter([$parent, $dependencies, ...$changes])),
+            ...array_values(array_filter([$parent, $dependencies, ...$details])),
+        );
+    }
+
+    private function parentLifecycleDependency(StateResource $cluster, StateDocument $state): ?DatabaseParentLifecycleDependency
+    {
+        $derived = array_values(array_filter(
+            $state->childrenOf($cluster->address),
+            static fn (StateResource $child): bool => $child->type === ResourceType::DATABASE && $child->isDerived(),
+        ));
+        if (count($derived) !== 1
+            || $derived[0]->provenance !== StateProvenance::CLUSTER_CREATE_RESPONSE) {
+            return null;
+        }
+
+        return new DatabaseParentLifecycleDependency(
+            $derived[0]->address,
+            $derived[0]->classification,
+            $derived[0]->provenance,
+            DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY,
         );
     }
 

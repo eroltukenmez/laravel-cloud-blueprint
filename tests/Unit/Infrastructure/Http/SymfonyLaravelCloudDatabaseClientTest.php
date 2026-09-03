@@ -453,6 +453,55 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         self::assertSame(1, $calls);
     }
 
+    public function testDatabaseClusterDeleteTargetsExactIdWithNoBodyAndAcceptsOnly204(): void
+    {
+        $response = new MockResponse('', ['http_code' => 204]);
+        $this->client([$response])->deleteDatabaseCluster('cluster/exact');
+
+        self::assertSame('https://cloud.laravel.com/api/databases/clusters/cluster%2Fexact', $response->getRequestUrl());
+        self::assertSame('DELETE', $response->getRequestMethod());
+        self::assertArrayNotHasKey('body', $response->getRequestOptions());
+
+        $this->expectException(CloudResponseException::class);
+        $this->client([new MockResponse('{}', ['http_code' => 200])])->deleteDatabaseCluster('cluster-1');
+    }
+
+    public function testDatabaseClusterDeleteIsNeverRetriedAfterTransportFailure(): void
+    {
+        $calls = 0;
+        $http = new MockHttpClient(static function () use (&$calls): never {
+            ++$calls;
+            throw new TransportException('connection reset');
+        });
+        try {
+            (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))->deleteDatabaseCluster('cluster-1');
+            self::fail('Expected uncertain Database Cluster DELETE failure.');
+        } catch (CloudTransportException $exception) {
+            self::assertSame('DELETE', $exception->method);
+        }
+        self::assertSame(1, $calls);
+    }
+
+    public function testDatabaseClusterDeleteMapsDocumentedRefusalAndAbsenceResponses(): void
+    {
+        foreach ([
+            403 => CloudAuthenticationException::class,
+            404 => CloudResourceNotFoundException::class,
+            422 => CloudValidationException::class,
+            500 => CloudApiException::class,
+        ] as $status => $expected) {
+            try {
+                $this->client([new MockResponse('{"message":"safe failure"}', ['http_code' => $status])])
+                    ->deleteDatabaseCluster('cluster-1');
+                self::fail('Expected Database Cluster DELETE failure.');
+            } catch (CloudApiException $exception) {
+                self::assertInstanceOf($expected, $exception);
+                self::assertSame('DELETE', $exception->method);
+                self::assertSame('/databases/clusters/cluster-1', $exception->path);
+            }
+        }
+    }
+
     public function testLaravelMysqlClusterMapsOnlyTypedSafeFields(): void
     {
         $cluster = $this->client([new MockResponse(self::detail(self::mysqlResource('cluster-1')))])

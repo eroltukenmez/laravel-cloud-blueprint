@@ -185,7 +185,7 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame('size', $action->changes[0]->field);
     }
 
-    public function testOwnedDatabaseResourcesAbsentFromBlueprintArePlannedChildFirstAndClusterRemainsNonExecutable(): void
+    public function testOwnedDatabaseResourcesAbsentFromBlueprintArePlannedChildFirst(): void
     {
         $plan = self::plan(self::blueprint(database: false), self::matchingCloud(), self::databaseState());
 
@@ -196,7 +196,7 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame('database_cluster.primary', (string) $actions[1]->address);
         self::assertSame('database_cluster.primary', (string) $actions[0]->parent);
         self::assertStringNotContainsString('not supported', $actions[0]->reason);
-        self::assertStringContainsString('execution remains unsupported', $actions[1]->reason);
+        self::assertStringContainsString('guarded deletion is blocked', $actions[1]->reason);
         self::assertNull(self::findAction($plan, 'database_attachment.production'));
     }
 
@@ -384,7 +384,7 @@ final class DatabasePlanningTest extends TestCase
         $dependencies = $cluster->databaseDependencies;
 
         self::assertSame(PlanOperation::DELETE, $cluster->operation);
-        self::assertStringContainsString('execution remains unsupported', $cluster->reason);
+        self::assertStringContainsString('eligible for guarded child-first deletion', $cluster->reason);
         self::assertNotNull($dependencies);
         self::assertSame(1, $dependencies->derivedParentDependencyCount);
         self::assertSame(0, $dependencies->ownedChildCount);
@@ -1064,7 +1064,7 @@ final class DatabasePlanningTest extends TestCase
         self::addToAssertionCount(1);
     }
 
-    public function testSafeClusterDeleteReadinessStillCannotExecute(): void
+    public function testSafeClusterDeleteReadinessCanExecute(): void
     {
         $plan = new ExecutionPlan(new PlanAction(
             new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
@@ -1075,8 +1075,8 @@ final class DatabasePlanningTest extends TestCase
             new DatabaseDependencies(0, 0, 0, false, true),
         ));
 
-        $this->expectException(ApplyRefusedException::class);
         self::apply()->assertSupported($plan);
+        self::addToAssertionCount(1);
     }
 
     /** @return iterable<string, array{PlanAction, ResourceType}> */

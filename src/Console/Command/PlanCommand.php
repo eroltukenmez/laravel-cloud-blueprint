@@ -163,7 +163,11 @@ final class PlanCommand extends Command
                     '  Destructive readiness: %s%s.',
                     $action->databaseDependencies->readiness()->value,
                     $action->resourceType === ResourceType::DATABASE_CLUSTER
-                        ? ' (Database Cluster DELETE execution is not supported)'
+                        ? match ($action->databaseDependencies->readiness()->value) {
+                            'safe' => ' (eligible for guarded child-first deletion)',
+                            'blocked' => ' (guarded deletion is blocked)',
+                            default => ' (guarded deletion is not eligible)',
+                        }
                         : match ($action->databaseDependencies->readiness()->value) {
                             'safe' => ' (eligible for guarded deletion)',
                             'blocked' => ' (guarded deletion is blocked)',
@@ -198,6 +202,11 @@ final class PlanCommand extends Command
                         '  Derived parent dependencies: %d.',
                         $action->databaseDependencies->derivedParentDependencyCount,
                     ));
+                    if ($action->parentLifecycleDependency !== null) {
+                        $output->writeln('  Derived parent dependency:');
+                        $output->writeln('    ' . (string) $action->parentLifecycleDependency->address);
+                        $output->writeln('    Will be deleted only during this approved guarded parent lifecycle.');
+                    }
                     $output->writeln($action->databaseDependencies->snapshotDiscoveryComplete
                         ? sprintf(
                             '  Discovered snapshots: %d (%d manual, %d scheduled).',
@@ -284,6 +293,13 @@ final class PlanCommand extends Command
                         'cluster_lifecycle_readiness' => $clusterDependencies?->lifecycleReadiness->value,
                         'structural_readiness' => $clusterDependencies?->structuralReadiness()->value,
                         'derived_parent_dependency_count' => $clusterDependencies?->derivedParentDependencyCount,
+                        'parent_lifecycle_dependency' => $action->parentLifecycleDependency === null ? null : [
+                            'address' => (string) $action->parentLifecycleDependency->address,
+                            'classification' => $action->parentLifecycleDependency->classification->value,
+                            'provenance' => $action->parentLifecycleDependency->provenance->value,
+                            'destructive_role' => $action->parentLifecycleDependency->destructiveRole->value,
+                            'planned_lifecycle_effect' => $action->parentLifecycleDependency->plannedLifecycleEffect,
+                        ],
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,

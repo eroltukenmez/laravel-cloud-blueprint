@@ -19,6 +19,7 @@ final readonly class PlanAction
     public ?StateOwnershipClassification $ownershipClassification;
     public ?StateProvenance $provenance;
     public ?DatabaseDestructiveRole $destructiveRole;
+    public ?DatabaseParentLifecycleDependency $parentLifecycleDependency;
 
     public function __construct(
         public ResourceAddress $address,
@@ -26,7 +27,7 @@ final readonly class PlanAction
         public PlanOperation $operation,
         public string $reason,
         public ?string $remoteId = null,
-        PlanChange|ResourceAddress|EnvironmentDependencies|DatabaseDependencies|StateOwnershipClassification|StateProvenance|DatabaseDestructiveRole ...$details,
+        PlanChange|ResourceAddress|EnvironmentDependencies|DatabaseDependencies|StateOwnershipClassification|StateProvenance|DatabaseDestructiveRole|DatabaseParentLifecycleDependency ...$details,
     ) {
         $parent = null;
         $changes = [];
@@ -35,6 +36,7 @@ final readonly class PlanAction
         $ownershipClassification = null;
         $provenance = null;
         $destructiveRole = null;
+        $parentLifecycleDependency = null;
         foreach ($details as $detail) {
             if ($detail instanceof ResourceAddress) {
                 if ($parent !== null) {
@@ -66,6 +68,11 @@ final readonly class PlanAction
                     throw new \InvalidArgumentException('A plan action must not have multiple destructive roles.');
                 }
                 $destructiveRole = $detail;
+            } elseif ($detail instanceof DatabaseParentLifecycleDependency) {
+                if ($parentLifecycleDependency !== null) {
+                    throw new \InvalidArgumentException('A plan action must not have multiple parent lifecycle dependencies.');
+                }
+                $parentLifecycleDependency = $detail;
             } else {
                 $changes[] = $detail;
             }
@@ -86,6 +93,7 @@ final readonly class PlanAction
         $this->ownershipClassification = $ownershipClassification;
         $this->provenance = $provenance;
         $this->destructiveRole = $destructiveRole;
+        $this->parentLifecycleDependency = $parentLifecycleDependency;
         $this->changes = $changes;
     }
 

@@ -7,6 +7,7 @@ namespace LaravelCloudBlueprint\Infrastructure\Http;
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClusterDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseLifecycleClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
@@ -47,7 +48,7 @@ use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
-final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudDatabaseLifecycleClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient
+final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudDatabaseLifecycleClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient, LaravelCloudDatabaseClusterDeletionClient
 {
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string DATABASE_DESTRUCTIVE_INCLUDES = 'database,environments';
@@ -450,6 +451,11 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
             rawurlencode($databaseId),
         );
         $this->delete($path);
+    }
+
+    public function deleteDatabaseCluster(string $clusterId): void
+    {
+        $this->delete(sprintf('/databases/clusters/%s', rawurlencode($clusterId)));
     }
 
     /**
