@@ -27,6 +27,7 @@ final readonly class DerivedDatabaseObservationEvidence
         public EvidenceStatus $relationshipCompleteness,
         public bool $ownershipConflict = false,
         public bool $blueprintAddressCollision = false,
+        public bool $relationshipConflict = false,
     ) {
         $this->databases = $databases;
         $this->replacementCandidates = $replacementCandidates;

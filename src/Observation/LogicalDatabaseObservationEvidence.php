@@ -17,6 +17,7 @@ final readonly class LogicalDatabaseObservationEvidence
         array $databases,
         public EvidenceStatus $completeness,
         public bool $ownershipConflict = false,
+        public bool $observeRelationships = true,
     ) {
         $this->databases = $databases;
     }

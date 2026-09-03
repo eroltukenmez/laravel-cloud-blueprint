@@ -44,6 +44,9 @@ final readonly class DerivedDatabaseObservationFactory
                 && $exact[0]->relationshipClusterId !== $parent->remoteId))) {
             return $this->result($derived, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::DERIVED, ReconciliationStatus::UNSUPPORTED);
         }
+        if ($evidence->relationshipConflict) {
+            return $this->result($derived, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::DERIVED, ReconciliationStatus::UNSUPPORTED);
+        }
         if ($evidence->listCompleteness === EvidenceStatus::INCOMPLETE
             || $evidence->relationshipCompleteness === EvidenceStatus::INCOMPLETE) {
             return $this->unknown($derived);

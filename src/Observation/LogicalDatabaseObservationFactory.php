@@ -49,7 +49,7 @@ final readonly class LogicalDatabaseObservationFactory
             if (count($matches) !== 1) {
                 return $this->result($address, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::UNMANAGED, ReconciliationStatus::BLOCKED);
             }
-            return $this->present($address, $matches[0], $parentId, OwnershipStatus::UNMANAGED);
+            return $this->present($address, $matches[0], $parentId, OwnershipStatus::UNMANAGED, $evidence->observeRelationships);
         }
 
         $exact = array_values(array_filter(
@@ -75,7 +75,7 @@ final readonly class LogicalDatabaseObservationFactory
         if ($exact[0]->name !== $desired->name) {
             return $this->result($address, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED, ReconciliationStatus::UNSUPPORTED);
         }
-        return $this->present($address, $exact[0], $parentId, OwnershipStatus::MANAGED);
+        return $this->present($address, $exact[0], $parentId, OwnershipStatus::MANAGED, $evidence->observeRelationships);
     }
 
     private function validState(
@@ -96,10 +96,14 @@ final readonly class LogicalDatabaseObservationFactory
         CloudDatabase $remote,
         string $parentId,
         OwnershipStatus $ownership,
+        bool $observeRelationships,
     ): ResourceObservation {
         if ($remote->clusterId !== $parentId
             || ($remote->relationshipClusterId !== null && $remote->relationshipClusterId !== $parentId)) {
             return $this->result($address, ObservationKind::IDENTITY_CONFLICT, $ownership, ReconciliationStatus::UNSUPPORTED);
+        }
+        if (!$observeRelationships) {
+            return $this->result($address, ObservationKind::IN_SYNC, $ownership, ReconciliationStatus::NOT_APPLICABLE);
         }
         if (!$remote->destructiveRelationshipsComplete
             || $remote->missingRelationships !== []

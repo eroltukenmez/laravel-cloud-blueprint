@@ -528,8 +528,8 @@ final class DatabasePlanningTest extends TestCase
         );
         $cloud->failDatabaseList = true;
 
-        $action = self::action(self::plan(self::blueprint(database: false), $cloud, $state),
-            'database_cluster.primary');
+        $plan = self::plan(self::blueprint(database: false), $cloud, $state);
+        $action = self::action($plan, 'database_cluster.primary');
         $dependencies = $action->databaseDependencies;
 
         self::assertNotNull($dependencies);
@@ -538,6 +538,49 @@ final class DatabasePlanningTest extends TestCase
         self::assertContains('databases', $dependencies->missingRelationships);
         self::assertSame(DatabaseClusterStructuralReadiness::UNKNOWN, $dependencies->structuralReadiness());
         self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $dependencies->readiness());
+
+        $derived = self::action($plan, 'database.primary.__derived_default');
+        self::assertSame(PlanOperation::UNSUPPORTED, $derived->operation);
+        self::assertSame(
+            'Derived logical Database discovery is incomplete under its exact State-owned Cluster; automatic recreation or adoption is forbidden.',
+            $derived->reason,
+        );
+        self::assertStringNotContainsString('missing', $derived->reason);
+    }
+
+    public function testDerivedRelationshipDiscoveryIncompleteIsNotReportedAsMissing(): void
+    {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(
+            StateVersion::V2,
+            0,
+            'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default'),
+                ResourceType::DATABASE,
+                'database-derived',
+                $clusterAddress,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ),
+        );
+        $cloud = self::matchingCloud(
+            self::mysqlCluster(databaseIds: ['database-derived'], childDiscoveryComplete: false),
+            [new CloudDatabase('database-derived', 'cluster-1', 'ignored', 'cluster-1')],
+        );
+
+        $derived = self::action(
+            self::plan(self::blueprint(database: false), $cloud, $state),
+            'database.primary.__derived_default',
+        );
+
+        self::assertSame(PlanOperation::UNSUPPORTED, $derived->operation);
+        self::assertSame(
+            'Derived logical Database discovery is incomplete under its exact State-owned Cluster; automatic recreation or adoption is forbidden.',
+            $derived->reason,
+        );
+        self::assertStringNotContainsString('missing', $derived->reason);
     }
 
     /** @return iterable<string, array{list<CloudDatabase>, string}> */
