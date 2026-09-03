@@ -32,10 +32,6 @@ final readonly class EnvironmentObservationFactory
             || $evidence->completeness === EvidenceStatus::INCOMPLETE) {
             return $this->unknown($address, $managed === null ? OwnershipStatus::UNKNOWN : OwnershipStatus::MANAGED);
         }
-        if (!$evidence->parent->authorizesChildren() && $managed === null) {
-            return $this->unknown($address, OwnershipStatus::NONE);
-        }
-
         $parentId = $evidence->parent->remoteId;
         if ($parentId === null) {
             return $this->unknown($address, $managed === null ? OwnershipStatus::UNKNOWN : OwnershipStatus::MANAGED);
@@ -48,6 +44,9 @@ final readonly class EnvironmentObservationFactory
                     && $environment->name === $desired->name,
             ));
             if ($matches === []) {
+                if (!$evidence->parent->authorizesChildren()) {
+                    return $this->unknown($address, OwnershipStatus::NONE);
+                }
                 return $this->observation(
                     $address,
                     ObservationKind::DESIRED_RESOURCE_MISSING,

@@ -52,6 +52,21 @@ final class EnvironmentObservationFactoryTest extends TestCase
         self::assertObservation($observation, ObservationKind::UNKNOWN, OwnershipStatus::NONE, ReconciliationStatus::BLOCKED, EvidenceStatus::INCOMPLETE);
     }
 
+    public function testExistingUnmanagedEnvironmentCanStillBeComparedUnderUnmanagedParent(): void
+    {
+        $observation = $this->factory->create(
+            self::desired(),
+            null,
+            new EnvironmentObservationEvidence(
+                EnvironmentParentEvidence::resolved(self::parentAddress(), 'app-1', OwnershipStatus::UNMANAGED),
+                [self::remote('other-id')],
+                EvidenceStatus::COMPLETE,
+            ),
+        );
+
+        self::assertObservation($observation, ObservationKind::IN_SYNC, OwnershipStatus::UNMANAGED, ReconciliationStatus::NOT_APPLICABLE);
+    }
+
     public function testManagedEnvironmentIsInSync(): void
     {
         $observation = $this->factory->create(self::desired(), self::managed(), self::evidence(self::remote()));

@@ -11,23 +11,27 @@ use LaravelCloudBlueprint\Planning\ResourceType;
 
 final readonly class EnvironmentVariableObservationFactory
 {
+    public function createWithoutValues(
+        ResourceAddress $address,
+        EnvironmentVariableObservationEvidence $evidence,
+    ): ResourceObservation {
+        $this->requireVariableAddress($address);
+        if ($evidence->status === EnvironmentVariableEvidenceStatus::AVAILABLE) {
+            throw new InvalidArgumentException('Available variable evidence requires value comparison.');
+        }
+
+        return $this->unknown($address);
+    }
+
     public function create(
         ResourceAddress $address,
         VariableDefinition $desired,
         string $desiredValue,
         EnvironmentVariableObservationEvidence $evidence,
     ): ResourceObservation {
-        if ($address->type !== ResourceType::VARIABLE) {
-            throw new InvalidArgumentException('Environment Variable observations require a variable address.');
-        }
+        $this->requireVariableAddress($address);
         if ($evidence->status !== EnvironmentVariableEvidenceStatus::AVAILABLE) {
-            return new ResourceObservation(
-                $address,
-                ObservationKind::UNKNOWN,
-                OwnershipStatus::NONE,
-                ReconciliationStatus::BLOCKED,
-                EvidenceStatus::INCOMPLETE,
-            );
+            return $this->unknown($address);
         }
 
         $variables = $evidence->variables();
@@ -68,6 +72,24 @@ final readonly class EnvironmentVariableObservationFactory
             EvidenceStatus::COMPLETE,
             new ChangedFields('value'),
             ReasonCode::ENVIRONMENT_VARIABLE_VALUE_DIFFERENCE,
+        );
+    }
+
+    private function requireVariableAddress(ResourceAddress $address): void
+    {
+        if ($address->type !== ResourceType::VARIABLE) {
+            throw new InvalidArgumentException('Environment Variable observations require a variable address.');
+        }
+    }
+
+    private function unknown(ResourceAddress $address): ResourceObservation
+    {
+        return new ResourceObservation(
+            $address,
+            ObservationKind::UNKNOWN,
+            OwnershipStatus::NONE,
+            ReconciliationStatus::BLOCKED,
+            EvidenceStatus::INCOMPLETE,
         );
     }
 }

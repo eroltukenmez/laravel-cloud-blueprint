@@ -98,6 +98,18 @@ final class ApplicationObservationFactoryTest extends TestCase
         self::assertObservation($observation, ObservationKind::UNKNOWN, OwnershipStatus::MANAGED, ReconciliationStatus::BLOCKED, EvidenceStatus::INCOMPLETE);
     }
 
+    public function testKnownRegionDifferenceWinsWhenRepositoryIsUnavailable(): void
+    {
+        $observation = $this->factory->create(
+            self::desired(),
+            self::managed(),
+            self::evidence(self::remote(region: 'us-east-1', repository: null)),
+        );
+
+        self::assertObservation($observation, ObservationKind::CONFIGURATION_DIFFERENCE, OwnershipStatus::MANAGED, ReconciliationStatus::UNSUPPORTED);
+        self::assertSame(['region'], $observation->changedFields->values());
+    }
+
     public function testManagedIdentityIsMissingOnlyAfterCompleteDiscovery(): void
     {
         $observation = $this->factory->create(self::desired(), self::managed(), self::evidence());

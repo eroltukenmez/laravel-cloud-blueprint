@@ -112,15 +112,15 @@ final readonly class ApplicationObservationFactory
         CloudApplication $remote,
         OwnershipStatus $ownership,
     ): ResourceObservation {
-        if ($remote->repository === null) {
-            return $this->unknown($address, $ownership);
-        }
-
         $fields = [];
         if ($remote->region !== $desired->region) {
             $fields[] = 'region';
         }
-        if ($remote->repository !== $desired->source->repository) {
+        if ($remote->repository === null) {
+            if ($fields === []) {
+                return $this->unknown($address, $ownership);
+            }
+        } elseif ($remote->repository !== $desired->source->repository) {
             $fields[] = 'repository';
         }
         if ($fields !== []) {

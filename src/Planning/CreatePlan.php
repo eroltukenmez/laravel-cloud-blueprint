@@ -29,6 +29,18 @@ use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotType;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
+use LaravelCloudBlueprint\Observation\ApplicationObservationEvidence;
+use LaravelCloudBlueprint\Observation\ApplicationObservationFactory;
+use LaravelCloudBlueprint\Observation\EnvironmentObservationEvidence;
+use LaravelCloudBlueprint\Observation\EnvironmentObservationFactory;
+use LaravelCloudBlueprint\Observation\EnvironmentParentEvidence;
+use LaravelCloudBlueprint\Observation\EnvironmentVariableObservationEvidence;
+use LaravelCloudBlueprint\Observation\EnvironmentVariableObservationFactory;
+use LaravelCloudBlueprint\Observation\EvidenceStatus;
+use LaravelCloudBlueprint\Observation\ObservationKind;
+use LaravelCloudBlueprint\Observation\OwnershipStatus;
+use LaravelCloudBlueprint\Observation\ReconciliationStatus;
+use LaravelCloudBlueprint\Observation\ResourceObservation;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\State\StateDocument;
@@ -41,6 +53,9 @@ final readonly class CreatePlan
     public function __construct(
         private VariableValueResolver $values,
         private DatabaseClusterStatusPolicy $databaseStatuses = new DatabaseClusterStatusPolicy(),
+        private ApplicationObservationFactory $applicationObservations = new ApplicationObservationFactory(),
+        private EnvironmentObservationFactory $environmentObservations = new EnvironmentObservationFactory(),
+        private EnvironmentVariableObservationFactory $variableObservations = new EnvironmentVariableObservationFactory(),
     ) {
     }
 
@@ -85,12 +100,26 @@ final readonly class CreatePlan
         $applications = $cloud->applications();
         $applicationAddress = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
         $managedApplication = $state->find($applicationAddress);
+        $invalid = $managedApplication === null
+            ? null
+            : $this->invalidApplicationOwnership($managedApplication, $state);
+        $observation = $this->applicationObservations->create(
+            $blueprint->application,
+            $managedApplication,
+            new ApplicationObservationEvidence(
+                $applications,
+                EvidenceStatus::COMPLETE,
+                $invalid !== null,
+            ),
+        );
 
         if ($managedApplication !== null) {
-            $invalid = $this->invalidApplicationOwnership($managedApplication, $state);
             if ($invalid !== null) {
                 return $this->withOwnedOnlyResources(
-                    $this->blockedPlan($blueprint, $invalid),
+                    $this->blockedPlan(
+                        $blueprint,
+                        $this->applicationConflictReason($observation, $invalid),
+                    ),
                     $blueprint,
                     $cloud,
                     $state,
@@ -104,9 +133,7 @@ final readonly class CreatePlan
                 return $this->withOwnedOnlyResources(
                     $this->blockedPlan(
                         $blueprint,
-                        $replacement === []
-                            ? 'Managed application remote identity is missing. State must be repaired before reconciliation.'
-                            : 'Managed application remote identity is missing and a same-name unmanaged replacement exists. Import or state repair is required.',
+                        $this->missingApplicationReason($observation, $replacement !== []),
                     ),
                     $blueprint,
                     $cloud,
@@ -118,7 +145,7 @@ final readonly class CreatePlan
                 return $this->withOwnedOnlyResources(
                     $this->blockedPlan(
                         $blueprint,
-                        'Managed application name differs from its blueprint address. Rename or state-move reconciliation is not supported.',
+                        $this->applicationNameConflictReason($observation),
                     ),
                     $blueprint,
                     $cloud,
@@ -127,16 +154,26 @@ final readonly class CreatePlan
                 );
             }
 
-            $desiredPlan = $this->planForApplication($blueprint, $cloud, $state, $applications, $application, true);
+            $desiredPlan = $this->planForApplication(
+                $blueprint,
+                $cloud,
+                $state,
+                $applications,
+                $application,
+                true,
+                $observation,
+            );
 
             return $this->withOwnedOnlyResources($desiredPlan, $blueprint, $cloud, $state, $applications);
         }
 
         $matches = $this->applicationsNamed($applications, $blueprint->application->name);
         if (count($matches) > 1) {
+            $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::UNMANAGED);
             throw new AmbiguousResourceMatchException('application', $blueprint->application->name);
         }
         if ($matches === []) {
+            $this->requireObservation($observation, ObservationKind::DESIRED_RESOURCE_MISSING, OwnershipStatus::NONE);
             return $this->withOwnedOnlyResources(
                 $this->createAllPlan($blueprint),
                 $blueprint,
@@ -147,7 +184,15 @@ final readonly class CreatePlan
         }
 
         return $this->withOwnedOnlyResources(
-            $this->planForApplication($blueprint, $cloud, $state, $applications, $matches[0], false),
+            $this->planForApplication(
+                $blueprint,
+                $cloud,
+                $state,
+                $applications,
+                $matches[0],
+                false,
+                $observation,
+            ),
             $blueprint,
             $cloud,
             $state,
@@ -439,8 +484,13 @@ final readonly class CreatePlan
         array $applications,
         CloudApplication $application,
         bool $applicationIsManaged,
+        ResourceObservation $applicationObservation,
     ): ExecutionPlan {
-        $actions = [$this->compareApplication($blueprint, $application, $applicationIsManaged)];
+        $actions = [$this->applicationActionFromObservation(
+            $blueprint,
+            $application,
+            $applicationObservation,
+        )];
         $remoteEnvironments = $cloud->environments($application->id);
         /** @var array<string, array{PlanAction, CloudEnvironment|null}> $resolved */
         $resolved = [];
@@ -469,6 +519,11 @@ final readonly class CreatePlan
                         $actions[] = $this->variableAction($address, PlanOperation::CREATE,
                             'Environment variable does not exist because the environment will be created.');
                     } else {
+                        $observation = $this->variableObservations->createWithoutValues(
+                            $address,
+                            EnvironmentVariableObservationEvidence::parentUnresolved(),
+                        );
+                        $this->requireObservation($observation, ObservationKind::UNKNOWN, OwnershipStatus::NONE);
                         $actions[] = $this->variableAction($address, PlanOperation::UNSUPPORTED,
                             'Environment variable cannot be reconciled while its environment identity is unresolved.');
                     }
@@ -528,25 +583,52 @@ final readonly class CreatePlan
         return new ExecutionPlan(...$actions);
     }
 
-    private function compareApplication(Blueprint $blueprint, CloudApplication $remote, bool $managed): PlanAction
+    private function applicationActionFromObservation(
+        Blueprint $blueprint,
+        CloudApplication $remote,
+        ResourceObservation $observation,
+    ): PlanAction
     {
-        if ($remote->region !== $blueprint->application->region) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE
+            && in_array($observation->reconciliation, [
+                ReconciliationStatus::UNSUPPORTED,
+                ReconciliationStatus::BLOCKED,
+            ], true)
+            && in_array('region', $observation->changedFields->values(), true)) {
             return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
                 'Remote application region differs from desired region.', $remote->id);
         }
-        if ($remote->repository === null) {
+        if ($observation->observation === ObservationKind::UNKNOWN
+            && $observation->evidence === EvidenceStatus::INCOMPLETE) {
             return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
                 'Remote application repository information is unavailable.', $remote->id);
         }
-        if ($remote->repository !== $blueprint->application->source->repository) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE
+            && in_array($observation->reconciliation, [
+                ReconciliationStatus::UNSUPPORTED,
+                ReconciliationStatus::BLOCKED,
+            ], true)
+            && in_array('repository', $observation->changedFields->values(), true)) {
             return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
                 'Application repository differs and cannot be updated safely.', $remote->id);
+        }
+
+        $this->requireObservation(
+            $observation,
+            ObservationKind::IN_SYNC,
+            $observation->ownership,
+        );
+        if (!in_array($observation->ownership, [OwnershipStatus::MANAGED, OwnershipStatus::UNMANAGED], true)) {
+            throw new \LogicException('In-sync Application observation must have managed or unmanaged ownership.');
+        }
+        if ($observation->reconciliation !== ReconciliationStatus::NOT_APPLICABLE) {
+            throw new \LogicException('In-sync Application observation must not require reconciliation.');
         }
 
         return $this->applicationAction(
             $blueprint->application->name,
             PlanOperation::NO_CHANGE,
-            $managed
+            $observation->ownership === OwnershipStatus::MANAGED
                 ? 'Managed remote application matches desired state.'
                 : 'Matching remote application is unmanaged; use import to establish ownership before future mutation.',
             $remote->id,
@@ -570,25 +652,52 @@ final readonly class CreatePlan
     ): array {
         $address = new ResourceAddress(ResourceType::ENVIRONMENT, $desired->name);
         $managed = $state->find($address);
+        $parentAddress = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+        $parent = EnvironmentParentEvidence::resolved(
+            $parentAddress,
+            $application->id,
+            $applicationIsManaged ? OwnershipStatus::MANAGED : OwnershipStatus::UNMANAGED,
+        );
+        $invalid = $managed === null ? null : $this->invalidEnvironmentOwnership($managed, $state, $blueprint);
+
+        if ($invalid !== null) {
+            $observation = $this->environmentObservations->create(
+                $desired,
+                $managed,
+                new EnvironmentObservationEvidence($parent, $remoteEnvironments, EvidenceStatus::COMPLETE, true),
+            );
+            $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::CONFLICT);
+            return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED, $invalid), null];
+        }
+
+        $scopedEnvironments = $remoteEnvironments;
+        if ($managed !== null && $this->findEnvironmentById($remoteEnvironments, $managed->remoteId) === null) {
+            foreach ($applications as $candidateApplication) {
+                if ($candidateApplication->id === $application->id) {
+                    continue;
+                }
+                $candidateEnvironments = $cloud->environments($candidateApplication->id);
+                $scopedEnvironments = [...$scopedEnvironments, ...$candidateEnvironments];
+                if ($this->findEnvironmentById($candidateEnvironments, $managed->remoteId) !== null) {
+                    break;
+                }
+            }
+        }
+        $observation = $this->environmentObservations->create(
+            $desired,
+            $managed,
+            new EnvironmentObservationEvidence($parent, $scopedEnvironments, EvidenceStatus::COMPLETE),
+        );
 
         if ($managed !== null) {
-            $invalid = $this->invalidEnvironmentOwnership($managed, $state, $blueprint);
-            if ($invalid !== null) {
-                return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED, $invalid), null];
-            }
-            $remote = $this->findEnvironmentById($remoteEnvironments, $managed->remoteId);
+            $remote = $this->findEnvironmentById($scopedEnvironments, $managed->remoteId);
             if ($remote === null) {
-                foreach ($applications as $candidateApplication) {
-                    if ($candidateApplication->id === $application->id) {
-                        continue;
-                    }
-                    if ($this->findEnvironmentById($cloud->environments($candidateApplication->id), $managed->remoteId) !== null) {
-                        return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
-                            'Managed environment belongs to an unexpected remote application.'), null];
-                    }
-                }
-
                 $replacement = $this->environmentsNamed($remoteEnvironments, $desired->name);
+                $this->requireObservation(
+                    $observation,
+                    $replacement === [] ? ObservationKind::IDENTITY_MISSING : ObservationKind::IDENTITY_REPLACEMENT,
+                    OwnershipStatus::MANAGED,
+                );
                 return [$this->environmentAction(
                     $desired->name,
                     PlanOperation::UNSUPPORTED,
@@ -599,10 +708,12 @@ final readonly class CreatePlan
             }
 
             if ($remote->applicationId !== $application->id) {
+                $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED);
                 return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
                     'Managed environment belongs to an unexpected remote application.'), null];
             }
             if ($remote->name !== $desired->name) {
+                $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED);
                 return [$this->environmentAction(
                     $desired->name,
                     PlanOperation::UNSUPPORTED,
@@ -611,41 +722,57 @@ final readonly class CreatePlan
                 ), $remote];
             }
 
-            return [$this->compareEnvironment($desired, $remote, true), $remote];
+            return [$this->environmentActionFromObservation($desired, $remote, $observation), $remote];
         }
 
         $matches = $this->environmentsNamed($remoteEnvironments, $desired->name);
         if (count($matches) > 1) {
+            $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::UNMANAGED);
             throw new AmbiguousResourceMatchException('environment', $desired->name);
         }
         if ($matches === []) {
             if (!$applicationIsManaged) {
+                $this->requireObservation($observation, ObservationKind::UNKNOWN, OwnershipStatus::NONE);
                 return [$this->environmentAction(
                     $desired->name,
                     PlanOperation::UNSUPPORTED,
                     'Matching remote application is unmanaged. Import it before creating owned environments.',
                 ), null];
             }
+            $this->requireObservation($observation, ObservationKind::DESIRED_RESOURCE_MISSING, OwnershipStatus::NONE);
             return [$this->environmentAction($desired->name, PlanOperation::CREATE, 'Environment does not exist.'), null];
         }
 
-        return [$this->compareEnvironment($desired, $matches[0], false), $matches[0]];
+        return [$this->environmentActionFromObservation($desired, $matches[0], $observation), $matches[0]];
     }
 
-    private function compareEnvironment(EnvironmentDefinition $desired, CloudEnvironment $remote, bool $managed): PlanAction
+    private function environmentActionFromObservation(
+        EnvironmentDefinition $desired,
+        CloudEnvironment $remote,
+        ResourceObservation $observation,
+    ): PlanAction
     {
-        if ($remote->branch === null) {
+        if ($observation->observation === ObservationKind::UNKNOWN
+            && $observation->evidence === EvidenceStatus::INCOMPLETE) {
             return $this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
                 'Remote branch information is unavailable.', $remote->id);
         }
-        if ($remote->branch !== $desired->branch) {
-            if (!$managed) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE) {
+            if ($remote->branch === null) {
+                throw new \LogicException('Complete branch-difference evidence must contain the remote branch.');
+            }
+            if ($observation->reconciliation === ReconciliationStatus::BLOCKED
+                && $observation->ownership === OwnershipStatus::UNMANAGED) {
                 return $this->environmentAction(
                     $desired->name,
                     PlanOperation::UNSUPPORTED,
                     'Matching remote environment is unmanaged. Import it before reconciling its branch.',
                     $remote->id,
                 );
+            }
+            if ($observation->reconciliation !== ReconciliationStatus::SUPPORTED
+                || $observation->ownership !== OwnershipStatus::MANAGED) {
+                throw new \LogicException('Branch-difference observation has incompatible reconciliation semantics.');
             }
             return $this->environmentAction(
                 $desired->name,
@@ -658,10 +785,22 @@ final readonly class CreatePlan
             );
         }
 
+        $this->requireObservation(
+            $observation,
+            ObservationKind::IN_SYNC,
+            $observation->ownership,
+        );
+        if (!in_array($observation->ownership, [OwnershipStatus::MANAGED, OwnershipStatus::UNMANAGED], true)) {
+            throw new \LogicException('In-sync Environment observation must have managed or unmanaged ownership.');
+        }
+        if ($observation->reconciliation !== ReconciliationStatus::NOT_APPLICABLE) {
+            throw new \LogicException('In-sync Environment observation must not require reconciliation.');
+        }
+
         return $this->environmentAction(
             $desired->name,
             PlanOperation::NO_CHANGE,
-            $managed
+            $observation->ownership === OwnershipStatus::MANAGED
                 ? 'Managed remote environment matches desired state.'
                 : 'Matching remote environment is unmanaged; use import to establish ownership before future mutation.',
             $remote->id,
@@ -675,18 +814,30 @@ final readonly class CreatePlan
     ): PlanAction {
         $address = $this->variableAddress($environmentName, $desired->name);
         $desiredValue = $this->values->resolve($desired, $address);
+        $observation = $this->variableObservations->create(
+            $address,
+            $desired,
+            $desiredValue,
+            $remoteVariables === null
+                ? EnvironmentVariableObservationEvidence::collectionUnavailable()
+                : EnvironmentVariableObservationEvidence::available($remoteVariables),
+        );
         if ($remoteVariables === null) {
+            $this->requireObservation($observation, ObservationKind::UNKNOWN, OwnershipStatus::NONE);
             return $this->variableAction($address, PlanOperation::UNSUPPORTED,
                 'Remote environment variable information is unavailable.');
         }
         $remote = $remoteVariables->find($desired->name);
         if ($remote === null) {
+            $this->requireObservation($observation, ObservationKind::DESIRED_RESOURCE_MISSING, OwnershipStatus::NONE);
             return $this->variableAction($address, PlanOperation::CREATE, 'Environment variable does not exist.');
         }
-        if ($remote->value !== $desiredValue) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE
+            && $observation->reconciliation === ReconciliationStatus::SUPPORTED) {
             return $this->variableAction($address, PlanOperation::UPDATE,
                 'Environment variable differs from desired state.');
         }
+        $this->requireObservation($observation, ObservationKind::IN_SYNC, OwnershipStatus::NONE);
         return $this->variableAction($address, PlanOperation::NO_CHANGE,
             'Environment variable matches desired state.');
     }
@@ -697,6 +848,41 @@ final readonly class CreatePlan
             return 'Application state ownership has an invalid resource type or parent relationship.';
         }
         return $this->duplicateOwnershipReason($resource, $state);
+    }
+
+    private function applicationConflictReason(ResourceObservation $observation, string $reason): string
+    {
+        $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::CONFLICT);
+        return $reason;
+    }
+
+    private function missingApplicationReason(ResourceObservation $observation, bool $hasReplacement): string
+    {
+        $this->requireObservation(
+            $observation,
+            $hasReplacement ? ObservationKind::IDENTITY_REPLACEMENT : ObservationKind::IDENTITY_MISSING,
+            OwnershipStatus::MANAGED,
+        );
+
+        return $hasReplacement
+            ? 'Managed application remote identity is missing and a same-name unmanaged replacement exists. Import or state repair is required.'
+            : 'Managed application remote identity is missing. State must be repaired before reconciliation.';
+    }
+
+    private function applicationNameConflictReason(ResourceObservation $observation): string
+    {
+        $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED);
+        return 'Managed application name differs from its blueprint address. Rename or state-move reconciliation is not supported.';
+    }
+
+    private function requireObservation(
+        ResourceObservation $observation,
+        ObservationKind $kind,
+        OwnershipStatus $ownership,
+    ): void {
+        if ($observation->observation !== $kind || $observation->ownership !== $ownership) {
+            throw new \LogicException('Typed observation is incompatible with the discovered planning evidence.');
+        }
     }
 
     private function invalidEnvironmentOwnership(StateResource $resource, StateDocument $state, Blueprint $blueprint): ?string

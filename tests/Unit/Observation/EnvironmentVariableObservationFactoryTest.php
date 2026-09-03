@@ -77,6 +77,17 @@ final class EnvironmentVariableObservationFactoryTest extends TestCase
         self::assertObservation($observation, ObservationKind::UNKNOWN, ReconciliationStatus::BLOCKED, EvidenceStatus::INCOMPLETE);
     }
 
+    public function testUnresolvedParentCanBeObservedWithoutResolvingSensitiveValues(): void
+    {
+        $observation = $this->factory->createWithoutValues(
+            self::address(),
+            EnvironmentVariableObservationEvidence::parentUnresolved(),
+        );
+
+        self::assertObservation($observation, ObservationKind::UNKNOWN, ReconciliationStatus::BLOCKED, EvidenceStatus::INCOMPLETE);
+        self::assertSecretsAbsent($observation);
+    }
+
     public function testLiteralAndFromEnvResolvedValuesNeverEnterOutputOrCollectionSerialization(): void
     {
         $literal = new VariableDefinition('API_TOKEN', new LiteralVariableValue(self::DESIRED_SECRET), true);

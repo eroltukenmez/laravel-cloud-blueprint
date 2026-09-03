@@ -103,8 +103,10 @@ final class CreatePlanTest extends TestCase
     {
         $plan = $this->planWithApplication(self::remoteApplication(region: 'us-east-1'));
 
-        self::assertSame(PlanOperation::UNSUPPORTED, self::actions($plan)[0]->operation);
-        self::assertStringContainsString('region differs', self::actions($plan)[0]->reason);
+        $action = self::actions($plan)[0];
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertSame('Remote application region differs from desired region.', $action->reason);
+        self::assertSame([], $action->changes);
     }
 
     public function testApplicationRepositoryDifferenceIsUnsupportedWithoutAChangePayload(): void
@@ -132,7 +134,10 @@ final class CreatePlanTest extends TestCase
     {
         $plan = $this->planWithApplication(self::remoteApplication(repository: null));
 
-        self::assertSame(PlanOperation::UNSUPPORTED, self::actions($plan)[0]->operation);
+        $action = self::actions($plan)[0];
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertSame('Remote application repository information is unavailable.', $action->reason);
+        self::assertSame([], $action->changes);
     }
 
     public function testDuplicateApplicationNamesFailSafely(): void
@@ -178,8 +183,13 @@ final class CreatePlanTest extends TestCase
             ),
             $released,
         );
-        self::assertSame(PlanOperation::UNSUPPORTED, self::action($existing, 'environment.production')->operation);
-        self::assertStringContainsString('Import', self::action($existing, 'environment.production')->reason);
+        $existingAction = self::action($existing, 'environment.production');
+        self::assertSame(PlanOperation::UNSUPPORTED, $existingAction->operation);
+        self::assertSame(
+            'Matching remote environment is unmanaged. Import it before reconciling its branch.',
+            $existingAction->reason,
+        );
+        self::assertSame([], $existingAction->changes);
 
         $missing = self::planner()->create(
             self::blueprint(),
@@ -196,10 +206,10 @@ final class CreatePlanTest extends TestCase
             environments: [new CloudEnvironment('env-prod', 'app-1', 'production', null)],
         );
 
-        self::assertSame(
-            PlanOperation::UNSUPPORTED,
-            self::actions(self::planner()->create(self::blueprint(), $cloud, StateDocument::empty()))[1]->operation,
-        );
+        $action = self::actions(self::planner()->create(self::blueprint(), $cloud, StateDocument::empty()))[1];
+        self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+        self::assertSame('Remote branch information is unavailable.', $action->reason);
+        self::assertSame([], $action->changes);
     }
 
     public function testDuplicateEnvironmentNamesFailSafely(): void
