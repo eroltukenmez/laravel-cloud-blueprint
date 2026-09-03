@@ -1237,7 +1237,8 @@ final readonly class CreatePlan
                     && $child->provenance === StateProvenance::CLUSTER_CREATE_RESPONSE
                     && $child->parent !== null
                     && (string) $child->parent === (string) $resource->address
-                    && $remote->relationshipClusterId === $resource->remoteId
+                    && ($remote->relationshipClusterId === null
+                        || $remote->relationshipClusterId === $resource->remoteId)
                     => DatabaseClusterChildClassification::DERIVED_PARENT_DEPENDENCY,
                 $child->classification === StateOwnershipClassification::DERIVED
                     => DatabaseClusterChildClassification::CONFLICT,

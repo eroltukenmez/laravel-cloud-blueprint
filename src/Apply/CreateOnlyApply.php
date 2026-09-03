@@ -550,12 +550,35 @@ final readonly class CreateOnlyApply
 
                 if ($action->resourceType === ResourceType::DATABASE_CLUSTER) {
                     $dependencies = $action->databaseDependencies;
-                    if ($dependencies === null || !$dependencies->complete
+                    if ($dependencies === null) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Database Cluster deletion "%s" is refused because destructive discovery is incomplete: dependency evidence unavailable. No resources were modified.',
+                            (string) $action->address,
+                        ));
+                    }
+                    if ($dependencies->ownershipConflict) {
+                        throw new ApplyRefusedException(sprintf(
+                            'Database Cluster deletion "%s" has a destructive ownership conflict: ownership_conflict. No resources were modified.',
+                            (string) $action->address,
+                        ));
+                    }
+                    if (!$dependencies->complete
                         || !$dependencies->snapshotDiscoveryComplete || !$dependencies->recoveryEvidenceComplete
                         || $dependencies->unknownRelationships !== [] || $dependencies->missingRelationships !== []) {
-                        throw new ApplyRefusedException(sprintf('Database Cluster deletion "%s" is refused because destructive discovery is incomplete. No resources were modified.', (string) $action->address));
+                        $detail = match (true) {
+                            $dependencies->missingRelationships !== [] => 'missing relationship evidence: ' . implode(', ', $dependencies->missingRelationships),
+                            $dependencies->unknownRelationships !== [] => 'unknown relationship evidence: ' . implode(', ', $dependencies->unknownRelationships),
+                            !$dependencies->snapshotDiscoveryComplete => 'missing relationship evidence: snapshots',
+                            !$dependencies->recoveryEvidenceComplete => 'unknown relationship evidence: retained_recovery',
+                            default => 'incomplete structural evidence',
+                        };
+                        throw new ApplyRefusedException(sprintf(
+                            'Database Cluster deletion "%s" is refused because destructive discovery is incomplete: %s. No resources were modified.',
+                            (string) $action->address,
+                            $detail,
+                        ));
                     }
-                    if ($dependencies->unmanagedChildCount > 0 || $dependencies->ownershipConflict
+                    if ($dependencies->unmanagedChildCount > 0
                         || $dependencies->snapshotCount > 0 || $dependencies->retainedRecovery
                         || $dependencies->lifecycleReadiness !== DatabaseClusterLifecycleReadiness::ELIGIBLE) {
                         throw new ApplyRefusedException(sprintf('Database Cluster deletion "%s" is blocked by destructive dependencies or lifecycle state. No resources were modified.', (string) $action->address));

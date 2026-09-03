@@ -17,12 +17,13 @@ This project uses a Keep a Changelog-inspired format.
 
 ### Security
 
+- Derived Cluster lifecycle planning now accepts omitted parent metadata on scoped Database-list rows when exact State provenance and complete Cluster/list membership agree; explicit contradictory parent evidence remains a conflict, and exact destructive detail must still prove the parent and empty attachments before mutation.
 - Derived resources require recognized provenance, participate in the existing parent/child ownership graph, and fail closed in planning; no provenance is inferred from resource names or later Cloud discovery.
 - Default-child capture never uses the Cloud Database name, rejects malformed or ambiguous CREATE evidence, and does not retroactively classify legacy or imported Cluster children.
-- Derived parent dependencies require exact State provenance, exact parent ownership, complete matching Cluster and Database discovery, and conflict-free identity evidence. They remain non-actionable outside a future guarded Cluster lifecycle; releasing their State ownership makes the live child unmanaged again.
+- Derived parent dependencies require exact State provenance, exact parent ownership, complete matching Cluster and Database discovery, and conflict-free identity evidence. They remain non-actionable outside an approved guarded Cluster lifecycle; releasing their State ownership makes the live child unmanaged again.
 - Logical Database deletion requires explicit approval, locked Blueprint/State/Cloud replanning, an exact State-owned Cluster and Database identity, complete empty attachments, at most one DELETE transmission, authoritative exact-ID absence, and an immediate atomic State checkpoint.
 - Destructive logical Database discovery explicitly requests the authoritative parent Database and reverse Environment relationships; missing or malformed relationship data remains non-executable.
-- Database Cluster deletion and automatic detach remain unsupported; `state:unmanage` remains local-only.
+- Automatic Database detach remains unsupported; `state:unmanage` remains local-only.
 - Any discovered Database snapshot blocks Cluster destructive readiness, incomplete snapshot or lifecycle evidence remains unknown, and snapshots are never automatically deleted.
 
 ## [0.1.0-alpha.7] - 2026-09-01

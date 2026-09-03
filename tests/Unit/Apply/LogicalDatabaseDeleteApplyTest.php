@@ -79,8 +79,9 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
     public function testDerivedChildIsDeletedAndCheckpointedBeforeCluster(): void
     {
         $derivedAddress = self::databaseAddress('__derived_default');
-        $remote = self::database(id: 'derived-1', name: 'production');
-        $cloud = self::cloud(['derived-1' => [$remote, self::notFound()]], [$remote]);
+        $exact = self::database(id: 'derived-1', name: 'production');
+        $listed = self::database(id: 'derived-1', name: 'production', parentId: null);
+        $cloud = self::cloud(['derived-1' => [$exact, self::notFound()]], [$listed]);
         $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
             ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1'))
             ->withResource(new StateResource($derivedAddress, ResourceType::DATABASE, 'derived-1', self::clusterAddress(), StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE)));
@@ -97,6 +98,38 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         self::assertSame(['cluster-1'], $cloud->clusterDeletes);
         self::assertSame(2, $states->saveCount);
         self::assertSame([], $states->state->resources());
+    }
+
+    public function testDerivedExactDetailStillFailsClosedForUnsafeParentOrAttachments(): void
+    {
+        $cases = [
+            'wrong parent' => new CloudDatabase('derived-1', 'cluster-1', 'production', 'other-cluster', [], true),
+            'incomplete relationships' => new CloudDatabase('derived-1', 'cluster-1', 'production', 'cluster-1', [], false, ['environments']),
+            'attached environment' => new CloudDatabase('derived-1', 'cluster-1', 'production', 'cluster-1', ['environment-1'], true),
+            'detail unavailable' => new CloudTransportException('unavailable', 'GET', '/database'),
+        ];
+
+        foreach ($cases as $case => $detail) {
+            $derivedAddress = self::databaseAddress('__derived_default');
+            $listed = self::database(id: 'derived-1', name: 'production', parentId: null);
+            $cloud = self::cloud(['derived-1' => [$detail]], [$listed]);
+            $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+                ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1'))
+                ->withResource(new StateResource($derivedAddress, ResourceType::DATABASE, 'derived-1', self::clusterAddress(), StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE)));
+            $dependency = new DatabaseParentLifecycleDependency($derivedAddress, StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY);
+            $plan = new ExecutionPlan(
+                new PlanAction(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, PlanOperation::DELETE, 'delete', 'cluster-1', new DatabaseDependencies(0, 0, 0, false, true, derivedParentDependencyCount: 1), $dependency),
+                new PlanAction($derivedAddress, ResourceType::DATABASE, PlanOperation::NO_CHANGE, 'derived', 'derived-1', self::clusterAddress(), StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY),
+            );
+
+            $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+            self::assertNotSame(ApplyStatus::SUCCESS, $result->status, $case);
+            self::assertSame([], $cloud->deletes, $case);
+            self::assertSame([], $cloud->clusterDeletes, $case);
+            self::assertNotNull($states->state->find($derivedAddress), $case);
+            self::assertNotNull($states->state->find(self::clusterAddress()), $case);
+        }
     }
 
     public function testClusterAbsenceVerificationUsesBoundedGetOnlyPolling(): void
@@ -465,7 +498,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
     private static function database(
         string $id = 'database-1',
         string $name = 'application',
-        string $parentId = 'cluster-1',
+        ?string $parentId = 'cluster-1',
         array $environmentIds = [],
     ): CloudDatabase {
         return new CloudDatabase($id, 'cluster-1', $name, $parentId, $environmentIds, true);

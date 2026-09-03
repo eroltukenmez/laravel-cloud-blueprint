@@ -351,7 +351,7 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame([], $cloud->destructiveDatabaseCalls);
     }
 
-    public function testDerivedDefaultIsAnInformationalParentDependencyForSafeClusterReadiness(): void
+    public function testDerivedListRowMayOmitRedundantParentMetadata(): void
     {
         $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
         $derivedAddress = new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default');
@@ -375,7 +375,7 @@ final class DatabasePlanningTest extends TestCase
                 databaseIds: ['database-derived'],
                 childDiscoveryComplete: true,
             ),
-            [new CloudDatabase('database-derived', 'cluster-1', 'ignored-name', 'cluster-1')],
+            [new CloudDatabase('database-derived', 'cluster-1', 'ignored-name')],
         );
 
         $plan = self::plan(self::blueprint(database: false), $cloud, $state);
@@ -1077,6 +1077,36 @@ final class DatabasePlanningTest extends TestCase
 
         self::apply()->assertSupported($plan);
         self::addToAssertionCount(1);
+    }
+
+    public function testClusterDeletePreflightReportsSanitizedTypedDiscoveryCause(): void
+    {
+        $address = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        foreach ([
+            new DatabaseDependencies(0, 0, 0, false, false, [], ['snapshots']),
+            new DatabaseDependencies(0, 0, 0, false, false, ['cluster_lifecycle']),
+            new DatabaseDependencies(0, 0, 0, true, false),
+        ] as $index => $dependencies) {
+            $plan = new ExecutionPlan(new PlanAction(
+                $address,
+                ResourceType::DATABASE_CLUSTER,
+                PlanOperation::DELETE,
+                'delete',
+                'remote-secret-id',
+                $dependencies,
+            ));
+            try {
+                self::apply()->assertSupported($plan);
+                self::fail('Expected typed Cluster refusal.');
+            } catch (ApplyRefusedException $exception) {
+                self::assertStringContainsString(match ($index) {
+                    0 => 'missing relationship evidence: snapshots',
+                    1 => 'unknown relationship evidence: cluster_lifecycle',
+                    default => 'destructive ownership conflict: ownership_conflict',
+                }, $exception->getMessage());
+                self::assertStringNotContainsString('remote-secret-id', $exception->getMessage());
+            }
+        }
     }
 
     /** @return iterable<string, array{PlanAction, ResourceType}> */
