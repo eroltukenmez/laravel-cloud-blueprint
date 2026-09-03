@@ -1107,12 +1107,13 @@ final readonly class CreatePlan
         return $this->databaseAction(
             $resource->address->name,
             PlanOperation::NO_CHANGE,
-            'Cloud-created default Database is retained as derived infrastructure.',
+            'Cloud-created default Database is retained as derived infrastructure and is eligible only within guarded parent destruction.',
             $resource->remoteId,
             $resource->parent,
             null,
             $resource->classification,
             $resource->provenance,
+            DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY,
         );
     }
 
@@ -1159,34 +1160,105 @@ final readonly class CreatePlan
             return new DatabaseDependencies(0, 0, 0, false, false, [], ['exact_database_cluster']);
         }
 
-        $ownedIds = [];
+        $childrenById = [];
+        $ownershipConflict = false;
         foreach ($state->childrenOf($resource->address) as $child) {
             if ($child->type === ResourceType::DATABASE) {
-                $ownedIds[$child->remoteId] = true;
+                $identityKey = 'id:' . $child->remoteId;
+                if (isset($childrenById[$identityKey])) {
+                    $ownershipConflict = true;
+                }
+                $childrenById[$identityKey] = $child;
             }
         }
         $databaseOwners = [];
         foreach ($state->resources() as $owned) {
             if ($owned->type === ResourceType::DATABASE) {
-                $databaseOwners[$owned->remoteId] = (string) $owned->parent;
-            }
-        }
-
-        $ownedCount = 0;
-        $unmanagedCount = 0;
-        $ownershipConflict = false;
-        foreach ($cluster->databaseIds as $databaseId) {
-            if (isset($ownedIds[$databaseId])) {
-                ++$ownedCount;
-            } elseif (isset($databaseOwners[$databaseId])) {
-                $ownershipConflict = true;
-            } else {
-                ++$unmanagedCount;
+                $identityKey = 'id:' . $owned->remoteId;
+                if (isset($databaseOwners[$identityKey])) {
+                    $ownershipConflict = true;
+                }
+                $databaseOwners[$identityKey] = $owned;
             }
         }
 
         $missing = $cluster->missingRelationships;
         $unknown = $cluster->unknownRelationships;
+        $remoteById = [];
+        $conflictedRemoteIds = [];
+        $databaseListComplete = true;
+        try {
+            foreach ($cloud->databases($resource->remoteId) as $database) {
+                $identityKey = 'id:' . $database->id;
+                if (isset($remoteById[$identityKey])) {
+                    $ownershipConflict = true;
+                    $conflictedRemoteIds[$identityKey] = true;
+                    continue;
+                }
+                $remoteById[$identityKey] = $database;
+            }
+        } catch (CloudException) {
+            $missing[] = 'databases';
+            $databaseListComplete = false;
+        }
+
+        $ownedCount = 0;
+        $derivedParentDependencyCount = 0;
+        $unmanagedCount = 0;
+        $relationshipIds = [];
+        foreach ($cluster->databaseIds as $databaseId) {
+            $identityKey = 'id:' . $databaseId;
+            if (isset($relationshipIds[$identityKey])) {
+                $ownershipConflict = true;
+                continue;
+            }
+            $relationshipIds[$identityKey] = true;
+            if (!$databaseListComplete) {
+                continue;
+            }
+            $remote = $remoteById[$identityKey] ?? null;
+            $child = $childrenById[$identityKey] ?? null;
+
+            $classification = match (true) {
+                isset($conflictedRemoteIds[$identityKey]) => DatabaseClusterChildClassification::CONFLICT,
+                $remote === null => DatabaseClusterChildClassification::CONFLICT,
+                $remote->clusterId !== $resource->remoteId => DatabaseClusterChildClassification::CONFLICT,
+                $remote->relationshipClusterId !== null
+                    && $remote->relationshipClusterId !== $resource->remoteId => DatabaseClusterChildClassification::CONFLICT,
+                $child === null && isset($databaseOwners[$identityKey]) => DatabaseClusterChildClassification::CONFLICT,
+                $child === null => DatabaseClusterChildClassification::UNMANAGED,
+                $child->classification === StateOwnershipClassification::DERIVED
+                    && $child->provenance === StateProvenance::CLUSTER_CREATE_RESPONSE
+                    && $child->parent !== null
+                    && (string) $child->parent === (string) $resource->address
+                    && $remote->relationshipClusterId === $resource->remoteId
+                    => DatabaseClusterChildClassification::DERIVED_PARENT_DEPENDENCY,
+                $child->classification === StateOwnershipClassification::DERIVED
+                    => DatabaseClusterChildClassification::CONFLICT,
+                default => DatabaseClusterChildClassification::BLUEPRINT_OWNED,
+            };
+
+            match ($classification) {
+                DatabaseClusterChildClassification::BLUEPRINT_OWNED => ++$ownedCount,
+                DatabaseClusterChildClassification::DERIVED_PARENT_DEPENDENCY => ++$derivedParentDependencyCount,
+                DatabaseClusterChildClassification::UNMANAGED => ++$unmanagedCount,
+                DatabaseClusterChildClassification::CONFLICT => $ownershipConflict = true,
+            };
+        }
+        if ($databaseListComplete) {
+            foreach ($remoteById as $identityKey => $_remote) {
+                if (!isset($relationshipIds[$identityKey])) {
+                    $ownershipConflict = true;
+                }
+            }
+            foreach ($childrenById as $identityKey => $child) {
+                if ($child->classification === StateOwnershipClassification::DERIVED
+                    && !isset($relationshipIds[$identityKey])) {
+                    $ownershipConflict = true;
+                }
+            }
+        }
+
         $snapshots = [];
         $snapshotDiscoveryComplete = true;
         if (!$cloud instanceof LaravelCloudDatabaseLifecycleClient) {
@@ -1238,7 +1310,7 @@ final readonly class CreatePlan
             $ownedCount,
             $unmanagedCount,
             $ownershipConflict,
-            $cluster->childDiscoveryComplete && !$ownershipConflict,
+            $cluster->childDiscoveryComplete && $databaseListComplete && !$ownershipConflict,
             $unknown,
             $missing,
             count($snapshots),
@@ -1248,6 +1320,7 @@ final readonly class CreatePlan
             $snapshotDiscoveryComplete,
             $recoveryEvidenceComplete,
             $lifecycle,
+            $derivedParentDependencyCount,
         );
     }
 
@@ -1478,6 +1551,7 @@ final readonly class CreatePlan
         ?DatabaseDependencies $dependencies = null,
         ?StateOwnershipClassification $classification = null,
         ?StateProvenance $provenance = null,
+        ?DatabaseDestructiveRole $destructiveRole = null,
     ): PlanAction
     {
         return new PlanAction(
@@ -1486,7 +1560,7 @@ final readonly class CreatePlan
             $operation,
             $reason,
             $remoteId,
-            ...array_values(array_filter([$parent, $dependencies, $classification, $provenance])),
+            ...array_values(array_filter([$parent, $dependencies, $classification, $provenance, $destructiveRole])),
         );
     }
 

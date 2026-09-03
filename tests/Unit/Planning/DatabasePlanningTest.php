@@ -35,6 +35,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CloudUnknownDatabaseConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencyType;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseClusterStructuralReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotStatus;
@@ -46,6 +47,7 @@ use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Planning\CreatePlan;
+use LaravelCloudBlueprint\Planning\DatabaseDestructiveRole;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanChange;
@@ -286,7 +288,7 @@ final class DatabasePlanningTest extends TestCase
         );
         $safe = self::action(self::plan(
             self::blueprint(database: false),
-            self::matchingCloud($safeCluster),
+            self::matchingCloud($safeCluster, []),
             $clusterOnlyState,
         ), 'database_cluster.primary');
         self::assertSame(DatabaseDestructiveReadiness::SAFE, $safe->databaseDependencies?->readiness());
@@ -332,7 +334,7 @@ final class DatabasePlanningTest extends TestCase
         );
         $cloud = self::matchingCloud(
             self::mysqlCluster(databaseIds: ['database-derived'], childDiscoveryComplete: true),
-            [new CloudDatabase('database-derived', 'cluster-1', 'any-cloud-name')],
+            [new CloudDatabase('database-derived', 'cluster-1', 'any-cloud-name', 'cluster-1')],
         );
 
         $action = self::action(
@@ -344,8 +346,198 @@ final class DatabasePlanningTest extends TestCase
         self::assertStringContainsString('retained as derived infrastructure', $action->reason);
         self::assertSame(StateOwnershipClassification::DERIVED, $action->ownershipClassification);
         self::assertSame(StateProvenance::CLUSTER_CREATE_RESPONSE, $action->provenance);
+        self::assertSame(DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY, $action->destructiveRole);
         self::assertNull($action->databaseDependencies);
         self::assertSame([], $cloud->destructiveDatabaseCalls);
+    }
+
+    public function testDerivedDefaultIsAnInformationalParentDependencyForSafeClusterReadiness(): void
+    {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $derivedAddress = new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default');
+        $state = new StateDocument(
+            StateVersion::V2,
+            0,
+            'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                $derivedAddress,
+                ResourceType::DATABASE,
+                'database-derived',
+                $clusterAddress,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ),
+        );
+        $cloud = self::matchingCloud(
+            self::mysqlCluster(
+                configuration: new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false),
+                databaseIds: ['database-derived'],
+                childDiscoveryComplete: true,
+            ),
+            [new CloudDatabase('database-derived', 'cluster-1', 'ignored-name', 'cluster-1')],
+        );
+
+        $plan = self::plan(self::blueprint(database: false), $cloud, $state);
+        $cluster = self::action($plan, 'database_cluster.primary');
+        $derived = self::action($plan, 'database.primary.__derived_default');
+        $dependencies = $cluster->databaseDependencies;
+
+        self::assertSame(PlanOperation::DELETE, $cluster->operation);
+        self::assertStringContainsString('execution remains unsupported', $cluster->reason);
+        self::assertNotNull($dependencies);
+        self::assertSame(1, $dependencies->derivedParentDependencyCount);
+        self::assertSame(0, $dependencies->ownedChildCount);
+        self::assertSame(0, $dependencies->unmanagedChildCount);
+        self::assertFalse($dependencies->ownershipConflict);
+        self::assertSame(DatabaseClusterStructuralReadiness::SATISFIED, $dependencies->structuralReadiness());
+        self::assertSame(DatabaseDestructiveReadiness::SAFE, $dependencies->readiness());
+        self::assertSame(
+            [DatabaseDependencyType::DERIVED_PARENT_DEPENDENCY],
+            $dependencies->informationalCategories(),
+        );
+        self::assertSame([], $dependencies->blockingCategories());
+        self::assertSame(PlanOperation::NO_CHANGE, $derived->operation);
+        self::assertSame(DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY, $derived->destructiveRole);
+        self::assertSame([], $cloud->destructiveDatabaseCalls);
+    }
+
+    public function testManagedAndDerivedChildrenKeepChildFirstReadinessDistinct(): void
+    {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(
+            StateVersion::V2,
+            0,
+            'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(new ResourceAddress(ResourceType::DATABASE, 'primary.alpha'), ResourceType::DATABASE,
+                'database-alpha', $clusterAddress),
+            new StateResource(new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default'), ResourceType::DATABASE,
+                'database-derived', $clusterAddress, StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE),
+        );
+        $cloud = self::matchingCloud(
+            self::mysqlCluster(databaseIds: ['database-alpha', 'database-derived'], childDiscoveryComplete: true),
+            [
+                new CloudDatabase('database-alpha', 'cluster-1', 'alpha', 'cluster-1'),
+                new CloudDatabase('database-derived', 'cluster-1', 'ignored-name', 'cluster-1'),
+            ],
+        );
+
+        $plan = self::plan(self::blueprint(database: false), $cloud, $state);
+        $cluster = self::action($plan, 'database_cluster.primary');
+        $dependencies = $cluster->databaseDependencies;
+
+        self::assertNotNull($dependencies);
+        self::assertSame(1, $dependencies->ownedChildCount);
+        self::assertSame(1, $dependencies->derivedParentDependencyCount);
+        self::assertSame(DatabaseClusterStructuralReadiness::BLOCKED, $dependencies->structuralReadiness());
+        self::assertSame(PlanOperation::DELETE, self::action($plan, 'database.primary.alpha')->operation);
+        self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database.primary.__derived_default')->operation);
+    }
+
+    public function testReleasedDerivedProvenanceReturnsLiveChildToUnmanagedBlocker(): void
+    {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(StateVersion::V2, 0, 'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'));
+        $action = self::action(self::plan(
+            self::blueprint(database: false),
+            self::matchingCloud(
+                self::mysqlCluster(databaseIds: ['database-derived'], childDiscoveryComplete: true),
+                [new CloudDatabase('database-derived', 'cluster-1', 'production', 'cluster-1')],
+            ),
+            $state,
+        ), 'database_cluster.primary');
+        $dependencies = $action->databaseDependencies;
+
+        self::assertNotNull($dependencies);
+        self::assertSame(0, $dependencies->derivedParentDependencyCount);
+        self::assertSame(1, $dependencies->unmanagedChildCount);
+        self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $dependencies->readiness());
+    }
+
+    /** @return iterable<string, array{list<string>, list<CloudDatabase>}> */
+    public static function conflictedDerivedParentDiscoveries(): iterable
+    {
+        yield 'missing from Database list' => [['database-derived'], []];
+        yield 'wrong parent' => [['database-derived'], [
+            new CloudDatabase('database-derived', 'cluster-1', 'ignored', 'other-cluster'),
+        ]];
+        yield 'relationship and list disagree' => [[], [
+            new CloudDatabase('database-derived', 'cluster-1', 'ignored', 'cluster-1'),
+        ]];
+        yield 'duplicate list identity' => [['database-derived'], [
+            new CloudDatabase('database-derived', 'cluster-1', 'first', 'cluster-1'),
+            new CloudDatabase('database-derived', 'cluster-1', 'second', 'cluster-1'),
+        ]];
+    }
+
+    /**
+     * @param list<string> $relationshipIds
+     * @param list<CloudDatabase> $databases
+     */
+    #[DataProvider('conflictedDerivedParentDiscoveries')]
+    public function testDerivedParentDependencyDiscoveryConflictsFailClosed(
+        array $relationshipIds,
+        array $databases,
+    ): void {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(
+            StateVersion::V2,
+            0,
+            'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default'),
+                ResourceType::DATABASE, 'database-derived', $clusterAddress,
+                StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE),
+        );
+        $action = self::action(self::plan(
+            self::blueprint(database: false),
+            self::matchingCloud(self::mysqlCluster(databaseIds: $relationshipIds, childDiscoveryComplete: true), $databases),
+            $state,
+        ), 'database_cluster.primary');
+        $dependencies = $action->databaseDependencies;
+
+        self::assertNotNull($dependencies);
+        self::assertTrue($dependencies->ownershipConflict);
+        self::assertSame(0, $dependencies->derivedParentDependencyCount);
+        self::assertSame(DatabaseClusterStructuralReadiness::BLOCKED, $dependencies->structuralReadiness());
+        self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $dependencies->readiness());
+    }
+
+    public function testDerivedParentDependencyRequiresCompleteDatabaseListDiscovery(): void
+    {
+        $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = new StateDocument(
+            StateVersion::V2,
+            0,
+            'acme',
+            new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default'),
+                ResourceType::DATABASE, 'database-derived', $clusterAddress,
+                StateOwnershipClassification::DERIVED, StateProvenance::CLUSTER_CREATE_RESPONSE),
+        );
+        $cloud = self::matchingCloud(
+            self::mysqlCluster(
+                configuration: new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false),
+                databaseIds: ['database-derived'],
+                childDiscoveryComplete: true,
+            ),
+            [new CloudDatabase('database-derived', 'cluster-1', 'ignored', 'cluster-1')],
+        );
+        $cloud->failDatabaseList = true;
+
+        $action = self::action(self::plan(self::blueprint(database: false), $cloud, $state),
+            'database_cluster.primary');
+        $dependencies = $action->databaseDependencies;
+
+        self::assertNotNull($dependencies);
+        self::assertSame(0, $dependencies->derivedParentDependencyCount);
+        self::assertFalse($dependencies->complete);
+        self::assertContains('databases', $dependencies->missingRelationships);
+        self::assertSame(DatabaseClusterStructuralReadiness::UNKNOWN, $dependencies->structuralReadiness());
+        self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $dependencies->readiness());
     }
 
     /** @return iterable<string, array{list<CloudDatabase>, string}> */
@@ -456,7 +648,7 @@ final class DatabasePlanningTest extends TestCase
             new StateResource(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
                 ResourceType::DATABASE_CLUSTER, 'cluster-1'));
 
-        $failed = self::matchingCloud(self::mysqlCluster(configuration: $configuration, databaseIds: [], childDiscoveryComplete: true));
+        $failed = self::matchingCloud(self::mysqlCluster(configuration: $configuration, databaseIds: [], childDiscoveryComplete: true), []);
         $failed->failSnapshots = true;
         $unknownAction = self::action(self::plan(self::blueprint(database: false), $failed, $state), 'database_cluster.primary');
         self::assertNotNull($unknownAction->databaseDependencies);
@@ -467,7 +659,7 @@ final class DatabasePlanningTest extends TestCase
         $unknownStatus = self::action(self::plan(
             self::blueprint(database: false),
             self::matchingCloud(self::mysqlCluster(status: 'future-status', configuration: $configuration,
-                databaseIds: [], childDiscoveryComplete: true)),
+                databaseIds: [], childDiscoveryComplete: true), []),
             $state,
         ), 'database_cluster.primary');
         self::assertNotNull($unknownStatus->databaseDependencies);
@@ -477,7 +669,7 @@ final class DatabasePlanningTest extends TestCase
         $creating = self::action(self::plan(
             self::blueprint(database: false),
             self::matchingCloud(self::mysqlCluster(status: 'creating', configuration: $configuration,
-                databaseIds: [], childDiscoveryComplete: true)),
+                databaseIds: [], childDiscoveryComplete: true), []),
             $state,
         ), 'database_cluster.primary');
         self::assertNotNull($creating->databaseDependencies);
@@ -488,7 +680,7 @@ final class DatabasePlanningTest extends TestCase
         $unknownRecovery = self::action(self::plan(
             self::blueprint(database: false),
             self::matchingCloud(self::mysqlCluster(configuration: new CloudUnknownDatabaseConfiguration(),
-                databaseIds: [], childDiscoveryComplete: true)),
+                databaseIds: [], childDiscoveryComplete: true), []),
             $state,
         ), 'database_cluster.primary');
         self::assertNotNull($unknownRecovery->databaseDependencies);
@@ -507,7 +699,7 @@ final class DatabasePlanningTest extends TestCase
             new StateResource($clusterAddress, ResourceType::DATABASE_CLUSTER, 'cluster-1'));
         $action = self::action(self::plan(
             self::blueprint(database: false),
-            self::matchingCloud($cluster),
+            self::matchingCloud($cluster, []),
             $state,
         ), 'database_cluster.primary');
 
@@ -572,7 +764,7 @@ final class DatabasePlanningTest extends TestCase
             $action = self::action(self::plan(
                 self::blueprint(database: false),
                 self::matchingCloud(self::mysqlCluster(status: $status, configuration: $configuration,
-                    databaseIds: [], childDiscoveryComplete: true)),
+                    databaseIds: [], childDiscoveryComplete: true), []),
                 $state,
             ), 'database_cluster.primary');
             self::assertNotNull($action->databaseDependencies);
@@ -1087,6 +1279,7 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseLifecycleClient
     public ?string $environmentDatabaseId = 'database-1';
     public bool $failClusterDetail = false;
     public bool $failDatabaseDetail = false;
+    public bool $failDatabaseList = false;
     public bool $failSnapshots = false;
 
     /** @var array<string, list<CloudDatabaseSnapshot>> */
@@ -1148,6 +1341,9 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseLifecycleClient
     public function databases(string $clusterId): array
     {
         $this->databaseCalls[$clusterId] = ($this->databaseCalls[$clusterId] ?? 0) + 1;
+        if ($this->failDatabaseList) {
+            throw new CloudResponseException('Database list discovery failed.', 'GET', '/databases/clusters/{id}/databases');
+        }
         return $this->databases[$clusterId] ?? [];
     }
 

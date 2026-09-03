@@ -25,6 +25,7 @@ final readonly class DatabaseDependencies
         public bool $snapshotDiscoveryComplete = true,
         public bool $recoveryEvidenceComplete = true,
         public DatabaseClusterLifecycleReadiness $lifecycleReadiness = DatabaseClusterLifecycleReadiness::ELIGIBLE,
+        public int $derivedParentDependencyCount = 0,
     ) {
     }
 
@@ -37,6 +38,9 @@ final readonly class DatabaseDependencies
         }
         if ($this->ownedChildCount > 0) {
             $categories[] = DatabaseDependencyType::OWNED_DATABASE_CHILD;
+        }
+        if ($this->derivedParentDependencyCount > 0) {
+            $categories[] = DatabaseDependencyType::DERIVED_PARENT_DEPENDENCY;
         }
         if ($this->unmanagedChildCount > 0) {
             $categories[] = DatabaseDependencyType::UNMANAGED_DATABASE_CHILD;
@@ -60,13 +64,19 @@ final readonly class DatabaseDependencies
     /** @return list<DatabaseDependencyType> */
     public function blockingCategories(): array
     {
-        return $this->categories();
+        return array_values(array_filter(
+            $this->categories(),
+            static fn (DatabaseDependencyType $type): bool => $type !== DatabaseDependencyType::DERIVED_PARENT_DEPENDENCY,
+        ));
     }
 
     /** @return list<DatabaseDependencyType> */
     public function informationalCategories(): array
     {
-        return [];
+        return array_values(array_filter(
+            $this->categories(),
+            static fn (DatabaseDependencyType $type): bool => $type === DatabaseDependencyType::DERIVED_PARENT_DEPENDENCY,
+        ));
     }
 
     public function readiness(): DatabaseDestructiveReadiness
@@ -83,5 +93,16 @@ final readonly class DatabaseDependencies
             || $this->missingRelationships !== []
             ? DatabaseDestructiveReadiness::UNKNOWN
             : DatabaseDestructiveReadiness::SAFE;
+    }
+
+    public function structuralReadiness(): DatabaseClusterStructuralReadiness
+    {
+        if ($this->ownedChildCount > 0 || $this->unmanagedChildCount > 0 || $this->ownershipConflict) {
+            return DatabaseClusterStructuralReadiness::BLOCKED;
+        }
+
+        return $this->complete
+            ? DatabaseClusterStructuralReadiness::SATISFIED
+            : DatabaseClusterStructuralReadiness::UNKNOWN;
     }
 }

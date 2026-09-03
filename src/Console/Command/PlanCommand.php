@@ -190,6 +190,14 @@ final class PlanCommand extends Command
                     ));
                 }
                 if ($action->resourceType === ResourceType::DATABASE_CLUSTER) {
+                    $output->writeln(sprintf(
+                        '  Structural readiness: %s.',
+                        $action->databaseDependencies->structuralReadiness()->value,
+                    ));
+                    $output->writeln(sprintf(
+                        '  Derived parent dependencies: %d.',
+                        $action->databaseDependencies->derivedParentDependencyCount,
+                    ));
                     $output->writeln($action->databaseDependencies->snapshotDiscoveryComplete
                         ? sprintf(
                             '  Discovered snapshots: %d (%d manual, %d scheduled).',
@@ -246,6 +254,7 @@ final class PlanCommand extends Command
                         'parent' => $action->parent === null ? null : (string) $action->parent,
                         'classification' => $action->ownershipClassification?->value,
                         'provenance' => $action->provenance?->value,
+                        'destructive_role' => $action->destructiveRole?->value,
                         'destructive_readiness' => $dependencies?->readiness()->value,
                         'dependencies' => $dependencies === null ? null : array_map(
                             static fn ($dependency): string => $dependency->value,
@@ -273,6 +282,8 @@ final class PlanCommand extends Command
                             : null,
                         'recovery_evidence_complete' => $clusterDependencies?->recoveryEvidenceComplete,
                         'cluster_lifecycle_readiness' => $clusterDependencies?->lifecycleReadiness->value,
+                        'structural_readiness' => $clusterDependencies?->structuralReadiness()->value,
+                        'derived_parent_dependency_count' => $clusterDependencies?->derivedParentDependencyCount,
                         'changes' => $action->changes === [] ? null : array_map(
                             static fn (PlanChange $change): array => [
                                 'field' => $change->field,

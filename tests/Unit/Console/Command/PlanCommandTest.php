@@ -384,10 +384,64 @@ final class PlanCommandTest extends TestCase
         self::assertCount(1, $derived);
         self::assertSame('derived', $derived[0]['classification']);
         self::assertSame('cluster_create_response', $derived[0]['provenance']);
+        self::assertSame('parent_lifecycle_dependency', $derived[0]['destructive_role']);
 
         foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
             self::assertStringNotContainsString('derived-secret-id', $output);
             self::assertStringNotContainsString('any-cloud-name', $output);
+        }
+    }
+
+    public function testClusterDerivedDependencyDiagnosticsAreSeparatedAndSanitized(): void
+    {
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $state = StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-secret-id'))
+            ->withResource(new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.__derived_default'),
+                ResourceType::DATABASE,
+                'derived-secret-id',
+                $cluster,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ));
+        $cloud = new PlanDatabaseCloudClient(databases: [
+            new CloudDatabase('derived-secret-id', 'cluster-secret-id', 'any-cloud-name', 'cluster-secret-id'),
+        ]);
+
+        $text = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringContainsString('Structural readiness: satisfied.', $text->getDisplay());
+        self::assertStringContainsString('Derived parent dependencies: 1.', $text->getDisplay());
+        self::assertStringContainsString('eligible only within guarded parent destruction', $text->getDisplay());
+        self::assertStringContainsString('Database Cluster DELETE execution is not supported', $text->getDisplay());
+
+        $json = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        $actions = $decoded['actions'] ?? null;
+        self::assertIsArray($actions);
+        $clusterActions = array_values(array_filter(
+            $actions,
+            static fn ($action): bool => is_array($action)
+                && ($action['resource'] ?? null) === 'database_cluster.primary',
+        ));
+        self::assertCount(1, $clusterActions);
+        $clusterAction = $clusterActions[0];
+        self::assertSame('satisfied', $clusterAction['structural_readiness']);
+        self::assertSame(1, $clusterAction['derived_parent_dependency_count']);
+        $informational = $clusterAction['informational_dependencies'] ?? null;
+        $blocking = $clusterAction['blocking_dependencies'] ?? null;
+        self::assertIsArray($informational);
+        self::assertIsArray($blocking);
+        self::assertContains('derived_parent_dependency', $informational);
+        self::assertNotContains('derived_parent_dependency', $blocking);
+
+        foreach ([$text->getDisplay(), $json->getDisplay()] as $output) {
+            self::assertStringNotContainsString('derived-secret-id', $output);
+            self::assertStringNotContainsString('any-cloud-name', $output);
+            self::assertStringNotContainsString('cluster-secret-id', $output);
         }
     }
 

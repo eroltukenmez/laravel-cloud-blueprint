@@ -11,11 +11,13 @@ This project uses a Keep a Changelog-inspired format.
 - Database Cluster CREATE now validates exactly one default Database relationship and atomically checkpoints its exact identity at the reserved `database.<cluster>.__derived_default` address with typed create-response provenance before creating declared Databases.
 - Added guarded DELETE execution for exact State-owned logical Databases omitted from the Blueprint when parent identity and reverse Environment attachment discovery are complete and safe.
 - Added read-only, Cluster-scoped snapshot discovery and conservative Database Cluster lifecycle readiness covering complete pagination, retained recovery configuration, and lifecycle status.
+- Database Cluster destructive-readiness now recognizes an exactly proven Cluster-create-derived default Database as a typed informational parent-lifecycle dependency while keeping ordinary owned children, unmanaged children, and conflicts distinct.
 
 ### Security
 
 - Derived resources require recognized provenance, participate in the existing parent/child ownership graph, and fail closed in planning; no provenance is inferred from resource names or later Cloud discovery.
 - Default-child capture never uses the Cloud Database name, rejects malformed or ambiguous CREATE evidence, and does not retroactively classify legacy or imported Cluster children. Database Cluster DELETE remains unsupported.
+- Derived parent dependencies require exact State provenance, exact parent ownership, complete matching Cluster and Database discovery, and conflict-free identity evidence. They remain non-actionable outside a future guarded Cluster lifecycle; releasing their State ownership makes the live child unmanaged again.
 - Logical Database deletion requires explicit approval, locked Blueprint/State/Cloud replanning, an exact State-owned Cluster and Database identity, complete empty attachments, at most one DELETE transmission, authoritative exact-ID absence, and an immediate atomic State checkpoint.
 - Destructive logical Database discovery explicitly requests the authoritative parent Database and reverse Environment relationships; missing or malformed relationship data remains non-executable.
 - Database Cluster deletion and automatic detach remain unsupported; `state:unmanage` remains local-only.

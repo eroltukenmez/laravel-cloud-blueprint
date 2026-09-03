@@ -18,6 +18,7 @@ final readonly class PlanAction
     public ?DatabaseDependencies $databaseDependencies;
     public ?StateOwnershipClassification $ownershipClassification;
     public ?StateProvenance $provenance;
+    public ?DatabaseDestructiveRole $destructiveRole;
 
     public function __construct(
         public ResourceAddress $address,
@@ -25,7 +26,7 @@ final readonly class PlanAction
         public PlanOperation $operation,
         public string $reason,
         public ?string $remoteId = null,
-        PlanChange|ResourceAddress|EnvironmentDependencies|DatabaseDependencies|StateOwnershipClassification|StateProvenance ...$details,
+        PlanChange|ResourceAddress|EnvironmentDependencies|DatabaseDependencies|StateOwnershipClassification|StateProvenance|DatabaseDestructiveRole ...$details,
     ) {
         $parent = null;
         $changes = [];
@@ -33,6 +34,7 @@ final readonly class PlanAction
         $databaseDependencies = null;
         $ownershipClassification = null;
         $provenance = null;
+        $destructiveRole = null;
         foreach ($details as $detail) {
             if ($detail instanceof ResourceAddress) {
                 if ($parent !== null) {
@@ -59,6 +61,11 @@ final readonly class PlanAction
                     throw new \InvalidArgumentException('A plan action must not have multiple provenance values.');
                 }
                 $provenance = $detail;
+            } elseif ($detail instanceof DatabaseDestructiveRole) {
+                if ($destructiveRole !== null) {
+                    throw new \InvalidArgumentException('A plan action must not have multiple destructive roles.');
+                }
+                $destructiveRole = $detail;
             } else {
                 $changes[] = $detail;
             }
@@ -69,11 +76,16 @@ final readonly class PlanAction
         if ($ownershipClassification !== StateOwnershipClassification::DERIVED && $provenance !== null) {
             throw new \InvalidArgumentException('Plan action provenance requires a derived ownership classification.');
         }
+        if ($destructiveRole === DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY
+            && $ownershipClassification !== StateOwnershipClassification::DERIVED) {
+            throw new \InvalidArgumentException('A parent lifecycle dependency requires authoritative derived provenance.');
+        }
         $this->parent = $parent;
         $this->environmentDependencies = $environmentDependencies;
         $this->databaseDependencies = $databaseDependencies;
         $this->ownershipClassification = $ownershipClassification;
         $this->provenance = $provenance;
+        $this->destructiveRole = $destructiveRole;
         $this->changes = $changes;
     }
 
