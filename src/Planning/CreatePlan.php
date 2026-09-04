@@ -1276,16 +1276,46 @@ final readonly class CreatePlan
                         observeRelationships: false,
                     ),
                 );
+                $reportingEvidence = new LogicalDatabaseObservationEvidence(
+                    $databaseParent,
+                    $remoteDatabases,
+                    EvidenceStatus::COMPLETE,
+                );
+                if ($this->observationRecorder->isReporting() && $managedDatabase !== null) {
+                    $exactListMatches = array_values(array_filter(
+                        $remoteDatabases,
+                        static fn (CloudDatabase $database): bool => $database->id === $managedDatabase->remoteId,
+                    ));
+                    if (count($exactListMatches) === 1) {
+                        try {
+                            $authoritative = $cloud->databaseWithDestructiveRelationships(
+                                $remoteCluster->id,
+                                $managedDatabase->remoteId,
+                            );
+                            $reportingEvidence = new LogicalDatabaseObservationEvidence(
+                                $databaseParent,
+                                array_map(
+                                    static fn (CloudDatabase $database): CloudDatabase =>
+                                        $database->id === $managedDatabase->remoteId ? $authoritative : $database,
+                                    $remoteDatabases,
+                                ),
+                                EvidenceStatus::COMPLETE,
+                            );
+                        } catch (CloudException) {
+                            $reportingEvidence = new LogicalDatabaseObservationEvidence(
+                                $databaseParent,
+                                $remoteDatabases,
+                                EvidenceStatus::INCOMPLETE,
+                            );
+                        }
+                    }
+                }
                 $this->observationRecorder->record($this->observationRecorder->isReporting()
                     ? $this->databaseObservations->create(
                         $desiredCluster->name,
                         $desiredDatabase,
                         $managedDatabase,
-                        new LogicalDatabaseObservationEvidence(
-                            $databaseParent,
-                            $remoteDatabases,
-                            EvidenceStatus::COMPLETE,
-                        ),
+                        $reportingEvidence,
                     )
                     : $databaseObservation);
                 $databaseMatches = $managedDatabase === null

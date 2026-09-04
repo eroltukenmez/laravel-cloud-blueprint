@@ -46,6 +46,11 @@ use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
+use LaravelCloudBlueprint\Observation\EvidenceStatus;
+use LaravelCloudBlueprint\Observation\ObservationKind;
+use LaravelCloudBlueprint\Observation\OwnershipStatus;
+use LaravelCloudBlueprint\Observation\ResourceObservation;
+use LaravelCloudBlueprint\Observation\ResourceObservationCollection;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\DatabaseDestructiveRole;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
@@ -111,6 +116,115 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame(PlanOperation::NO_CHANGE, $database->operation);
         self::assertStringContainsString('Owned', $database->reason);
         self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database_attachment.production')->operation);
+    }
+
+    public function testReportingUsesAuthoritativeDetailForManagedDatabaseRelationships(): void
+    {
+        $cloud = self::matchingCloud(databases: [
+            new CloudDatabase('database-1', 'cluster-1', 'application'),
+        ]);
+        $cloud->authoritativeDatabases['cluster-1']['database-1'] = new CloudDatabase(
+            'database-1', 'cluster-1', 'application', 'cluster-1', [], true,
+        );
+
+        $observation = self::observation(self::observations(self::blueprint(), $cloud, self::databaseState()),
+            'database.primary.application');
+
+        self::assertSame(ObservationKind::IN_SYNC, $observation->observation);
+        self::assertSame(OwnershipStatus::MANAGED, $observation->ownership);
+        self::assertSame(EvidenceStatus::COMPLETE, $observation->evidence);
+        self::assertSame([['cluster-1', 'database-1']], $cloud->destructiveDatabaseCalls);
+    }
+
+    public function testReportingClassifiesAuthoritativeAttachmentsAndWrongParent(): void
+    {
+        foreach ([
+            'attached' => [
+                new CloudDatabase('database-1', 'cluster-1', 'application', 'cluster-1', ['env-1'], true),
+                ObservationKind::LIFECYCLE_CONDITION,
+                EvidenceStatus::COMPLETE,
+            ],
+            'wrong parent' => [
+                new CloudDatabase('database-1', 'cluster-1', 'application', 'other-cluster', [], true),
+                ObservationKind::IDENTITY_CONFLICT,
+                EvidenceStatus::COMPLETE,
+            ],
+            'relationships omitted' => [
+                new CloudDatabase('database-1', 'cluster-1', 'application'),
+                ObservationKind::UNKNOWN,
+                EvidenceStatus::INCOMPLETE,
+            ],
+        ] as [$detail, $expected, $expectedEvidence]) {
+            $cloud = self::matchingCloud();
+            $cloud->authoritativeDatabases['cluster-1']['database-1'] = $detail;
+
+            $observation = self::observation(
+                self::observations(self::blueprint(), $cloud, self::databaseState()),
+                'database.primary.application',
+            );
+
+            self::assertSame($expected, $observation->observation);
+            self::assertSame($expectedEvidence, $observation->evidence);
+        }
+    }
+
+    public function testReportingDetailFailureRemainsUnknownAndPlanDoesNotFetchDetail(): void
+    {
+        $cloud = self::matchingCloud();
+        $cloud->failDatabaseDetail = true;
+
+        $observation = self::observation(
+            self::observations(self::blueprint(), $cloud, self::databaseState()),
+            'database.primary.application',
+        );
+
+        self::assertSame(ObservationKind::UNKNOWN, $observation->observation);
+        self::assertSame(EvidenceStatus::INCOMPLETE, $observation->evidence);
+        self::assertSame([['cluster-1', 'database-1']], $cloud->destructiveDatabaseCalls);
+
+        $planCloud = self::matchingCloud();
+        $plan = self::plan(self::blueprint(), $planCloud, self::databaseState());
+        self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database.primary.application')->operation);
+        self::assertSame([], $planCloud->destructiveDatabaseCalls);
+    }
+
+    public function testReportingDoesNotFetchDetailForReplacementOrDerivedDatabase(): void
+    {
+        $replacementCloud = self::matchingCloud(databases: [
+            new CloudDatabase('replacement', 'cluster-1', 'application'),
+        ]);
+        $replacement = self::observation(
+            self::observations(self::blueprint(), $replacementCloud, self::databaseState()),
+            'database.primary.application',
+        );
+        self::assertSame(ObservationKind::IDENTITY_REPLACEMENT, $replacement->observation);
+        self::assertSame([], $replacementCloud->destructiveDatabaseCalls);
+
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+        $derivedState = new StateDocument(
+            StateVersion::V2,
+            0,
+            null,
+            new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE, 'primary.application'),
+                ResourceType::DATABASE,
+                'database-1',
+                $cluster,
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            ),
+        );
+        $derivedCloud = self::matchingCloud(
+            self::mysqlCluster(databaseIds: ['database-1'], childDiscoveryComplete: true),
+            [new CloudDatabase('database-1', 'cluster-1', 'application', 'cluster-1')],
+        );
+        $derived = self::observation(
+            self::observations(self::blueprint(), $derivedCloud, $derivedState),
+            'database.primary.application',
+        );
+        self::assertSame(ObservationKind::IDENTITY_CONFLICT, $derived->observation);
+        self::assertSame([], $derivedCloud->destructiveDatabaseCalls);
     }
 
     public function testReleasedLogicalDatabaseUsesUnmanagedPlanningSemantics(): void
@@ -1211,6 +1325,26 @@ final class DatabasePlanningTest extends TestCase
             ->create($blueprint, $cloud, $state ?? StateDocument::empty());
     }
 
+    private static function observations(
+        Blueprint $blueprint,
+        DatabasePlanningCloud $cloud,
+        ?StateDocument $state = null,
+    ): ResourceObservationCollection {
+        return (new CreatePlan(new VariableValueResolver(new EmptyEnvironmentValues())))
+            ->collectObservations($blueprint, $cloud, $state ?? StateDocument::empty());
+    }
+
+    private static function observation(ResourceObservationCollection $observations, string $address): ResourceObservation
+    {
+        foreach ($observations as $observation) {
+            if ((string) $observation->address === $address) {
+                return $observation;
+            }
+        }
+
+        throw new \LogicException('Missing observation ' . $address);
+    }
+
     private static function databaseState(): StateDocument
     {
         $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
@@ -1349,6 +1483,9 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseLifecycleClient
     /** @var list<array{string, string}> */
     public array $destructiveDatabaseCalls = [];
 
+    /** @var array<string, array<string, CloudDatabase>> */
+    public array $authoritativeDatabases = [];
+
     public ?string $environmentDatabaseId = 'database-1';
     public bool $failClusterDetail = false;
     public bool $failDatabaseDetail = false;
@@ -1445,6 +1582,9 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseLifecycleClient
     public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase
     {
         $this->destructiveDatabaseCalls[] = [$clusterId, $databaseId];
+        if (isset($this->authoritativeDatabases[$clusterId][$databaseId])) {
+            return $this->authoritativeDatabases[$clusterId][$databaseId];
+        }
         return $this->database($clusterId, $databaseId);
     }
 
