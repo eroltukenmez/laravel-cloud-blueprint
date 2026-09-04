@@ -27,7 +27,7 @@ final class DatabaseBlueprintTest extends TestCase
         self::assertTrue((new BlueprintValidator())->validate($data)->isValid());
         $blueprint = (new BlueprintNormalizer())->normalize($data);
         self::assertCount(0, $blueprint->databaseClusters);
-        self::assertNull($blueprint->environments->get('production')->database);
+        self::assertTrue($blueprint->environments->get('production')->database->isUnmanaged());
     }
 
     public function testLaravelMysqlClusterNormalizesToTypedConfiguration(): void
@@ -177,8 +177,7 @@ final class DatabaseBlueprintTest extends TestCase
         $data = self::withEnvironmentDatabase(self::withCluster(self::mysqlCluster()), 'primary.application');
         self::assertTrue((new BlueprintValidator())->validate($data)->isValid());
 
-        $reference = (new BlueprintNormalizer())->normalize($data)->environments->get('production')->database;
-        self::assertNotNull($reference);
+        $reference = (new BlueprintNormalizer())->normalize($data)->environments->get('production')->database->reference();
         self::assertSame('primary', $reference->cluster);
         self::assertSame('application', $reference->database);
         self::assertSame('primary.application', (string) $reference);

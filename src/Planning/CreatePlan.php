@@ -2023,7 +2023,7 @@ final readonly class CreatePlan
     ): array {
         $requiresAttachments = false;
         foreach ($blueprint->environments as $environment) {
-            $requiresAttachments = $requiresAttachments || $environment->database !== null;
+            $requiresAttachments = $requiresAttachments || $environment->database->isAttached();
         }
         if (!$requiresAttachments) {
             return [];
@@ -2038,10 +2038,10 @@ final readonly class CreatePlan
 
         $actions = [];
         foreach ($blueprint->environments as $environment) {
-            $reference = $environment->database;
-            if ($reference === null) {
+            if (!$environment->database->isAttached()) {
                 continue;
             }
+            $reference = $environment->database->reference();
             $database = $resolvedDatabases[$reference->cluster][$reference->database] ?? null;
             if ($database === null) {
                 $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UNSUPPORTED,
