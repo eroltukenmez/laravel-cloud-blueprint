@@ -11,7 +11,7 @@
 Laravel Cloud Blueprint is an unofficial community CLI for describing a supported subset of Laravel Cloud resources in version-controlled YAML blueprints. It produces a read-only plan before mutation, then reconciles supported application, environment, and environment-variable changes when you apply it.
 
 > [!WARNING]
-> Version `0.1.0-alpha.8` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
+> Version `0.1.0-alpha.9` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
 
 ## See the Plan Before You Apply
 
@@ -42,14 +42,14 @@ lcb --version
 Expected output:
 
 ```text
-Laravel Cloud Blueprint 0.1.0-alpha.8
+Laravel Cloud Blueprint 0.1.0-alpha.9
 ```
 
 Composer's global bin directory must be available in `PATH` for the `lcb` command to be found.
 
 ## Status
 
-Current version: `0.1.0-alpha.8`.
+Current version: `0.1.0-alpha.9`.
 
 The current build can discover and compare applications, environments, environment variables, Database Clusters, and logical Databases. It can create missing resources in that supported set, update an environment's branch or an existing variable's value, and safely delete eligible State-owned Environments, logical Databases, or Database Clusters removed from the Blueprint. Database deletion requires exact State identity and complete dependency evidence. Application repository and region changes, renames, automatic adoption, remote state, Database update/replacement, and Database attachment mutation remain unsupported.
 
@@ -179,7 +179,11 @@ Creates a read-only comparison against Laravel Cloud. Supports `--file=<path>` a
 
 ### `drift`
 
-Run `lcb drift` for a human report or `lcb drift --json` for structured output. The command reports current Blueprint, local State, and scoped Laravel Cloud observations without modifying Cloud or State; `--file=<path>` selects another Blueprint. A configuration difference describes the current Blueprint-versus-Cloud comparison—it is not proof that an external change caused the difference. The command reports only and does not repair or reconcile resources.
+Run `lcb drift` for a concise human report, `lcb drift --json` for all scoped entries as deterministic JSON, or `lcb drift --file=cloud.yaml` for another Blueprint. Drift is read-only: it compares the desired Blueprint, State-owned identity, and current scoped Cloud evidence; it does not Apply, reconcile, or update State. Reports include configuration, identity, lifecycle, ownership, reconciliation, and evidence observations for Applications, Environments, declared variables, Database Clusters, logical Databases, and derived default Databases.
+
+> A configuration difference means the current Blueprint and Cloud representation differ. Alpha.9 does not claim whether the Cloud resource drifted remotely or the Blueprint itself changed.
+
+Incomplete evidence remains `unknown`. Variable output never exposes current or desired values, and Drift output contains no remote IDs, secrets, or mutation instructions.
 
 ### `apply`
 
@@ -198,6 +202,12 @@ Releases local LCB ownership of one exact State address. Supported address types
 Ownership release is deliberately non-recursive. An Application or Database Cluster cannot be unmanaged while it has owned children; release those children explicitly first. Missing addresses are successful no-ops. If the resource remains in the blueprint, the next plan uses normal unmanaged discovery semantics; depending on Cloud reality, that can mean an unmanaged match or a supported CREATE. This command does not determine whether the remote resource exists. An existing resource can later follow the normal explicit `lcb import` workflow. This command is not delete, destroy, detach, or Cloud mutation.
 
 Run `lcb <command> --help` for exact usage.
+
+### Exit codes
+
+- `0`: report completed successfully, including differences, identity observations, lifecycle conditions, or unknown evidence.
+- `1`: operational, Cloud, or State failure.
+- `2`: Blueprint decode or validation failure.
 
 ## Plan Semantics
 
