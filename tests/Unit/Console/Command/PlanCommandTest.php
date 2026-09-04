@@ -320,7 +320,7 @@ final class PlanCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
         self::assertStringContainsString('= database_cluster.primary', $text->getDisplay());
         self::assertStringContainsString('= database.primary.application', $text->getDisplay());
-        self::assertStringContainsString('= database_attachment.production', $text->getDisplay());
+        self::assertStringContainsString('! database_attachment.production', $text->getDisplay());
         self::assertStringNotContainsString('cluster-secret-id', $text->getDisplay());
         self::assertStringNotContainsString('database-secret-id', $text->getDisplay());
 
@@ -329,8 +329,8 @@ final class PlanCommandTest extends TestCase
         $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
         self::assertIsArray($decoded['summary']);
-        self::assertSame(5, $decoded['summary']['no_change']);
-        self::assertSame(0, $decoded['summary']['unsupported']);
+        self::assertSame(4, $decoded['summary']['no_change']);
+        self::assertSame(1, $decoded['summary']['unsupported']);
         self::assertIsArray($decoded['actions']);
         self::assertIsArray($decoded['actions'][2]);
         self::assertIsArray($decoded['actions'][3]);

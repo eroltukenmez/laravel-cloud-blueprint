@@ -19,6 +19,7 @@ final readonly class DatabaseAttachmentObservationFactory
         ?CloudEnvironment $remoteEnvironment,
         ?StateResource $stateDatabase,
         EvidenceStatus $evidence,
+        bool $actionable = false,
     ): ?ResourceObservation {
         if ($intent->isUnmanaged()) {
             return null;
@@ -48,7 +49,7 @@ final readonly class DatabaseAttachmentObservationFactory
             $address,
             $matches ? ObservationKind::IN_SYNC : ObservationKind::CONFIGURATION_DIFFERENCE,
             OwnershipStatus::MANAGED,
-            ReconciliationStatus::UNSUPPORTED,
+            $actionable ? ReconciliationStatus::SUPPORTED : ReconciliationStatus::UNSUPPORTED,
             EvidenceStatus::COMPLETE,
             $matches ? null : new ChangedFields('database'),
             $matches ? ReasonCode::DATABASE_ATTACHMENT_IN_SYNC : ReasonCode::DATABASE_ATTACHMENT_DIFFERENCE,

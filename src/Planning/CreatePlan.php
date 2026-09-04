@@ -2052,6 +2052,14 @@ final readonly class CreatePlan
                 $ref = $environment->database->reference();
                 $stateDatabase = $state->find(new ResourceAddress(ResourceType::DATABASE, (string) $ref));
             }
+            $resolvedDatabase = null;
+            if ($environment->database->isAttached()) {
+                $reference = $environment->database->reference();
+                $resolvedDatabase = $resolvedDatabases[$reference->cluster][$reference->database] ?? null;
+            }
+            $actionable = $this->attachmentEnvironmentIsActionable($stateEnvironment, $environmentAction, $state, $blueprint)
+                && (!$environment->database->isAttached()
+                    || $this->attachmentDatabaseIsActionable($stateDatabase, $resolvedDatabase, $state, $environment));
             $attachmentObservation = $this->databaseAttachmentObservations->create(
                 $environment->name,
                 $environment->database,
@@ -2059,46 +2067,58 @@ final readonly class CreatePlan
                 $remoteEnvironment,
                 $stateDatabase,
                 EvidenceStatus::COMPLETE,
+                $actionable,
             );
             if ($attachmentObservation !== null) {
                 $this->observationRecorder->record($attachmentObservation);
             }
-            if (!$environment->database->isAttached()) {
+            if ($attachmentObservation === null) {
                 continue;
             }
-            $reference = $environment->database->reference();
-            $database = $resolvedDatabases[$reference->cluster][$reference->database] ?? null;
-            if ($database === null) {
+            if (!$actionable) {
                 $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UNSUPPORTED,
-                    'Environment Database attachment cannot be resolved because the desired logical Database is unresolved.');
+                    'Environment Database attachment cannot be reconciled until exact managed identities are resolved.');
                 continue;
             }
-
-            $environmentId = $environmentAction?->remoteId;
-            $remoteEnvironment = $environmentId === null
-                ? null
-                : $this->findEnvironmentById($remoteEnvironments, $environmentId);
-            if ($remoteEnvironment === null) {
-                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UNSUPPORTED,
-                    'Environment Database attachment cannot be compared while the Environment identity is unresolved.');
-                continue;
-            }
-            if ($remoteEnvironment->databaseId === $database->id) {
+            if ($attachmentObservation->observation === ObservationKind::IN_SYNC) {
                 $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::NO_CHANGE,
-                    'Environment is attached to the desired logical Database.');
+                    'Environment Database attachment matches the managed desired configuration.');
                 continue;
             }
-
-            $actions[] = $this->databaseAttachmentAction(
-                $environment->name,
-                PlanOperation::UNSUPPORTED,
-                $remoteEnvironment->databaseId === null
-                    ? 'Environment has no Database attachment. Attachment updates are not supported yet.'
-                    : 'Environment Database attachment differs. Attachment updates are not supported yet.',
-            );
+            $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UPDATE,
+                'Environment Database attachment differs and will be updated.', new PlanChange('database', 'configured', 'desired'));
         }
 
         return $actions;
+    }
+
+    private function attachmentEnvironmentIsActionable(
+        ?StateResource $environment,
+        ?PlanAction $action,
+        StateDocument $state,
+        Blueprint $blueprint,
+    ): bool {
+        if ($environment === null || $action === null || $action->remoteId !== $environment->remoteId) {
+            return false;
+        }
+
+        $parent = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+        return $environment->parent !== null && (string) $environment->parent === (string) $parent && $state->find($parent) !== null;
+    }
+
+    private function attachmentDatabaseIsActionable(
+        ?StateResource $database,
+        ?CloudDatabase $remoteDatabase,
+        StateDocument $state,
+        EnvironmentDefinition $environment,
+    ): bool {
+        if ($database === null || $database->isDerived() || $remoteDatabase === null || $database->remoteId !== $remoteDatabase->id) {
+            return false;
+        }
+
+        $reference = $environment->database->reference();
+        $parent = new ResourceAddress(ResourceType::DATABASE_CLUSTER, $reference->cluster);
+        return $database->parent !== null && (string) $database->parent === (string) $parent && $state->find($parent) !== null;
     }
 
     private function databaseClusterAction(
@@ -2161,13 +2181,15 @@ final readonly class CreatePlan
         );
     }
 
-    private function databaseAttachmentAction(string $name, PlanOperation $operation, string $reason): PlanAction
+    private function databaseAttachmentAction(string $name, PlanOperation $operation, string $reason, PlanChange ...$changes): PlanAction
     {
         return new PlanAction(
             new ResourceAddress(ResourceType::DATABASE_ATTACHMENT, $name),
             ResourceType::DATABASE_ATTACHMENT,
             $operation,
             $reason,
+            null,
+            ...$changes,
         );
     }
 

@@ -92,7 +92,7 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame(1, $plan->countByOperation(PlanOperation::UNSUPPORTED));
     }
 
-    public function testExactMysqlClusterDatabaseAndAttachmentAreReadOnlyNoChange(): void
+    public function testExactMysqlClusterDatabaseAndAttachmentWithoutEnvironmentStateIsUnsupported(): void
     {
         $cloud = self::matchingCloud();
         $plan = self::plan(self::blueprint(), $cloud);
@@ -100,12 +100,12 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database_cluster.primary')->operation);
         self::assertStringContainsString('unmanaged', self::action($plan, 'database_cluster.primary')->reason);
         self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database.primary.application')->operation);
-        self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database_attachment.production')->operation);
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database_attachment.production')->operation);
         self::assertSame(1, $cloud->clusterCalls);
         self::assertSame(['cluster-1' => 1], $cloud->databaseCalls);
     }
 
-    public function testImportedDatabaseGraphIsResolvedByOwnedRemoteIdentity(): void
+    public function testImportedDatabaseGraphWithoutEnvironmentStateKeepsAttachmentUnsupported(): void
     {
         $plan = self::plan(self::blueprint(), self::matchingCloud(), self::databaseState());
 
@@ -115,7 +115,20 @@ final class DatabasePlanningTest extends TestCase
         self::assertStringContainsString('Owned', $cluster->reason);
         self::assertSame(PlanOperation::NO_CHANGE, $database->operation);
         self::assertStringContainsString('Owned', $database->reason);
-        self::assertSame(PlanOperation::NO_CHANGE, self::action($plan, 'database_attachment.production')->operation);
+        self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database_attachment.production')->operation);
+    }
+
+    public function testExactManagedAttachmentDifferencePlansARedactedUpdate(): void
+    {
+        $cloud = self::matchingCloud();
+        $cloud->environmentDatabaseId = null;
+
+        $plan = self::plan(self::blueprint(), $cloud, self::attachmentState());
+        $action = self::action($plan, 'database_attachment.production');
+
+        self::assertSame(PlanOperation::UPDATE, $action->operation);
+        self::assertSame(['database'], array_map(static fn (PlanChange $change): string => $change->field, $action->changes));
+        self::assertStringNotContainsString('database-1', json_encode($action, JSON_THROW_ON_ERROR));
     }
 
     public function testReportingUsesAuthoritativeDetailForManagedDatabaseRelationships(): void
@@ -1131,7 +1144,7 @@ final class DatabasePlanningTest extends TestCase
     }
 
     #[DataProvider('attachmentDifferences')]
-    public function testAttachmentDifferencesAreUnsupported(?string $databaseId, string $reason): void
+    public function testAttachmentDifferencesWithoutExactStateAreUnsupported(?string $databaseId, string $reason): void
     {
         $cloud = self::matchingCloud();
         $cloud->environmentDatabaseId = $databaseId;
@@ -1139,7 +1152,7 @@ final class DatabasePlanningTest extends TestCase
         $action = self::action(self::plan(self::blueprint(), $cloud), 'database_attachment.production');
 
         self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
-        self::assertStringContainsString($reason, $action->reason);
+        self::assertStringContainsString('exact managed identities', $action->reason);
     }
 
     public function testOmittedDesiredAttachmentDoesNotInspectOrDetachExternalAttachment(): void
@@ -1360,6 +1373,23 @@ final class DatabasePlanningTest extends TestCase
                 'database-1',
                 $cluster,
             ),
+        );
+    }
+
+    private static function attachmentState(): StateDocument
+    {
+        $application = new ResourceAddress(ResourceType::APPLICATION, 'my-api');
+        $environment = new ResourceAddress(ResourceType::ENVIRONMENT, 'production');
+        $cluster = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');
+
+        return new StateDocument(
+            StateVersion::V1,
+            0,
+            null,
+            new StateResource($application, ResourceType::APPLICATION, 'app-1'),
+            new StateResource($environment, ResourceType::ENVIRONMENT, 'env-1', $application),
+            new StateResource($cluster, ResourceType::DATABASE_CLUSTER, 'cluster-1'),
+            new StateResource(new ResourceAddress(ResourceType::DATABASE, 'primary.application'), ResourceType::DATABASE, 'database-1', $cluster),
         );
     }
 
