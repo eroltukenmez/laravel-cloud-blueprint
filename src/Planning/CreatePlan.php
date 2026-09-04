@@ -2059,14 +2059,17 @@ final readonly class CreatePlan
             }
             $actionable = $this->attachmentEnvironmentIsActionable($stateEnvironment, $environmentAction, $state, $blueprint)
                 && (!$environment->database->isAttached()
-                    || $this->attachmentDatabaseIsActionable($stateDatabase, $resolvedDatabase, $state, $environment));
+                    || $this->attachmentDatabaseIsActionable($stateDatabase, $resolvedDatabase, $state, $environment))
+                && $remoteEnvironment?->dependencies->databaseRelationshipComplete() === true;
             $attachmentObservation = $this->databaseAttachmentObservations->create(
                 $environment->name,
                 $environment->database,
                 $stateEnvironment,
                 $remoteEnvironment,
                 $stateDatabase,
-                EvidenceStatus::COMPLETE,
+                $remoteEnvironment?->dependencies->databaseRelationshipComplete() === true
+                    ? EvidenceStatus::COMPLETE
+                    : EvidenceStatus::INCOMPLETE,
                 $actionable,
             );
             if ($attachmentObservation !== null) {
@@ -2080,16 +2083,42 @@ final readonly class CreatePlan
                     'Environment Database attachment cannot be reconciled until exact managed identities are resolved.');
                 continue;
             }
+            if ($stateEnvironment === null) {
+                throw new \LogicException('Actionable Database attachment requires exact Environment State identity.');
+            }
             if ($attachmentObservation->observation === ObservationKind::IN_SYNC) {
                 $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::NO_CHANGE,
-                    'Environment Database attachment matches the managed desired configuration.');
+                    'Environment Database attachment matches the managed desired configuration.',
+                    $this->databaseAttachmentApproval($environment, $stateEnvironment, $stateDatabase, $state));
                 continue;
             }
             $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UPDATE,
-                'Environment Database attachment differs and will be updated.', new PlanChange('database', 'configured', 'desired'));
+                'Environment Database attachment differs and will be updated.',
+                $this->databaseAttachmentApproval($environment, $stateEnvironment, $stateDatabase, $state),
+                new PlanChange('database', 'configured', 'desired'));
         }
 
         return $actions;
+    }
+
+    private function databaseAttachmentApproval(
+        EnvironmentDefinition $environment,
+        StateResource $stateEnvironment,
+        ?StateResource $stateDatabase,
+        StateDocument $state,
+    ): DatabaseAttachmentApproval {
+        $application = $state->get($stateEnvironment->parent ?? throw new \LogicException('Actionable Environment requires a parent.'));
+        $cluster = $stateDatabase === null
+            ? null
+            : $state->get($stateDatabase->parent ?? throw new \LogicException('Actionable Database requires a parent.'));
+
+        return DatabaseAttachmentApproval::fromIdentities(
+            $environment->database,
+            $stateEnvironment->remoteId,
+            $application->remoteId,
+            $stateDatabase?->remoteId,
+            $cluster?->remoteId,
+        );
     }
 
     private function attachmentEnvironmentIsActionable(
@@ -2181,7 +2210,12 @@ final readonly class CreatePlan
         );
     }
 
-    private function databaseAttachmentAction(string $name, PlanOperation $operation, string $reason, PlanChange ...$changes): PlanAction
+    private function databaseAttachmentAction(
+        string $name,
+        PlanOperation $operation,
+        string $reason,
+        DatabaseAttachmentApproval|PlanChange ...$details,
+    ): PlanAction
     {
         return new PlanAction(
             new ResourceAddress(ResourceType::DATABASE_ATTACHMENT, $name),
@@ -2189,7 +2223,7 @@ final readonly class CreatePlan
             $operation,
             $reason,
             null,
-            ...$changes,
+            ...$details,
         );
     }
 

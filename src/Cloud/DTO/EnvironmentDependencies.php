@@ -24,6 +24,7 @@ final readonly class EnvironmentDependencies
         public bool $complete,
         public array $unknownRelationships = [],
         public array $missingRelationships = [],
+        public ?bool $databaseRelationshipEvidenceComplete = null,
     ) {
     }
 
@@ -35,6 +36,25 @@ final readonly class EnvironmentDependencies
     public static function authoritativeAbsence(): self
     {
         return new self(null, null, null, 0, 0, 0, 0, 0, false, false, true);
+    }
+
+    public static function authoritativeDatabaseRelationship(?string $databaseId): self
+    {
+        return new self($databaseId, null, null, 0, 0, 0, 0, 0, false, null, false, [], [], true);
+    }
+
+    public function databaseRelationshipComplete(): bool
+    {
+        if ($this->databaseRelationshipEvidenceComplete !== null) {
+            return $this->databaseRelationshipEvidenceComplete;
+        }
+        if ($this->complete) {
+            return true;
+        }
+
+        return $this->missingRelationships !== []
+            && !in_array('database', $this->missingRelationships, true)
+            && !in_array('database', $this->unknownRelationships, true);
     }
 
     public function hasDatabaseAttachment(): bool

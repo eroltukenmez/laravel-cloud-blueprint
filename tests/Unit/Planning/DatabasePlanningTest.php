@@ -1551,7 +1551,14 @@ final class DatabasePlanningCloud implements LaravelCloudDatabaseLifecycleClient
     public function environments(string $applicationId): array
     {
         ++$this->environmentCalls;
-        return [new CloudEnvironment('env-1', $applicationId, 'production', 'main', $this->environmentDatabaseId)];
+        return [new CloudEnvironment(
+            'env-1',
+            $applicationId,
+            'production',
+            'main',
+            $this->environmentDatabaseId,
+            \LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies::authoritativeDatabaseRelationship($this->environmentDatabaseId),
+        )];
     }
 
     public function environment(string $environmentId): CloudEnvironmentDetails
