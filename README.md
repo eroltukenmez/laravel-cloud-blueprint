@@ -177,6 +177,10 @@ Reads the authenticated organization, applications, and environments without mut
 
 Creates a read-only comparison against Laravel Cloud. Supports `--file=<path>` and `--json`.
 
+### `drift`
+
+Run `lcb drift` for a human report or `lcb drift --json` for structured output. The command reports current Blueprint, local State, and scoped Laravel Cloud observations without modifying Cloud or State; `--file=<path>` selects another Blueprint. A configuration difference describes the current Blueprint-versus-Cloud comparison—it is not proof that an external change caused the difference. The command reports only and does not repair or reconcile resources.
+
 ### `apply`
 
 Applies supported creates, updates, and guarded Environment deletions after producing a fresh plan. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.

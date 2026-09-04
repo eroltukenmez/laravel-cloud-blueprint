@@ -67,10 +67,11 @@ final readonly class DriftSummary
     /** @return array<string, int> */
     public function toArray(): array
     {
-        $counts = ['total' => $this->total()];
+        $counts = [];
         foreach (ObservationKind::cases() as $kind) {
             $counts[$kind->value] = $this->count($kind);
         }
+        $counts['total'] = $this->total();
 
         return $counts;
     }
