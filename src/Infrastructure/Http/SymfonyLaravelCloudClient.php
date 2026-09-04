@@ -7,6 +7,7 @@ namespace LaravelCloudBlueprint\Infrastructure\Http;
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseAttachmentMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClusterDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseLifecycleClient;
@@ -35,6 +36,7 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentDatabaseAttachmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
@@ -48,7 +50,7 @@ use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
-final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudDatabaseLifecycleClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient, LaravelCloudDatabaseClusterDeletionClient
+final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudDatabaseAttachmentMutationClient, LaravelCloudDatabaseLifecycleClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient, LaravelCloudDatabaseClusterDeletionClient
 {
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string DATABASE_DESTRUCTIVE_INCLUDES = 'database,environments';
@@ -379,6 +381,25 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
                 $path,
             );
         }
+        return new UpdatedCloudEnvironment($id);
+    }
+
+    public function updateEnvironmentDatabaseAttachment(
+        string $environmentId,
+        UpdateEnvironmentDatabaseAttachmentRequest $request,
+    ): UpdatedCloudEnvironment {
+        $path = sprintf('/environments/%s', rawurlencode($environmentId));
+        $document = $this->patch($path, ['database_schema_id' => $request->databaseId]);
+        $resource = $this->mappingAt($document, 'data', $path);
+        $id = $this->requiredResourceId($resource, 'id', $path);
+        if ($id !== $environmentId) {
+            throw new CloudResponseException(
+                'Environment update response identity does not match the requested environment.',
+                'PATCH',
+                $path,
+            );
+        }
+
         return new UpdatedCloudEnvironment($id);
     }
 

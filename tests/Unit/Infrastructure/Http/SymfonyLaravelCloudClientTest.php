@@ -16,6 +16,7 @@ use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotStatus;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotType;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentDatabaseAttachmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
@@ -523,6 +524,58 @@ JSON);
         )])->updateEnvironment('env-123', new UpdateEnvironmentRequest('develop'));
 
         self::assertSame('env-123', $environment->id);
+    }
+
+    public function testDatabaseAttachmentUpdateSendsOnlyExactDatabaseSchemaId(): void
+    {
+        $response = new MockResponse('{"data":{"id":"env-123","type":"environments"}}', ['http_code' => 200]);
+
+        $environment = $this->client([$response])->updateEnvironmentDatabaseAttachment(
+            'env-123',
+            new UpdateEnvironmentDatabaseAttachmentRequest('database-target-id'),
+        );
+
+        self::assertSame('env-123', $environment->id);
+        self::assertSame('PATCH', $response->getRequestMethod());
+        self::assertSame('https://cloud.laravel.com/api/environments/env-123', $response->getRequestUrl());
+        self::assertSame('{"database_schema_id":"database-target-id"}', $response->getRequestOptions()['body']);
+    }
+
+    public function testDatabaseAttachmentDetachSendsExplicitNull(): void
+    {
+        $response = new MockResponse('{"data":{"id":"env-123","type":"environments"}}', ['http_code' => 200]);
+
+        $this->client([$response])->updateEnvironmentDatabaseAttachment(
+            'env-123',
+            new UpdateEnvironmentDatabaseAttachmentRequest(null),
+        );
+
+        self::assertSame('{"database_schema_id":null}', $response->getRequestOptions()['body']);
+    }
+
+    public function testDatabaseAttachmentUpdateRejectsMismatchedResponseIdentity(): void
+    {
+        $this->expectException(CloudResponseException::class);
+
+        $this->client([new MockResponse('{"data":{"id":"different","type":"environments"}}', ['http_code' => 200])])
+            ->updateEnvironmentDatabaseAttachment('env-123', new UpdateEnvironmentDatabaseAttachmentRequest('database-target-id'));
+    }
+
+    public function testDatabaseAttachmentPatchTransportFailureIsNotRetried(): void
+    {
+        $attempts = 0;
+        $http = new MockHttpClient(static function () use (&$attempts): never {
+            ++$attempts;
+            throw new TransportException('timeout after send');
+        });
+
+        $this->expectException(CloudTransportException::class);
+        try {
+            (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))
+                ->updateEnvironmentDatabaseAttachment('env-1', new UpdateEnvironmentDatabaseAttachmentRequest('database-target-id'));
+        } finally {
+            self::assertSame(1, $attempts);
+        }
     }
 
     public function testEnvironmentUpdateMissingResponseIdentityFailsSafely(): void
