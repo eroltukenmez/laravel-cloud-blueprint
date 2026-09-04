@@ -37,6 +37,7 @@ use LaravelCloudBlueprint\Observation\DatabaseClusterObservationFactory;
 use LaravelCloudBlueprint\Observation\DatabaseParentEvidence;
 use LaravelCloudBlueprint\Observation\DerivedDatabaseObservationEvidence;
 use LaravelCloudBlueprint\Observation\DerivedDatabaseObservationFactory;
+use LaravelCloudBlueprint\Observation\DatabaseAttachmentObservationFactory;
 use LaravelCloudBlueprint\Observation\EnvironmentObservationEvidence;
 use LaravelCloudBlueprint\Observation\EnvironmentObservationFactory;
 use LaravelCloudBlueprint\Observation\EnvironmentParentEvidence;
@@ -70,6 +71,7 @@ final readonly class CreatePlan
         private LogicalDatabaseObservationFactory $databaseObservations = new LogicalDatabaseObservationFactory(),
         private DerivedDatabaseObservationFactory $derivedDatabaseObservations = new DerivedDatabaseObservationFactory(),
         private ResourceObservationRecorder $observationRecorder = new ResourceObservationRecorder(),
+        private DatabaseAttachmentObservationFactory $databaseAttachmentObservations = new DatabaseAttachmentObservationFactory(),
     ) {
     }
 
@@ -1402,6 +1404,7 @@ final readonly class CreatePlan
             $applicationActions,
             $environmentActions,
             $resolvedDatabases,
+            $state,
         );
 
         return new ExecutionPlan(
@@ -2020,10 +2023,11 @@ final readonly class CreatePlan
         array $applicationActions,
         array $environmentActions,
         array $resolvedDatabases,
+        StateDocument $state,
     ): array {
         $requiresAttachments = false;
         foreach ($blueprint->environments as $environment) {
-            $requiresAttachments = $requiresAttachments || $environment->database->isAttached();
+            $requiresAttachments = $requiresAttachments || !$environment->database->isUnmanaged();
         }
         if (!$requiresAttachments) {
             return [];
@@ -2038,6 +2042,27 @@ final readonly class CreatePlan
 
         $actions = [];
         foreach ($blueprint->environments as $environment) {
+            $environmentAction = $environmentActionsByName[$environment->name] ?? null;
+            $remoteEnvironment = $environmentAction?->remoteId === null
+                ? null
+                : $this->findEnvironmentById($remoteEnvironments, $environmentAction->remoteId);
+            $stateEnvironment = $state->find(new ResourceAddress(ResourceType::ENVIRONMENT, $environment->name));
+            $stateDatabase = null;
+            if ($environment->database->isAttached()) {
+                $ref = $environment->database->reference();
+                $stateDatabase = $state->find(new ResourceAddress(ResourceType::DATABASE, (string) $ref));
+            }
+            $attachmentObservation = $this->databaseAttachmentObservations->create(
+                $environment->name,
+                $environment->database,
+                $stateEnvironment,
+                $remoteEnvironment,
+                $stateDatabase,
+                EvidenceStatus::COMPLETE,
+            );
+            if ($attachmentObservation !== null) {
+                $this->observationRecorder->record($attachmentObservation);
+            }
             if (!$environment->database->isAttached()) {
                 continue;
             }
@@ -2049,7 +2074,6 @@ final readonly class CreatePlan
                 continue;
             }
 
-            $environmentAction = $environmentActionsByName[$environment->name] ?? null;
             $environmentId = $environmentAction?->remoteId;
             $remoteEnvironment = $environmentId === null
                 ? null
