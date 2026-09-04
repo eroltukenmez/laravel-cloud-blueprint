@@ -29,6 +29,28 @@ use LaravelCloudBlueprint\Cloud\DTO\DatabaseSnapshotType;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
+use LaravelCloudBlueprint\Observation\ApplicationObservationEvidence;
+use LaravelCloudBlueprint\Observation\ApplicationObservationFactory;
+use LaravelCloudBlueprint\Observation\DatabaseClusterCandidate;
+use LaravelCloudBlueprint\Observation\DatabaseClusterObservationEvidence;
+use LaravelCloudBlueprint\Observation\DatabaseClusterObservationFactory;
+use LaravelCloudBlueprint\Observation\DatabaseParentEvidence;
+use LaravelCloudBlueprint\Observation\DerivedDatabaseObservationEvidence;
+use LaravelCloudBlueprint\Observation\DerivedDatabaseObservationFactory;
+use LaravelCloudBlueprint\Observation\EnvironmentObservationEvidence;
+use LaravelCloudBlueprint\Observation\EnvironmentObservationFactory;
+use LaravelCloudBlueprint\Observation\EnvironmentParentEvidence;
+use LaravelCloudBlueprint\Observation\EnvironmentVariableObservationEvidence;
+use LaravelCloudBlueprint\Observation\EnvironmentVariableObservationFactory;
+use LaravelCloudBlueprint\Observation\EvidenceStatus;
+use LaravelCloudBlueprint\Observation\ObservationKind;
+use LaravelCloudBlueprint\Observation\OwnershipStatus;
+use LaravelCloudBlueprint\Observation\LogicalDatabaseObservationEvidence;
+use LaravelCloudBlueprint\Observation\LogicalDatabaseObservationFactory;
+use LaravelCloudBlueprint\Observation\ReconciliationStatus;
+use LaravelCloudBlueprint\Observation\ResourceObservation;
+use LaravelCloudBlueprint\Observation\ResourceObservationCollection;
+use LaravelCloudBlueprint\Observation\ResourceObservationRecorder;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\State\StateDocument;
@@ -41,10 +63,35 @@ final readonly class CreatePlan
     public function __construct(
         private VariableValueResolver $values,
         private DatabaseClusterStatusPolicy $databaseStatuses = new DatabaseClusterStatusPolicy(),
+        private ApplicationObservationFactory $applicationObservations = new ApplicationObservationFactory(),
+        private EnvironmentObservationFactory $environmentObservations = new EnvironmentObservationFactory(),
+        private EnvironmentVariableObservationFactory $variableObservations = new EnvironmentVariableObservationFactory(),
+        private DatabaseClusterObservationFactory $databaseClusterObservations = new DatabaseClusterObservationFactory(),
+        private LogicalDatabaseObservationFactory $databaseObservations = new LogicalDatabaseObservationFactory(),
+        private DerivedDatabaseObservationFactory $derivedDatabaseObservations = new DerivedDatabaseObservationFactory(),
+        private ResourceObservationRecorder $observationRecorder = new ResourceObservationRecorder(),
     ) {
     }
 
     public function create(Blueprint $blueprint, LaravelCloudClient $cloud, StateDocument $state): ExecutionPlan
+    {
+        $this->observationRecorder->reset();
+
+        return $this->createPlan($blueprint, $cloud, $state);
+    }
+
+    public function collectObservations(
+        Blueprint $blueprint,
+        LaravelCloudClient $cloud,
+        StateDocument $state,
+    ): ResourceObservationCollection {
+        $this->observationRecorder->reset(reporting: true);
+        $this->createPlan($blueprint, $cloud, $state);
+
+        return $this->observationRecorder->collection();
+    }
+
+    private function createPlan(Blueprint $blueprint, LaravelCloudClient $cloud, StateDocument $state): ExecutionPlan
     {
         $base = $this->createBasePlan($blueprint, $cloud, $state);
         if (count($blueprint->databaseClusters) === 0 && !$this->hasOwnedDatabaseResources($state)) {
@@ -85,12 +132,26 @@ final readonly class CreatePlan
         $applications = $cloud->applications();
         $applicationAddress = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
         $managedApplication = $state->find($applicationAddress);
+        $invalid = $managedApplication === null
+            ? null
+            : $this->invalidApplicationOwnership($managedApplication, $state);
+        $observation = $this->observationRecorder->record($this->applicationObservations->create(
+            $blueprint->application,
+            $managedApplication,
+            new ApplicationObservationEvidence(
+                $applications,
+                EvidenceStatus::COMPLETE,
+                $invalid !== null,
+            ),
+        ));
 
         if ($managedApplication !== null) {
-            $invalid = $this->invalidApplicationOwnership($managedApplication, $state);
             if ($invalid !== null) {
                 return $this->withOwnedOnlyResources(
-                    $this->blockedPlan($blueprint, $invalid),
+                    $this->blockedPlan(
+                        $blueprint,
+                        $this->applicationConflictReason($observation, $invalid),
+                    ),
                     $blueprint,
                     $cloud,
                     $state,
@@ -104,9 +165,7 @@ final readonly class CreatePlan
                 return $this->withOwnedOnlyResources(
                     $this->blockedPlan(
                         $blueprint,
-                        $replacement === []
-                            ? 'Managed application remote identity is missing. State must be repaired before reconciliation.'
-                            : 'Managed application remote identity is missing and a same-name unmanaged replacement exists. Import or state repair is required.',
+                        $this->missingApplicationReason($observation, $replacement !== []),
                     ),
                     $blueprint,
                     $cloud,
@@ -118,7 +177,7 @@ final readonly class CreatePlan
                 return $this->withOwnedOnlyResources(
                     $this->blockedPlan(
                         $blueprint,
-                        'Managed application name differs from its blueprint address. Rename or state-move reconciliation is not supported.',
+                        $this->applicationNameConflictReason($observation),
                     ),
                     $blueprint,
                     $cloud,
@@ -127,16 +186,35 @@ final readonly class CreatePlan
                 );
             }
 
-            $desiredPlan = $this->planForApplication($blueprint, $cloud, $state, $applications, $application, true);
+            $desiredPlan = $this->planForApplication(
+                $blueprint,
+                $cloud,
+                $state,
+                $applications,
+                $application,
+                true,
+                $observation,
+            );
 
             return $this->withOwnedOnlyResources($desiredPlan, $blueprint, $cloud, $state, $applications);
         }
 
         $matches = $this->applicationsNamed($applications, $blueprint->application->name);
         if (count($matches) > 1) {
+            $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::UNMANAGED);
+            if ($this->observationRecorder->isReporting()) {
+                return $this->withOwnedOnlyResources(
+                    $this->blockedPlan($blueprint, 'Application discovery is ambiguous.'),
+                    $blueprint,
+                    $cloud,
+                    $state,
+                    $applications,
+                );
+            }
             throw new AmbiguousResourceMatchException('application', $blueprint->application->name);
         }
         if ($matches === []) {
+            $this->requireObservation($observation, ObservationKind::DESIRED_RESOURCE_MISSING, OwnershipStatus::NONE);
             return $this->withOwnedOnlyResources(
                 $this->createAllPlan($blueprint),
                 $blueprint,
@@ -147,7 +225,15 @@ final readonly class CreatePlan
         }
 
         return $this->withOwnedOnlyResources(
-            $this->planForApplication($blueprint, $cloud, $state, $applications, $matches[0], false),
+            $this->planForApplication(
+                $blueprint,
+                $cloud,
+                $state,
+                $applications,
+                $matches[0],
+                false,
+                $observation,
+            ),
             $blueprint,
             $cloud,
             $state,
@@ -234,6 +320,13 @@ final readonly class CreatePlan
         array $applications,
         array $desiredEnvironments,
     ): PlanAction {
+        $this->recordSimpleObservation(
+            $resource->address,
+            ObservationKind::DESIRED_RESOURCE_ABSENT,
+            OwnershipStatus::MANAGED,
+            ReconciliationStatus::UNSUPPORTED,
+            EvidenceStatus::COMPLETE,
+        );
         if ($resource->parent !== null) {
             return $this->applicationAction(
                 $resource->address->name,
@@ -293,6 +386,13 @@ final readonly class CreatePlan
         array $applications,
         array &$environmentCache,
     ): PlanAction {
+        $this->recordSimpleObservation(
+            $resource->address,
+            ObservationKind::DESIRED_RESOURCE_ABSENT,
+            OwnershipStatus::MANAGED,
+            ReconciliationStatus::BLOCKED,
+            EvidenceStatus::INCOMPLETE,
+        );
         $invalid = $this->invalidOwnedOnlyEnvironmentParent($resource, $state);
         if ($invalid !== null) {
             return $this->environmentAction($resource->address->name, PlanOperation::UNSUPPORTED, $invalid);
@@ -330,6 +430,17 @@ final readonly class CreatePlan
         $remoteEnvironments = $this->cachedEnvironments($cloud, $remoteParent->id, $environmentCache);
         $remoteEnvironment = $this->findEnvironmentById($remoteEnvironments, $resource->remoteId);
         if ($remoteEnvironment !== null) {
+            $this->recordSimpleObservation(
+                $resource->address,
+                ObservationKind::DESIRED_RESOURCE_ABSENT,
+                OwnershipStatus::MANAGED,
+                $remoteEnvironment->dependencies->readiness() === EnvironmentDestructiveReadiness::SAFE
+                    ? ReconciliationStatus::SUPPORTED
+                    : ReconciliationStatus::BLOCKED,
+                $remoteEnvironment->dependencies->readiness() === EnvironmentDestructiveReadiness::UNKNOWN
+                    ? EvidenceStatus::INCOMPLETE
+                    : EvidenceStatus::COMPLETE,
+            );
             return $this->environmentAction(
                 $resource->address->name,
                 PlanOperation::DELETE,
@@ -357,6 +468,14 @@ final readonly class CreatePlan
         }
 
         $replacement = $this->environmentsNamed($remoteEnvironments, $resource->address->name);
+
+        $this->recordSimpleObservation(
+            $resource->address,
+            ObservationKind::DESIRED_RESOURCE_ABSENT,
+            OwnershipStatus::MANAGED,
+            ReconciliationStatus::SUPPORTED,
+            EvidenceStatus::COMPLETE,
+        );
 
         return $this->environmentAction(
             $resource->address->name,
@@ -439,8 +558,13 @@ final readonly class CreatePlan
         array $applications,
         CloudApplication $application,
         bool $applicationIsManaged,
+        ResourceObservation $applicationObservation,
     ): ExecutionPlan {
-        $actions = [$this->compareApplication($blueprint, $application, $applicationIsManaged)];
+        $actions = [$this->applicationActionFromObservation(
+            $blueprint,
+            $application,
+            $applicationObservation,
+        )];
         $remoteEnvironments = $cloud->environments($application->id);
         /** @var array<string, array{PlanAction, CloudEnvironment|null}> $resolved */
         $resolved = [];
@@ -466,9 +590,21 @@ final readonly class CreatePlan
                     $address = $this->variableAddress($environment->name, $variable->name);
                     if ($environmentAction->operation === PlanOperation::CREATE) {
                         $this->values->resolve($variable, $address);
+                        $this->recordSimpleObservation(
+                            $address,
+                            ObservationKind::DESIRED_RESOURCE_MISSING,
+                            OwnershipStatus::NONE,
+                            ReconciliationStatus::SUPPORTED,
+                            EvidenceStatus::COMPLETE,
+                        );
                         $actions[] = $this->variableAction($address, PlanOperation::CREATE,
                             'Environment variable does not exist because the environment will be created.');
                     } else {
+                        $observation = $this->observationRecorder->record($this->variableObservations->createWithoutValues(
+                            $address,
+                            EnvironmentVariableObservationEvidence::parentUnresolved(),
+                        ));
+                        $this->requireObservation($observation, ObservationKind::UNKNOWN, OwnershipStatus::NONE);
                         $actions[] = $this->variableAction($address, PlanOperation::UNSUPPORTED,
                             'Environment variable cannot be reconciled while its environment identity is unresolved.');
                     }
@@ -493,6 +629,13 @@ final readonly class CreatePlan
         $actions = [$this->applicationAction($blueprint->application->name, PlanOperation::CREATE,
             'Application does not exist.')];
         foreach ($blueprint->environments as $environment) {
+            $this->recordSimpleObservation(
+                new ResourceAddress(ResourceType::ENVIRONMENT, $environment->name),
+                ObservationKind::DESIRED_RESOURCE_MISSING,
+                OwnershipStatus::NONE,
+                ReconciliationStatus::SUPPORTED,
+                EvidenceStatus::COMPLETE,
+            );
             $actions[] = $this->environmentAction($environment->name, PlanOperation::CREATE,
                 'Environment does not exist because the application will be created.');
         }
@@ -500,6 +643,13 @@ final readonly class CreatePlan
             foreach ($environment->variables as $variable) {
                 $address = $this->variableAddress($environment->name, $variable->name);
                 $this->values->resolve($variable, $address);
+                $this->recordSimpleObservation(
+                    $address,
+                    ObservationKind::DESIRED_RESOURCE_MISSING,
+                    OwnershipStatus::NONE,
+                    ReconciliationStatus::SUPPORTED,
+                    EvidenceStatus::COMPLETE,
+                );
                 $actions[] = $this->variableAction($address, PlanOperation::CREATE,
                     'Environment variable does not exist because the environment will be created.');
             }
@@ -510,6 +660,7 @@ final readonly class CreatePlan
 
     private function blockedPlan(Blueprint $blueprint, string $reason): ExecutionPlan
     {
+        $this->recordUnresolvedDesiredChildren($blueprint);
         $actions = [$this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED, $reason)];
         foreach ($blueprint->environments as $environment) {
             $actions[] = $this->environmentAction($environment->name, PlanOperation::UNSUPPORTED,
@@ -528,25 +679,52 @@ final readonly class CreatePlan
         return new ExecutionPlan(...$actions);
     }
 
-    private function compareApplication(Blueprint $blueprint, CloudApplication $remote, bool $managed): PlanAction
+    private function applicationActionFromObservation(
+        Blueprint $blueprint,
+        CloudApplication $remote,
+        ResourceObservation $observation,
+    ): PlanAction
     {
-        if ($remote->region !== $blueprint->application->region) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE
+            && in_array($observation->reconciliation, [
+                ReconciliationStatus::UNSUPPORTED,
+                ReconciliationStatus::BLOCKED,
+            ], true)
+            && in_array('region', $observation->changedFields->values(), true)) {
             return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
                 'Remote application region differs from desired region.', $remote->id);
         }
-        if ($remote->repository === null) {
+        if ($observation->observation === ObservationKind::UNKNOWN
+            && $observation->evidence === EvidenceStatus::INCOMPLETE) {
             return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
                 'Remote application repository information is unavailable.', $remote->id);
         }
-        if ($remote->repository !== $blueprint->application->source->repository) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE
+            && in_array($observation->reconciliation, [
+                ReconciliationStatus::UNSUPPORTED,
+                ReconciliationStatus::BLOCKED,
+            ], true)
+            && in_array('repository', $observation->changedFields->values(), true)) {
             return $this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED,
                 'Application repository differs and cannot be updated safely.', $remote->id);
+        }
+
+        $this->requireObservation(
+            $observation,
+            ObservationKind::IN_SYNC,
+            $observation->ownership,
+        );
+        if (!in_array($observation->ownership, [OwnershipStatus::MANAGED, OwnershipStatus::UNMANAGED], true)) {
+            throw new \LogicException('In-sync Application observation must have managed or unmanaged ownership.');
+        }
+        if ($observation->reconciliation !== ReconciliationStatus::NOT_APPLICABLE) {
+            throw new \LogicException('In-sync Application observation must not require reconciliation.');
         }
 
         return $this->applicationAction(
             $blueprint->application->name,
             PlanOperation::NO_CHANGE,
-            $managed
+            $observation->ownership === OwnershipStatus::MANAGED
                 ? 'Managed remote application matches desired state.'
                 : 'Matching remote application is unmanaged; use import to establish ownership before future mutation.',
             $remote->id,
@@ -570,25 +748,52 @@ final readonly class CreatePlan
     ): array {
         $address = new ResourceAddress(ResourceType::ENVIRONMENT, $desired->name);
         $managed = $state->find($address);
+        $parentAddress = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+        $parent = EnvironmentParentEvidence::resolved(
+            $parentAddress,
+            $application->id,
+            $applicationIsManaged ? OwnershipStatus::MANAGED : OwnershipStatus::UNMANAGED,
+        );
+        $invalid = $managed === null ? null : $this->invalidEnvironmentOwnership($managed, $state, $blueprint);
+
+        if ($invalid !== null) {
+            $observation = $this->observationRecorder->record($this->environmentObservations->create(
+                $desired,
+                $managed,
+                new EnvironmentObservationEvidence($parent, $remoteEnvironments, EvidenceStatus::COMPLETE, true),
+            ));
+            $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::CONFLICT);
+            return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED, $invalid), null];
+        }
+
+        $scopedEnvironments = $remoteEnvironments;
+        if ($managed !== null && $this->findEnvironmentById($remoteEnvironments, $managed->remoteId) === null) {
+            foreach ($applications as $candidateApplication) {
+                if ($candidateApplication->id === $application->id) {
+                    continue;
+                }
+                $candidateEnvironments = $cloud->environments($candidateApplication->id);
+                $scopedEnvironments = [...$scopedEnvironments, ...$candidateEnvironments];
+                if ($this->findEnvironmentById($candidateEnvironments, $managed->remoteId) !== null) {
+                    break;
+                }
+            }
+        }
+        $observation = $this->observationRecorder->record($this->environmentObservations->create(
+            $desired,
+            $managed,
+            new EnvironmentObservationEvidence($parent, $scopedEnvironments, EvidenceStatus::COMPLETE),
+        ));
 
         if ($managed !== null) {
-            $invalid = $this->invalidEnvironmentOwnership($managed, $state, $blueprint);
-            if ($invalid !== null) {
-                return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED, $invalid), null];
-            }
-            $remote = $this->findEnvironmentById($remoteEnvironments, $managed->remoteId);
+            $remote = $this->findEnvironmentById($scopedEnvironments, $managed->remoteId);
             if ($remote === null) {
-                foreach ($applications as $candidateApplication) {
-                    if ($candidateApplication->id === $application->id) {
-                        continue;
-                    }
-                    if ($this->findEnvironmentById($cloud->environments($candidateApplication->id), $managed->remoteId) !== null) {
-                        return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
-                            'Managed environment belongs to an unexpected remote application.'), null];
-                    }
-                }
-
                 $replacement = $this->environmentsNamed($remoteEnvironments, $desired->name);
+                $this->requireObservation(
+                    $observation,
+                    $replacement === [] ? ObservationKind::IDENTITY_MISSING : ObservationKind::IDENTITY_REPLACEMENT,
+                    OwnershipStatus::MANAGED,
+                );
                 return [$this->environmentAction(
                     $desired->name,
                     PlanOperation::UNSUPPORTED,
@@ -599,10 +804,12 @@ final readonly class CreatePlan
             }
 
             if ($remote->applicationId !== $application->id) {
+                $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED);
                 return [$this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
                     'Managed environment belongs to an unexpected remote application.'), null];
             }
             if ($remote->name !== $desired->name) {
+                $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED);
                 return [$this->environmentAction(
                     $desired->name,
                     PlanOperation::UNSUPPORTED,
@@ -611,41 +818,64 @@ final readonly class CreatePlan
                 ), $remote];
             }
 
-            return [$this->compareEnvironment($desired, $remote, true), $remote];
+            return [$this->environmentActionFromObservation($desired, $remote, $observation), $remote];
         }
 
         $matches = $this->environmentsNamed($remoteEnvironments, $desired->name);
         if (count($matches) > 1) {
+            $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::UNMANAGED);
+            if ($this->observationRecorder->isReporting()) {
+                return [$this->environmentAction(
+                    $desired->name,
+                    PlanOperation::UNSUPPORTED,
+                    'Environment discovery is ambiguous.',
+                ), null];
+            }
             throw new AmbiguousResourceMatchException('environment', $desired->name);
         }
         if ($matches === []) {
             if (!$applicationIsManaged) {
+                $this->requireObservation($observation, ObservationKind::UNKNOWN, OwnershipStatus::NONE);
                 return [$this->environmentAction(
                     $desired->name,
                     PlanOperation::UNSUPPORTED,
                     'Matching remote application is unmanaged. Import it before creating owned environments.',
                 ), null];
             }
+            $this->requireObservation($observation, ObservationKind::DESIRED_RESOURCE_MISSING, OwnershipStatus::NONE);
             return [$this->environmentAction($desired->name, PlanOperation::CREATE, 'Environment does not exist.'), null];
         }
 
-        return [$this->compareEnvironment($desired, $matches[0], false), $matches[0]];
+        return [$this->environmentActionFromObservation($desired, $matches[0], $observation), $matches[0]];
     }
 
-    private function compareEnvironment(EnvironmentDefinition $desired, CloudEnvironment $remote, bool $managed): PlanAction
+    private function environmentActionFromObservation(
+        EnvironmentDefinition $desired,
+        CloudEnvironment $remote,
+        ResourceObservation $observation,
+    ): PlanAction
     {
-        if ($remote->branch === null) {
+        if ($observation->observation === ObservationKind::UNKNOWN
+            && $observation->evidence === EvidenceStatus::INCOMPLETE) {
             return $this->environmentAction($desired->name, PlanOperation::UNSUPPORTED,
                 'Remote branch information is unavailable.', $remote->id);
         }
-        if ($remote->branch !== $desired->branch) {
-            if (!$managed) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE) {
+            if ($remote->branch === null) {
+                throw new \LogicException('Complete branch-difference evidence must contain the remote branch.');
+            }
+            if ($observation->reconciliation === ReconciliationStatus::BLOCKED
+                && $observation->ownership === OwnershipStatus::UNMANAGED) {
                 return $this->environmentAction(
                     $desired->name,
                     PlanOperation::UNSUPPORTED,
                     'Matching remote environment is unmanaged. Import it before reconciling its branch.',
                     $remote->id,
                 );
+            }
+            if ($observation->reconciliation !== ReconciliationStatus::SUPPORTED
+                || $observation->ownership !== OwnershipStatus::MANAGED) {
+                throw new \LogicException('Branch-difference observation has incompatible reconciliation semantics.');
             }
             return $this->environmentAction(
                 $desired->name,
@@ -658,10 +888,22 @@ final readonly class CreatePlan
             );
         }
 
+        $this->requireObservation(
+            $observation,
+            ObservationKind::IN_SYNC,
+            $observation->ownership,
+        );
+        if (!in_array($observation->ownership, [OwnershipStatus::MANAGED, OwnershipStatus::UNMANAGED], true)) {
+            throw new \LogicException('In-sync Environment observation must have managed or unmanaged ownership.');
+        }
+        if ($observation->reconciliation !== ReconciliationStatus::NOT_APPLICABLE) {
+            throw new \LogicException('In-sync Environment observation must not require reconciliation.');
+        }
+
         return $this->environmentAction(
             $desired->name,
             PlanOperation::NO_CHANGE,
-            $managed
+            $observation->ownership === OwnershipStatus::MANAGED
                 ? 'Managed remote environment matches desired state.'
                 : 'Matching remote environment is unmanaged; use import to establish ownership before future mutation.',
             $remote->id,
@@ -675,18 +917,30 @@ final readonly class CreatePlan
     ): PlanAction {
         $address = $this->variableAddress($environmentName, $desired->name);
         $desiredValue = $this->values->resolve($desired, $address);
+        $observation = $this->observationRecorder->record($this->variableObservations->create(
+            $address,
+            $desired,
+            $desiredValue,
+            $remoteVariables === null
+                ? EnvironmentVariableObservationEvidence::collectionUnavailable()
+                : EnvironmentVariableObservationEvidence::available($remoteVariables),
+        ));
         if ($remoteVariables === null) {
+            $this->requireObservation($observation, ObservationKind::UNKNOWN, OwnershipStatus::NONE);
             return $this->variableAction($address, PlanOperation::UNSUPPORTED,
                 'Remote environment variable information is unavailable.');
         }
         $remote = $remoteVariables->find($desired->name);
         if ($remote === null) {
+            $this->requireObservation($observation, ObservationKind::DESIRED_RESOURCE_MISSING, OwnershipStatus::NONE);
             return $this->variableAction($address, PlanOperation::CREATE, 'Environment variable does not exist.');
         }
-        if ($remote->value !== $desiredValue) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE
+            && $observation->reconciliation === ReconciliationStatus::SUPPORTED) {
             return $this->variableAction($address, PlanOperation::UPDATE,
                 'Environment variable differs from desired state.');
         }
+        $this->requireObservation($observation, ObservationKind::IN_SYNC, OwnershipStatus::NONE);
         return $this->variableAction($address, PlanOperation::NO_CHANGE,
             'Environment variable matches desired state.');
     }
@@ -697,6 +951,79 @@ final readonly class CreatePlan
             return 'Application state ownership has an invalid resource type or parent relationship.';
         }
         return $this->duplicateOwnershipReason($resource, $state);
+    }
+
+    private function applicationConflictReason(ResourceObservation $observation, string $reason): string
+    {
+        $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::CONFLICT);
+        return $reason;
+    }
+
+    private function missingApplicationReason(ResourceObservation $observation, bool $hasReplacement): string
+    {
+        $this->requireObservation(
+            $observation,
+            $hasReplacement ? ObservationKind::IDENTITY_REPLACEMENT : ObservationKind::IDENTITY_MISSING,
+            OwnershipStatus::MANAGED,
+        );
+
+        return $hasReplacement
+            ? 'Managed application remote identity is missing and a same-name unmanaged replacement exists. Import or state repair is required.'
+            : 'Managed application remote identity is missing. State must be repaired before reconciliation.';
+    }
+
+    private function applicationNameConflictReason(ResourceObservation $observation): string
+    {
+        $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED);
+        return 'Managed application name differs from its blueprint address. Rename or state-move reconciliation is not supported.';
+    }
+
+    private function requireObservation(
+        ResourceObservation $observation,
+        ObservationKind $kind,
+        OwnershipStatus $ownership,
+    ): void {
+        if ($observation->observation !== $kind || $observation->ownership !== $ownership) {
+            throw new \LogicException('Typed observation is incompatible with the discovered planning evidence.');
+        }
+    }
+
+    private function recordSimpleObservation(
+        ResourceAddress $address,
+        ObservationKind $kind,
+        OwnershipStatus $ownership,
+        ReconciliationStatus $reconciliation,
+        EvidenceStatus $evidence,
+    ): void {
+        $this->observationRecorder->record(new ResourceObservation(
+            $address,
+            $kind,
+            $ownership,
+            $reconciliation,
+            $evidence,
+        ));
+    }
+
+    private function recordUnresolvedDesiredChildren(Blueprint $blueprint): void
+    {
+        foreach ($blueprint->environments as $environment) {
+            $this->recordSimpleObservation(
+                new ResourceAddress(ResourceType::ENVIRONMENT, $environment->name),
+                ObservationKind::UNKNOWN,
+                OwnershipStatus::UNKNOWN,
+                ReconciliationStatus::BLOCKED,
+                EvidenceStatus::INCOMPLETE,
+            );
+            foreach ($environment->variables as $variable) {
+                $this->recordSimpleObservation(
+                    $this->variableAddress($environment->name, $variable->name),
+                    ObservationKind::UNKNOWN,
+                    OwnershipStatus::NONE,
+                    ReconciliationStatus::BLOCKED,
+                    EvidenceStatus::INCOMPLETE,
+                );
+            }
+        }
     }
 
     private function invalidEnvironmentOwnership(StateResource $resource, StateDocument $state, Blueprint $blueprint): ?string
@@ -783,6 +1110,13 @@ final readonly class CreatePlan
         }
 
         $remoteClusters = $cloud->databaseClusters();
+        $clusterCandidates = array_map(
+            fn (CloudDatabaseCluster $cluster): DatabaseClusterCandidate => new DatabaseClusterCandidate(
+                $cluster,
+                $this->databaseStatuses->destructiveReadiness($cluster->status),
+            ),
+            $remoteClusters,
+        );
         $clusterActions = [];
         $databaseActions = [];
         /** @var array<string, array<string, CloudDatabase>> $resolvedDatabases */
@@ -791,6 +1125,11 @@ final readonly class CreatePlan
         foreach ($blueprint->databaseClusters as $desiredCluster) {
             $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, $desiredCluster->name);
             $managedCluster = $state->find($clusterAddress);
+            $clusterObservation = $this->observationRecorder->record($this->databaseClusterObservations->create(
+                $desiredCluster,
+                $managedCluster,
+                new DatabaseClusterObservationEvidence($clusterCandidates, EvidenceStatus::COMPLETE),
+            ));
             $matches = $managedCluster === null
                 ? array_values(array_filter(
                     $remoteClusters,
@@ -802,6 +1141,15 @@ final readonly class CreatePlan
                 ));
 
             if ($matches === []) {
+                $this->requireObservation(
+                    $clusterObservation,
+                    $managedCluster === null
+                        ? ObservationKind::DESIRED_RESOURCE_MISSING
+                        : ($this->hasClusterNamed($remoteClusters, $desiredCluster->name)
+                            ? ObservationKind::IDENTITY_REPLACEMENT
+                            : ObservationKind::IDENTITY_MISSING),
+                    $managedCluster === null ? OwnershipStatus::NONE : OwnershipStatus::MANAGED,
+                );
                 $clusterActions[] = $this->databaseClusterAction(
                     $desiredCluster->name,
                     $managedCluster === null ? PlanOperation::CREATE : PlanOperation::UNSUPPORTED,
@@ -813,6 +1161,16 @@ final readonly class CreatePlan
                 );
                 if ($managedCluster === null) {
                     foreach ($desiredCluster->databases as $desiredDatabase) {
+                        $this->recordSimpleObservation(
+                            new ResourceAddress(
+                                ResourceType::DATABASE,
+                                $desiredCluster->name . '.' . $desiredDatabase->name,
+                            ),
+                            ObservationKind::DESIRED_RESOURCE_MISSING,
+                            OwnershipStatus::NONE,
+                            ReconciliationStatus::SUPPORTED,
+                            EvidenceStatus::COMPLETE,
+                        );
                         $databaseActions[] = $this->databaseAction(
                             $desiredCluster->name . '.' . $desiredDatabase->name,
                             PlanOperation::CREATE,
@@ -826,6 +1184,11 @@ final readonly class CreatePlan
                 continue;
             }
             if (count($matches) > 1) {
+                $this->requireObservation(
+                    $clusterObservation,
+                    ObservationKind::IDENTITY_CONFLICT,
+                    $managedCluster === null ? OwnershipStatus::UNMANAGED : OwnershipStatus::CONFLICT,
+                );
                 $clusterActions[] = $this->databaseClusterAction(
                     $desiredCluster->name,
                     PlanOperation::UNSUPPORTED,
@@ -838,6 +1201,7 @@ final readonly class CreatePlan
 
             $remoteCluster = $matches[0];
             if ($remoteCluster->name !== $desiredCluster->name) {
+                $this->requireObservation($clusterObservation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED);
                 $clusterActions[] = $this->databaseClusterAction(
                     $desiredCluster->name,
                     PlanOperation::UNSUPPORTED,
@@ -847,7 +1211,11 @@ final readonly class CreatePlan
                     'Logical Database cannot be compared while its owned parent Database Cluster identity conflicts.');
                 continue;
             }
-            $clusterAction = $this->compareDatabaseCluster($desiredCluster, $remoteCluster, $managedCluster !== null);
+            $clusterAction = $this->databaseClusterActionFromObservation(
+                $desiredCluster,
+                $remoteCluster,
+                $clusterObservation,
+            );
             $clusterActions[] = $clusterAction;
             if ($clusterAction->operation !== PlanOperation::NO_CHANGE) {
                 $this->unresolvedLogicalDatabaseActions($databaseActions, $desiredCluster,
@@ -856,11 +1224,35 @@ final readonly class CreatePlan
             }
 
             $remoteDatabases = $cloud->databases($remoteCluster->id);
+            $databaseParent = DatabaseParentEvidence::resolved(
+                $clusterAddress,
+                $remoteCluster->id,
+                $managedCluster === null ? OwnershipStatus::UNMANAGED : OwnershipStatus::MANAGED,
+            );
             foreach ($desiredCluster->databases as $desiredDatabase) {
                 $name = $desiredCluster->name . '.' . $desiredDatabase->name;
                 $databaseAddress = new ResourceAddress(ResourceType::DATABASE, $name);
                 $managedDatabase = $state->find($databaseAddress);
                 if ($managedDatabase?->isDerived() === true) {
+                    $parentState = $managedDatabase->parent === null ? null : $state->find($managedDatabase->parent);
+                    if ($parentState === null) {
+                        throw new \LogicException('Derived Database State must have its owned Cluster parent.');
+                    }
+                    $observation = $this->observationRecorder->record($this->derivedDatabaseObservations->create(
+                        $managedDatabase,
+                        $parentState,
+                        new DerivedDatabaseObservationEvidence(
+                            $remoteDatabases,
+                            $remoteCluster->databaseIds,
+                            [],
+                            EvidenceStatus::COMPLETE,
+                            $remoteCluster->childDiscoveryComplete
+                                ? EvidenceStatus::COMPLETE
+                                : EvidenceStatus::INCOMPLETE,
+                            blueprintAddressCollision: true,
+                        ),
+                    ));
+                    $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::DERIVED);
                     $databaseActions[] = $this->databaseAction(
                         $name,
                         PlanOperation::UNSUPPORTED,
@@ -873,6 +1265,59 @@ final readonly class CreatePlan
                     );
                     continue;
                 }
+                $databaseObservation = $this->databaseObservations->create(
+                    $desiredCluster->name,
+                    $desiredDatabase,
+                    $managedDatabase,
+                    new LogicalDatabaseObservationEvidence(
+                        $databaseParent,
+                        $remoteDatabases,
+                        EvidenceStatus::COMPLETE,
+                        observeRelationships: false,
+                    ),
+                );
+                $reportingEvidence = new LogicalDatabaseObservationEvidence(
+                    $databaseParent,
+                    $remoteDatabases,
+                    EvidenceStatus::COMPLETE,
+                );
+                if ($this->observationRecorder->isReporting() && $managedDatabase !== null) {
+                    $exactListMatches = array_values(array_filter(
+                        $remoteDatabases,
+                        static fn (CloudDatabase $database): bool => $database->id === $managedDatabase->remoteId,
+                    ));
+                    if (count($exactListMatches) === 1) {
+                        try {
+                            $authoritative = $cloud->databaseWithDestructiveRelationships(
+                                $remoteCluster->id,
+                                $managedDatabase->remoteId,
+                            );
+                            $reportingEvidence = new LogicalDatabaseObservationEvidence(
+                                $databaseParent,
+                                array_map(
+                                    static fn (CloudDatabase $database): CloudDatabase =>
+                                        $database->id === $managedDatabase->remoteId ? $authoritative : $database,
+                                    $remoteDatabases,
+                                ),
+                                EvidenceStatus::COMPLETE,
+                            );
+                        } catch (CloudException) {
+                            $reportingEvidence = new LogicalDatabaseObservationEvidence(
+                                $databaseParent,
+                                $remoteDatabases,
+                                EvidenceStatus::INCOMPLETE,
+                            );
+                        }
+                    }
+                }
+                $this->observationRecorder->record($this->observationRecorder->isReporting()
+                    ? $this->databaseObservations->create(
+                        $desiredCluster->name,
+                        $desiredDatabase,
+                        $managedDatabase,
+                        $reportingEvidence,
+                    )
+                    : $databaseObservation);
                 $databaseMatches = $managedDatabase === null
                     ? array_values(array_filter(
                         $remoteDatabases,
@@ -884,6 +1329,15 @@ final readonly class CreatePlan
                     ));
                 if ($databaseMatches === []) {
                     $createAllowed = $managedDatabase === null && $managedCluster !== null;
+                    $this->requireObservation(
+                        $databaseObservation,
+                        $managedDatabase === null
+                            ? ($createAllowed ? ObservationKind::DESIRED_RESOURCE_MISSING : ObservationKind::UNKNOWN)
+                            : ($this->hasDatabaseNamed($remoteDatabases, $desiredDatabase->name)
+                                ? ObservationKind::IDENTITY_REPLACEMENT
+                                : ObservationKind::IDENTITY_MISSING),
+                        $managedDatabase === null ? OwnershipStatus::NONE : OwnershipStatus::MANAGED,
+                    );
                     $databaseActions[] = $this->databaseAction(
                         $name,
                         $createAllowed ? PlanOperation::CREATE : PlanOperation::UNSUPPORTED,
@@ -898,16 +1352,36 @@ final readonly class CreatePlan
                     continue;
                 }
                 if (count($databaseMatches) > 1) {
+                    $this->requireObservation(
+                        $databaseObservation,
+                        ObservationKind::IDENTITY_CONFLICT,
+                        $managedDatabase === null ? OwnershipStatus::UNMANAGED : OwnershipStatus::CONFLICT,
+                    );
                     $databaseActions[] = $this->databaseAction($name, PlanOperation::UNSUPPORTED,
                         'Multiple matching logical Databases exist within the Cluster; selection would be ambiguous.');
                     continue;
                 }
 
                 if ($databaseMatches[0]->name !== $desiredDatabase->name) {
+                    $this->requireObservation($databaseObservation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED);
                     $databaseActions[] = $this->databaseAction($name, PlanOperation::UNSUPPORTED,
                         'Owned logical Database name differs from its blueprint address. Rename or state-move reconciliation is not supported.');
                     continue;
                 }
+
+                if ($databaseObservation->observation === ObservationKind::IDENTITY_CONFLICT) {
+                    $databaseActions[] = $this->databaseAction(
+                        $name,
+                        PlanOperation::UNSUPPORTED,
+                        'Owned logical Database belongs to an unexpected Database Cluster. Automatic reparenting is not supported.',
+                    );
+                    continue;
+                }
+                $this->requireObservation(
+                    $databaseObservation,
+                    ObservationKind::IN_SYNC,
+                    $managedDatabase === null ? OwnershipStatus::UNMANAGED : OwnershipStatus::MANAGED,
+                );
 
                 $databaseActions[] = $this->databaseAction(
                     $name,
@@ -998,6 +1472,18 @@ final readonly class CreatePlan
                 $dependencies = $hasDesiredChild
                     ? null
                     : $this->databaseClusterDependencies($resource, $state, $cloud);
+                $readiness = $dependencies?->readiness();
+                $this->recordSimpleObservation(
+                    $resource->address,
+                    ObservationKind::DESIRED_RESOURCE_ABSENT,
+                    OwnershipStatus::MANAGED,
+                    $hasDesiredChild || $readiness?->value !== 'safe'
+                        ? ReconciliationStatus::BLOCKED
+                        : ReconciliationStatus::UNSUPPORTED,
+                    !$hasDesiredChild && $readiness?->value === 'unknown'
+                        ? EvidenceStatus::INCOMPLETE
+                        : EvidenceStatus::COMPLETE,
+                );
                 $clusterActions[] = $this->databaseClusterAction(
                     $resource->address->name,
                     $hasDesiredChild ? PlanOperation::UNSUPPORTED : PlanOperation::DELETE,
@@ -1020,6 +1506,17 @@ final readonly class CreatePlan
                     continue;
                 }
                 $dependencies = $this->logicalDatabaseDependencies($resource, $state, $cloud);
+                $this->recordSimpleObservation(
+                    $resource->address,
+                    ObservationKind::DESIRED_RESOURCE_ABSENT,
+                    OwnershipStatus::MANAGED,
+                    $dependencies->readiness()->value === 'safe'
+                        ? ReconciliationStatus::SUPPORTED
+                        : ReconciliationStatus::BLOCKED,
+                    $dependencies->readiness()->value === 'unknown'
+                        ? EvidenceStatus::INCOMPLETE
+                        : EvidenceStatus::COMPLETE,
+                );
                 $databaseActions[] = $this->databaseAction(
                     $resource->address->name,
                     PlanOperation::DELETE,
@@ -1055,29 +1552,59 @@ final readonly class CreatePlan
             );
         }
 
+        $databases = [];
+        $relationshipIds = [];
+        $listCompleteness = EvidenceStatus::INCOMPLETE;
+        $relationshipCompleteness = EvidenceStatus::INCOMPLETE;
+        $relationshipConflict = false;
         try {
             $remoteCluster = $cloud->databaseCluster($parent->remoteId);
             $relationshipMatches = array_values(array_filter(
                 $remoteCluster->databaseIds,
                 static fn (string $databaseId): bool => $databaseId === $resource->remoteId,
             ));
-            if ($remoteCluster->id !== $parent->remoteId
-                || !$remoteCluster->childDiscoveryComplete
-                || count($relationshipMatches) !== 1) {
-                throw new CloudResponseException(
-                    'Derived Database relationship discovery is incomplete or conflicted.',
-                    'GET',
-                    '/databases/clusters/{id}',
-                );
+            $relationshipIds = $remoteCluster->databaseIds;
+            if ($remoteCluster->id !== $parent->remoteId) {
+                $relationshipConflict = true;
+                $relationshipCompleteness = EvidenceStatus::COMPLETE;
+            } elseif ($remoteCluster->childDiscoveryComplete) {
+                $relationshipCompleteness = EvidenceStatus::COMPLETE;
+                $relationshipConflict = count($relationshipMatches) !== 1;
             }
-            $matches = array_values(array_filter(
-                $cloud->databases($parent->remoteId),
-                static fn (CloudDatabase $database): bool => $database->id === $resource->remoteId,
-            ));
+            if ($relationshipCompleteness === EvidenceStatus::COMPLETE && !$relationshipConflict) {
+                $databases = $cloud->databases($parent->remoteId);
+                $listCompleteness = EvidenceStatus::COMPLETE;
+            }
         } catch (CloudException) {
-            $matches = [];
+            // Completeness remains explicit; Cloud failure is not proof of absence.
         }
-        if (count($matches) !== 1) {
+        $observation = $this->observationRecorder->record($this->derivedDatabaseObservations->create(
+            $resource,
+            $parent,
+            new DerivedDatabaseObservationEvidence(
+                $databases,
+                $relationshipIds,
+                [],
+                $listCompleteness,
+                $relationshipCompleteness,
+                relationshipConflict: $relationshipConflict,
+            ),
+        ));
+        if ($observation->observation === ObservationKind::UNKNOWN) {
+            return $this->databaseAction(
+                $resource->address->name,
+                PlanOperation::UNSUPPORTED,
+                'Derived logical Database discovery is incomplete under its exact State-owned Cluster; automatic recreation or adoption is forbidden.',
+                $resource->remoteId,
+                $resource->parent,
+                null,
+                $resource->classification,
+                $resource->provenance,
+            );
+        }
+        if ($observation->observation === ObservationKind::IDENTITY_MISSING
+            || ($observation->observation === ObservationKind::IDENTITY_CONFLICT
+                && $observation->ownership === OwnershipStatus::CONFLICT)) {
             return $this->databaseAction(
                 $resource->address->name,
                 PlanOperation::UNSUPPORTED,
@@ -1089,10 +1616,7 @@ final readonly class CreatePlan
                 $resource->provenance,
             );
         }
-
-        $remote = $matches[0];
-        if ($remote->clusterId !== $parent->remoteId
-            || ($remote->relationshipClusterId !== null && $remote->relationshipClusterId !== $parent->remoteId)) {
+        if ($observation->observation === ObservationKind::IDENTITY_CONFLICT) {
             return $this->databaseAction(
                 $resource->address->name,
                 PlanOperation::UNSUPPORTED,
@@ -1104,6 +1628,8 @@ final readonly class CreatePlan
                 $resource->provenance,
             );
         }
+
+        $this->requireObservation($observation, ObservationKind::IN_SYNC, OwnershipStatus::DERIVED);
 
         return $this->databaseAction(
             $resource->address->name,
@@ -1331,16 +1857,22 @@ final readonly class CreatePlan
         );
     }
 
-    private function compareDatabaseCluster(
+    private function databaseClusterActionFromObservation(
         DatabaseClusterDefinition $desired,
         CloudDatabaseCluster $remote,
-        bool $managed,
+        ResourceObservation $observation,
     ): PlanAction {
         $statusReason = $this->databaseStatuses->unsupportedReason($remote->status);
         if ($statusReason !== null) {
+            if ($observation->observation === ObservationKind::UNKNOWN) {
+                $this->requireObservation($observation, ObservationKind::UNKNOWN, $observation->ownership);
+            } else {
+                $this->requireObservation($observation, ObservationKind::LIFECYCLE_CONDITION, $observation->ownership);
+            }
             return $this->databaseClusterAction($desired->name, PlanOperation::UNSUPPORTED, $statusReason);
         }
-        if ($remote->type !== $desired->type->value) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE
+            && in_array('type', $observation->changedFields->values(), true)) {
             return $this->databaseClusterAction(
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
@@ -1351,7 +1883,8 @@ final readonly class CreatePlan
                 new PlanChange('type', $remote->type, $desired->type->value),
             );
         }
-        if ($remote->region !== $desired->region) {
+        if ($observation->observation === ObservationKind::CONFIGURATION_DIFFERENCE
+            && in_array('region', $observation->changedFields->values(), true)) {
             return $this->databaseClusterAction(
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
@@ -1365,6 +1898,7 @@ final readonly class CreatePlan
 
         $changes = $this->databaseConfigurationChanges($desired, $remote);
         if ($changes === null) {
+            $this->requireObservation($observation, ObservationKind::UNKNOWN, $observation->ownership);
             return $this->databaseClusterAction(
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
@@ -1372,6 +1906,7 @@ final readonly class CreatePlan
             );
         }
         if ($changes !== []) {
+            $this->requireObservation($observation, ObservationKind::CONFIGURATION_DIFFERENCE, $observation->ownership);
             return $this->databaseClusterAction(
                 $desired->name,
                 PlanOperation::UNSUPPORTED,
@@ -1383,13 +1918,18 @@ final readonly class CreatePlan
             );
         }
 
+        $this->requireObservation($observation, ObservationKind::IN_SYNC, $observation->ownership);
+        if (!in_array($observation->ownership, [OwnershipStatus::MANAGED, OwnershipStatus::UNMANAGED], true)) {
+            throw new \LogicException('In-sync Database Cluster observation must be managed or unmanaged.');
+        }
+
         return $this->databaseClusterAction(
             $desired->name,
             PlanOperation::NO_CHANGE,
-            $managed
+            $observation->ownership === OwnershipStatus::MANAGED
                 ? 'Owned remote Database Cluster matches desired state.'
                 : 'Matching remote Database Cluster exists but is unmanaged; future mutation requires import and state ownership.',
-            $managed ? $remote->id : null,
+            $observation->ownership === OwnershipStatus::MANAGED ? $remote->id : null,
         );
     }
 
@@ -1453,6 +1993,13 @@ final readonly class CreatePlan
         string $reason,
     ): void {
         foreach ($cluster->databases as $database) {
+            $this->recordSimpleObservation(
+                new ResourceAddress(ResourceType::DATABASE, $cluster->name . '.' . $database->name),
+                ObservationKind::UNKNOWN,
+                OwnershipStatus::UNKNOWN,
+                ReconciliationStatus::BLOCKED,
+                EvidenceStatus::INCOMPLETE,
+            );
             $actions[] = $this->databaseAction(
                 $cluster->name . '.' . $database->name,
                 PlanOperation::UNSUPPORTED,

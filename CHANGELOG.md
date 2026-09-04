@@ -4,6 +4,30 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.9] - 2026-09-04
+
+### Added
+
+- Added typed, read-only observations and `lcb drift` human and deterministic JSON reports.
+- Added ownership, reconciliation, and evidence dimensions across Application, Environment, declared variable, Database Cluster, logical Database, and derived default Database observations.
+
+### Changed
+
+- DriftReport reuses scoped discovery and shared typed comparison paths; it does not parse Plan output or introduce a separate discovery engine.
+
+### Fixed
+
+- Logical Database observation now retrieves authoritative parent and Environment relationship evidence when required, avoiding false incomplete observations from weaker list representations.
+
+### Safety
+
+- Drift does not write State, reconcile, or Apply. Exact State identity remains authoritative for managed resources; incomplete evidence remains `unknown`.
+- Variable output never exposes current or desired values. A configuration difference describes a Blueprint/Cloud difference and does not prove causal remote drift or identify which changed.
+
+### Verified
+
+- Verified with the automated full suite, PHPStan, Composer validation, and disposable real Laravel Cloud validation, including deterministic JSON, an externally introduced reversible Environment difference that remained after Drift, byte-identical State, and restoration to all in sync.
+
 ## [0.1.0-alpha.8] - 2026-09-03
 
 ### Added

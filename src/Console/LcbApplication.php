@@ -14,6 +14,7 @@ use LaravelCloudBlueprint\Blueprint\Validation\BlueprintValidator;
 use LaravelCloudBlueprint\Console\Command\InitCommand;
 use LaravelCloudBlueprint\Console\Command\ImportCommand;
 use LaravelCloudBlueprint\Console\Command\CloudInspectCommand;
+use LaravelCloudBlueprint\Console\Command\DriftCommand;
 use LaravelCloudBlueprint\Console\Command\PlanCommand;
 use LaravelCloudBlueprint\Console\Command\StateUnmanageCommand;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
@@ -27,6 +28,9 @@ use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyBlueprintYamlEncoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
+use LaravelCloudBlueprint\Drift\CreateDriftReport;
+use LaravelCloudBlueprint\Drift\Rendering\DriftHumanRenderer;
+use LaravelCloudBlueprint\Drift\Rendering\DriftJsonRenderer;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
 use LaravelCloudBlueprint\Infrastructure\State\LocalFileStateStore;
 use Symfony\Component\Console\Application;
@@ -34,7 +38,7 @@ use Symfony\Component\Console\Application;
 final class LcbApplication extends Application
 {
     public const string NAME = 'Laravel Cloud Blueprint';
-    public const string VERSION = '0.1.0-alpha.8';
+    public const string VERSION = '0.1.0-alpha.9';
 
     public function __construct()
     {
@@ -68,6 +72,16 @@ final class LcbApplication extends Application
             new SymfonyLaravelCloudClientFactory(),
             $planner,
             $states,
+        ));
+        $this->add(new DriftCommand(
+            $files,
+            $loader,
+            new LcbTokenProvider(),
+            new SymfonyLaravelCloudClientFactory(),
+            new CreateDriftReport($planner),
+            $states,
+            new DriftHumanRenderer(),
+            new DriftJsonRenderer(),
         ));
         $this->add(new ApplyCommand(
             $files,
