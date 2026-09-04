@@ -183,6 +183,16 @@ final class DatabaseBlueprintTest extends TestCase
         self::assertSame('primary.application', (string) $reference);
     }
 
+    public function testExplicitNullEnvironmentDatabaseIsValidAndNormalizesAsDetached(): void
+    {
+        $data = self::withEnvironmentDatabase(self::withCluster(self::mysqlCluster()), null);
+
+        self::assertTrue((new BlueprintValidator())->validate($data)->isValid());
+        self::assertTrue(
+            (new BlueprintNormalizer())->normalize($data)->environments->get('production')->database->isDetached(),
+        );
+    }
+
     public function testMissingClusterReferenceIsRejected(): void
     {
         $data = self::withEnvironmentDatabase(self::withCluster(self::mysqlCluster()), 'missing.application');
