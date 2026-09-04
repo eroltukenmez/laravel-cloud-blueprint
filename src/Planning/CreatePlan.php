@@ -37,6 +37,7 @@ use LaravelCloudBlueprint\Observation\DatabaseClusterObservationFactory;
 use LaravelCloudBlueprint\Observation\DatabaseParentEvidence;
 use LaravelCloudBlueprint\Observation\DerivedDatabaseObservationEvidence;
 use LaravelCloudBlueprint\Observation\DerivedDatabaseObservationFactory;
+use LaravelCloudBlueprint\Observation\DatabaseAttachmentObservationFactory;
 use LaravelCloudBlueprint\Observation\EnvironmentObservationEvidence;
 use LaravelCloudBlueprint\Observation\EnvironmentObservationFactory;
 use LaravelCloudBlueprint\Observation\EnvironmentParentEvidence;
@@ -70,6 +71,7 @@ final readonly class CreatePlan
         private LogicalDatabaseObservationFactory $databaseObservations = new LogicalDatabaseObservationFactory(),
         private DerivedDatabaseObservationFactory $derivedDatabaseObservations = new DerivedDatabaseObservationFactory(),
         private ResourceObservationRecorder $observationRecorder = new ResourceObservationRecorder(),
+        private DatabaseAttachmentObservationFactory $databaseAttachmentObservations = new DatabaseAttachmentObservationFactory(),
     ) {
     }
 
@@ -1402,6 +1404,7 @@ final readonly class CreatePlan
             $applicationActions,
             $environmentActions,
             $resolvedDatabases,
+            $state,
         );
 
         return new ExecutionPlan(
@@ -2020,10 +2023,11 @@ final readonly class CreatePlan
         array $applicationActions,
         array $environmentActions,
         array $resolvedDatabases,
+        StateDocument $state,
     ): array {
         $requiresAttachments = false;
         foreach ($blueprint->environments as $environment) {
-            $requiresAttachments = $requiresAttachments || $environment->database !== null;
+            $requiresAttachments = $requiresAttachments || !$environment->database->isUnmanaged();
         }
         if (!$requiresAttachments) {
             return [];
@@ -2038,43 +2042,112 @@ final readonly class CreatePlan
 
         $actions = [];
         foreach ($blueprint->environments as $environment) {
-            $reference = $environment->database;
-            if ($reference === null) {
-                continue;
-            }
-            $database = $resolvedDatabases[$reference->cluster][$reference->database] ?? null;
-            if ($database === null) {
-                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UNSUPPORTED,
-                    'Environment Database attachment cannot be resolved because the desired logical Database is unresolved.');
-                continue;
-            }
-
             $environmentAction = $environmentActionsByName[$environment->name] ?? null;
-            $environmentId = $environmentAction?->remoteId;
-            $remoteEnvironment = $environmentId === null
+            $remoteEnvironment = $environmentAction?->remoteId === null
                 ? null
-                : $this->findEnvironmentById($remoteEnvironments, $environmentId);
-            if ($remoteEnvironment === null) {
-                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UNSUPPORTED,
-                    'Environment Database attachment cannot be compared while the Environment identity is unresolved.');
-                continue;
+                : $this->findEnvironmentById($remoteEnvironments, $environmentAction->remoteId);
+            $stateEnvironment = $state->find(new ResourceAddress(ResourceType::ENVIRONMENT, $environment->name));
+            $stateDatabase = null;
+            if ($environment->database->isAttached()) {
+                $ref = $environment->database->reference();
+                $stateDatabase = $state->find(new ResourceAddress(ResourceType::DATABASE, (string) $ref));
             }
-            if ($remoteEnvironment->databaseId === $database->id) {
-                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::NO_CHANGE,
-                    'Environment is attached to the desired logical Database.');
-                continue;
+            $resolvedDatabase = null;
+            if ($environment->database->isAttached()) {
+                $reference = $environment->database->reference();
+                $resolvedDatabase = $resolvedDatabases[$reference->cluster][$reference->database] ?? null;
             }
-
-            $actions[] = $this->databaseAttachmentAction(
+            $actionable = $this->attachmentEnvironmentIsActionable($stateEnvironment, $environmentAction, $state, $blueprint)
+                && (!$environment->database->isAttached()
+                    || $this->attachmentDatabaseIsActionable($stateDatabase, $resolvedDatabase, $state, $environment))
+                && $remoteEnvironment?->dependencies->databaseRelationshipComplete() === true;
+            $attachmentObservation = $this->databaseAttachmentObservations->create(
                 $environment->name,
-                PlanOperation::UNSUPPORTED,
-                $remoteEnvironment->databaseId === null
-                    ? 'Environment has no Database attachment. Attachment updates are not supported yet.'
-                    : 'Environment Database attachment differs. Attachment updates are not supported yet.',
+                $environment->database,
+                $stateEnvironment,
+                $remoteEnvironment,
+                $stateDatabase,
+                $remoteEnvironment?->dependencies->databaseRelationshipComplete() === true
+                    ? EvidenceStatus::COMPLETE
+                    : EvidenceStatus::INCOMPLETE,
+                $actionable,
             );
+            if ($attachmentObservation !== null) {
+                $this->observationRecorder->record($attachmentObservation);
+            }
+            if ($attachmentObservation === null) {
+                continue;
+            }
+            if (!$actionable) {
+                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UNSUPPORTED,
+                    'Environment Database attachment cannot be reconciled until exact managed identities are resolved.');
+                continue;
+            }
+            if ($stateEnvironment === null) {
+                throw new \LogicException('Actionable Database attachment requires exact Environment State identity.');
+            }
+            if ($attachmentObservation->observation === ObservationKind::IN_SYNC) {
+                $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::NO_CHANGE,
+                    'Environment Database attachment matches the managed desired configuration.',
+                    $this->databaseAttachmentApproval($environment, $stateEnvironment, $stateDatabase, $state));
+                continue;
+            }
+            $actions[] = $this->databaseAttachmentAction($environment->name, PlanOperation::UPDATE,
+                'Environment Database attachment differs and will be updated.',
+                $this->databaseAttachmentApproval($environment, $stateEnvironment, $stateDatabase, $state),
+                new PlanChange('database', 'configured', 'desired'));
         }
 
         return $actions;
+    }
+
+    private function databaseAttachmentApproval(
+        EnvironmentDefinition $environment,
+        StateResource $stateEnvironment,
+        ?StateResource $stateDatabase,
+        StateDocument $state,
+    ): DatabaseAttachmentApproval {
+        $application = $state->get($stateEnvironment->parent ?? throw new \LogicException('Actionable Environment requires a parent.'));
+        $cluster = $stateDatabase === null
+            ? null
+            : $state->get($stateDatabase->parent ?? throw new \LogicException('Actionable Database requires a parent.'));
+
+        return DatabaseAttachmentApproval::fromIdentities(
+            $environment->database,
+            $stateEnvironment->remoteId,
+            $application->remoteId,
+            $stateDatabase?->remoteId,
+            $cluster?->remoteId,
+        );
+    }
+
+    private function attachmentEnvironmentIsActionable(
+        ?StateResource $environment,
+        ?PlanAction $action,
+        StateDocument $state,
+        Blueprint $blueprint,
+    ): bool {
+        if ($environment === null || $action === null || $action->remoteId !== $environment->remoteId) {
+            return false;
+        }
+
+        $parent = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+        return $environment->parent !== null && (string) $environment->parent === (string) $parent && $state->find($parent) !== null;
+    }
+
+    private function attachmentDatabaseIsActionable(
+        ?StateResource $database,
+        ?CloudDatabase $remoteDatabase,
+        StateDocument $state,
+        EnvironmentDefinition $environment,
+    ): bool {
+        if ($database === null || $database->isDerived() || $remoteDatabase === null || $database->remoteId !== $remoteDatabase->id) {
+            return false;
+        }
+
+        $reference = $environment->database->reference();
+        $parent = new ResourceAddress(ResourceType::DATABASE_CLUSTER, $reference->cluster);
+        return $database->parent !== null && (string) $database->parent === (string) $parent && $state->find($parent) !== null;
     }
 
     private function databaseClusterAction(
@@ -2137,13 +2210,20 @@ final readonly class CreatePlan
         );
     }
 
-    private function databaseAttachmentAction(string $name, PlanOperation $operation, string $reason): PlanAction
+    private function databaseAttachmentAction(
+        string $name,
+        PlanOperation $operation,
+        string $reason,
+        DatabaseAttachmentApproval|PlanChange ...$details,
+    ): PlanAction
     {
         return new PlanAction(
             new ResourceAddress(ResourceType::DATABASE_ATTACHMENT, $name),
             ResourceType::DATABASE_ATTACHMENT,
             $operation,
             $reason,
+            null,
+            ...$details,
         );
     }
 

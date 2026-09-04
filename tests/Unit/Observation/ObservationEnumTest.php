@@ -60,6 +60,11 @@ final class ObservationEnumTest extends TestCase
         self::assertSame([
             'environment_branch_difference',
             'environment_variable_value_difference',
+            'database_attachment_in_sync',
+            'database_attachment_difference',
+            'database_attachment_relationship_incomplete',
+            'database_attachment_environment_identity_invalid',
+            'database_attachment_database_identity_invalid',
         ], array_column(ReasonCode::cases(), 'value'));
     }
 }

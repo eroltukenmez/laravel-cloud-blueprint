@@ -13,6 +13,7 @@ use LaravelCloudBlueprint\Blueprint\LaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Blueprint\NeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseAttachmentMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClusterDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
@@ -33,6 +34,8 @@ use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentDatabaseAttachmentRequest;
+use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
@@ -77,6 +80,13 @@ final readonly class CreateOnlyApply
         ?Closure $lockedBlueprintLoader = null,
     ): ApplyResult {
         $this->assertSupported($plan);
+        $approvedAttachmentActions = $this->databaseAttachmentUpdateActions($plan);
+        if ($approvedAttachmentActions !== []
+            && !$cloud instanceof LaravelCloudDatabaseAttachmentMutationClient) {
+            throw new ApplyRefusedException(
+                'The configured Cloud client cannot reconcile Database attachments. No resources were modified.',
+            );
+        }
         if ($this->hasDelete($plan, ResourceType::ENVIRONMENT)
             && !$cloud instanceof LaravelCloudEnvironmentMutationClient) {
             throw new ApplyRefusedException(
@@ -105,6 +115,28 @@ final readonly class CreateOnlyApply
                     throw new ApplyRefusedException('Locked Blueprint reload did not return a valid Blueprint. No resources were modified.');
                 }
                 $blueprint = $lockedBlueprint;
+            }
+            $lockedAttachmentActions = [];
+            if ($approvedAttachmentActions !== []) {
+                try {
+                    $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                } catch (CloudException $exception) {
+                    $action = reset($approvedAttachmentActions);
+                    return new ApplyResult(
+                        $exception instanceof CloudTransportException || $exception instanceof CloudResponseException
+                            ? ApplyStatus::PARTIAL_FAILURE
+                            : ApplyStatus::FAILED,
+                        new ApplyResourceOutcome(
+                            $action->address,
+                            ApplyOutcomeOperation::FAILED,
+                            'Locked Database attachment revalidation failed before mutation.',
+                        ),
+                    );
+                }
+                $lockedAttachmentActions = $this->revalidateDatabaseAttachmentApprovals(
+                    $approvedAttachmentActions,
+                    $freshPlan,
+                );
             }
             if ($this->hasDatabaseCreate($plan)) {
                 if (!$cloud instanceof LaravelCloudDatabaseMutationClient) {
@@ -436,6 +468,30 @@ final readonly class CreateOnlyApply
                 }
             }
 
+            foreach ($approvedAttachmentActions as $address => $approvedAttachmentAction) {
+                $freshAttachmentAction = $lockedAttachmentActions[$address];
+                if ($freshAttachmentAction->operation === PlanOperation::NO_CHANGE) {
+                    $outcomes[] = new ApplyResourceOutcome(
+                        $approvedAttachmentAction->address,
+                        ApplyOutcomeOperation::UNCHANGED,
+                        'Database attachment was already reconciled during locked revalidation.',
+                    );
+                    continue;
+                }
+
+                $attachmentResult = $this->updateDatabaseAttachment(
+                    $blueprint,
+                    $approvedAttachmentAction,
+                    $cloud,
+                    $state,
+                    $outcomes,
+                );
+                $outcomes = $attachmentResult['outcomes'];
+                if ($attachmentResult['failure'] !== null) {
+                    return $attachmentResult['failure'];
+                }
+            }
+
             foreach ($variableGroups as $environmentName => $group) {
                 $mutationActions = array_values(array_filter(
                     $group,
@@ -626,9 +682,16 @@ final readonly class CreateOnlyApply
                 }
             }
 
-            if ($action->resourceType === ResourceType::DATABASE_ATTACHMENT
-                && $action->operation !== PlanOperation::NO_CHANGE) {
-                throw new ApplyRefusedException('Database attachment mutation is not supported. No resources were modified.');
+            if ($action->resourceType === ResourceType::DATABASE_ATTACHMENT) {
+                if (!in_array($action->operation, [PlanOperation::NO_CHANGE, PlanOperation::UPDATE], true)) {
+                    throw new ApplyRefusedException('Database attachment operation is not supported. No resources were modified.');
+                }
+                if ($action->operation === PlanOperation::UPDATE
+                    && (count($action->changes) !== 1
+                        || $action->changes[0]->field !== 'database'
+                        || $action->databaseAttachmentApproval === null)) {
+                    throw new ApplyRefusedException('Database attachment UPDATE lacks exact approval evidence. No resources were modified.');
+                }
             }
             if ($action->resourceType === ResourceType::DATABASE_CLUSTER
                 && $action->operation !== PlanOperation::NO_CHANGE
@@ -707,6 +770,159 @@ final readonly class CreateOnlyApply
             }
         }
         return null;
+    }
+
+    /** @return array<string, PlanAction> */
+    private function databaseAttachmentUpdateActions(ExecutionPlan $plan): array
+    {
+        $actions = [];
+        foreach ($plan as $action) {
+            if ($action->resourceType === ResourceType::DATABASE_ATTACHMENT
+                && $action->operation === PlanOperation::UPDATE) {
+                $actions[(string) $action->address] = $action;
+            }
+        }
+        return $actions;
+    }
+
+    /**
+     * @param array<string, PlanAction> $approved
+     * @return array<string, PlanAction>
+     */
+    private function revalidateDatabaseAttachmentApprovals(array $approved, ExecutionPlan $fresh): array
+    {
+        $validated = [];
+        foreach ($approved as $address => $action) {
+            $candidate = $this->actionAt($fresh, $action->address);
+            if ($candidate === null
+                || !in_array($candidate->operation, [PlanOperation::UPDATE, PlanOperation::NO_CHANGE], true)
+                || $action->databaseAttachmentApproval === null
+                || $candidate->databaseAttachmentApproval === null
+                || !$action->databaseAttachmentApproval->equals($candidate->databaseAttachmentApproval)) {
+                throw new ApplyRefusedException(sprintf(
+                    'Database attachment approval for "%s" changed during locked revalidation; no PATCH was sent. Run plan again.',
+                    (string) $action->address,
+                ));
+            }
+            $validated[$address] = $candidate;
+        }
+        return $validated;
+    }
+
+    /**
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{outcomes: list<ApplyResourceOutcome>, failure: ApplyResult|null}
+     */
+    private function updateDatabaseAttachment(
+        Blueprint $blueprint,
+        PlanAction $action,
+        LaravelCloudClient&LaravelCloudDatabaseAttachmentMutationClient $cloud,
+        StateDocument $state,
+        array $outcomes,
+    ): array {
+        $environment = $blueprint->environments->get($action->address->name);
+        $environmentState = $state->get(new ResourceAddress(ResourceType::ENVIRONMENT, $environment->name));
+        $desiredDatabaseId = null;
+        if ($environment->database->isAttached()) {
+            $databaseState = $state->get(new ResourceAddress(
+                ResourceType::DATABASE,
+                (string) $environment->database->reference(),
+            ));
+            $desiredDatabaseId = $databaseState->remoteId;
+        }
+
+        $patchFailure = null;
+        try {
+            $cloud->updateEnvironmentDatabaseAttachment(
+                $environmentState->remoteId,
+                new UpdateEnvironmentDatabaseAttachmentRequest($desiredDatabaseId),
+            );
+        } catch (CloudException $exception) {
+            $patchFailure = $exception;
+        }
+
+        try {
+            $confirmed = $cloud->environment($environmentState->remoteId);
+            if (!$confirmed->dependencies->databaseRelationshipComplete()) {
+                return $this->databaseAttachmentFailure(
+                    $outcomes,
+                    $action,
+                    DatabaseAttachmentMutationOutcome::UNCERTAIN,
+                    'Database attachment confirmation relationship evidence is incomplete.',
+                );
+            }
+            $matches = $environment->database->isDetached()
+                ? $confirmed->databaseId === null
+                : $confirmed->databaseId === $desiredDatabaseId;
+            if ($matches) {
+                $outcomes[] = new ApplyResourceOutcome(
+                    $action->address,
+                    ApplyOutcomeOperation::UPDATED,
+                    $patchFailure === null
+                        ? null
+                        : 'Database attachment was confirmed by authoritative read after an uncertain or refused PATCH response.',
+                );
+                return ['outcomes' => $outcomes, 'failure' => null];
+            }
+        } catch (CloudException) {
+            return $this->databaseAttachmentFailure(
+                $outcomes,
+                $action,
+                DatabaseAttachmentMutationOutcome::UNCERTAIN,
+                'Database attachment PATCH outcome could not be confirmed by authoritative read.',
+            );
+        }
+
+        if ($patchFailure !== null) {
+            $outcome = $this->databaseAttachmentPatchIsDefinitivelyRefused($patchFailure)
+                ? DatabaseAttachmentMutationOutcome::REFUSED
+                : DatabaseAttachmentMutationOutcome::UNCERTAIN;
+            return $this->databaseAttachmentFailure(
+                $outcomes,
+                $action,
+                $outcome,
+                $outcome === DatabaseAttachmentMutationOutcome::REFUSED
+                    ? 'Laravel Cloud refused the Database attachment PATCH; authoritative read did not show the desired relationship.'
+                    : 'Database attachment PATCH transmission was uncertain and authoritative read did not show the desired relationship.',
+                $patchFailure instanceof CloudValidationException ? $patchFailure : null,
+            );
+        }
+
+        return $this->databaseAttachmentFailure(
+            $outcomes,
+            $action,
+            DatabaseAttachmentMutationOutcome::CONFLICT,
+            'Database attachment PATCH returned successfully, but authoritative read showed a different relationship.',
+        );
+    }
+
+    private function databaseAttachmentPatchIsDefinitivelyRefused(CloudException $exception): bool
+    {
+        return $exception instanceof CloudApiException
+            && !$exception instanceof CloudTransportException
+            && !$exception instanceof CloudResponseException
+            && $exception->statusCode !== null
+            && $exception->statusCode >= 400
+            && $exception->statusCode < 500;
+    }
+
+    /**
+     * @param list<ApplyResourceOutcome> $outcomes
+     * @return array{outcomes: list<ApplyResourceOutcome>, failure: ApplyResult}
+     */
+    private function databaseAttachmentFailure(
+        array $outcomes,
+        PlanAction $action,
+        DatabaseAttachmentMutationOutcome $mutationOutcome,
+        string $message,
+        ?CloudValidationException $validation = null,
+    ): array {
+        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $message, $validation);
+        $uncertain = $mutationOutcome === DatabaseAttachmentMutationOutcome::UNCERTAIN;
+        $status = $this->confirmedMutationCount($outcomes) > 0 || $uncertain
+            ? ApplyStatus::PARTIAL_FAILURE
+            : ApplyStatus::FAILED;
+        return ['outcomes' => $outcomes, 'failure' => new ApplyResult($status, ...$outcomes)];
     }
 
     /**

@@ -4,6 +4,26 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.10] - 2026-09-04
+
+### Added
+
+- Added typed tri-state Environment database attachment intent: omitted, attached, or explicitly detached.
+- Added typed database attachment drift observations and safe `NO_CHANGE`, `UPDATE`, and `UNSUPPORTED` planning.
+
+### Changed
+
+- Added guarded, at-most-once attachment PATCH reconciliation with authoritative read-after-write confirmation.
+- Attachment updates leave State unchanged; Laravel Cloud remains responsible for injected connection variables and credentials.
+
+### Fixed
+
+- Fixed validation of explicit-null database detach intent.
+
+### Verified
+
+- Validated the real-Cloud lifecycle: detached, attach A, no-op, switch B, detach, and omission unmanaged, plus guarded legacy cleanup.
+
 ## [0.1.0-alpha.9] - 2026-09-04
 
 ### Added

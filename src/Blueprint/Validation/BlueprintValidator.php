@@ -295,6 +295,10 @@ final readonly class BlueprintValidator
         }
 
         $path = $environmentPath . '.database';
+        if ($environment['database'] === null) {
+            return;
+        }
+
         if (!is_string($environment['database'])) {
             $errors[] = $this->error($path, ValidationErrorCode::INVALID_TYPE, 'Database reference must be a string.');
             return;

@@ -20,6 +20,7 @@ final readonly class PlanAction
     public ?StateProvenance $provenance;
     public ?DatabaseDestructiveRole $destructiveRole;
     public ?DatabaseParentLifecycleDependency $parentLifecycleDependency;
+    public ?DatabaseAttachmentApproval $databaseAttachmentApproval;
 
     public function __construct(
         public ResourceAddress $address,
@@ -27,7 +28,7 @@ final readonly class PlanAction
         public PlanOperation $operation,
         public string $reason,
         public ?string $remoteId = null,
-        PlanChange|ResourceAddress|EnvironmentDependencies|DatabaseDependencies|StateOwnershipClassification|StateProvenance|DatabaseDestructiveRole|DatabaseParentLifecycleDependency ...$details,
+        PlanChange|ResourceAddress|EnvironmentDependencies|DatabaseDependencies|StateOwnershipClassification|StateProvenance|DatabaseDestructiveRole|DatabaseParentLifecycleDependency|DatabaseAttachmentApproval ...$details,
     ) {
         $parent = null;
         $changes = [];
@@ -37,6 +38,7 @@ final readonly class PlanAction
         $provenance = null;
         $destructiveRole = null;
         $parentLifecycleDependency = null;
+        $databaseAttachmentApproval = null;
         foreach ($details as $detail) {
             if ($detail instanceof ResourceAddress) {
                 if ($parent !== null) {
@@ -73,6 +75,11 @@ final readonly class PlanAction
                     throw new \InvalidArgumentException('A plan action must not have multiple parent lifecycle dependencies.');
                 }
                 $parentLifecycleDependency = $detail;
+            } elseif ($detail instanceof DatabaseAttachmentApproval) {
+                if ($databaseAttachmentApproval !== null) {
+                    throw new \InvalidArgumentException('A plan action must not have multiple Database attachment approvals.');
+                }
+                $databaseAttachmentApproval = $detail;
             } else {
                 $changes[] = $detail;
             }
@@ -94,6 +101,7 @@ final readonly class PlanAction
         $this->provenance = $provenance;
         $this->destructiveRole = $destructiveRole;
         $this->parentLifecycleDependency = $parentLifecycleDependency;
+        $this->databaseAttachmentApproval = $databaseAttachmentApproval;
         $this->changes = $changes;
     }
 

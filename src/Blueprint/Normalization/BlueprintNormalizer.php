@@ -12,6 +12,7 @@ use LaravelCloudBlueprint\Blueprint\DatabaseClusterDefinition;
 use LaravelCloudBlueprint\Blueprint\DatabaseClusterDefinitionCollection;
 use LaravelCloudBlueprint\Blueprint\DatabaseClusterType;
 use LaravelCloudBlueprint\Blueprint\DatabaseReference;
+use LaravelCloudBlueprint\Blueprint\DatabaseAttachmentIntent;
 use LaravelCloudBlueprint\Blueprint\EnvironmentDefinition;
 use LaravelCloudBlueprint\Blueprint\EnvironmentDefinitionCollection;
 use LaravelCloudBlueprint\Blueprint\EnvironmentVariableReference;
@@ -156,15 +157,19 @@ final readonly class BlueprintNormalizer
     }
 
     /** @param array<string, mixed> $environment */
-    private function databaseReference(array $environment, string $environmentPath): ?DatabaseReference
+    private function databaseReference(array $environment, string $environmentPath): DatabaseAttachmentIntent
     {
         if (!array_key_exists('database', $environment)) {
-            return null;
+            return DatabaseAttachmentIntent::unmanaged();
+        }
+
+        if ($environment['database'] === null) {
+            return DatabaseAttachmentIntent::detached();
         }
 
         $reference = $this->string($environment, 'database', $environmentPath . '.database');
         try {
-            return DatabaseReference::fromString($reference);
+            return DatabaseAttachmentIntent::attached(DatabaseReference::fromString($reference));
         } catch (\InvalidArgumentException) {
             throw new BlueprintNormalizationException(
                 $environmentPath . '.database',

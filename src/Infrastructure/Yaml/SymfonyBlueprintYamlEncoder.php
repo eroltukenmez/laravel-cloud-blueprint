@@ -14,7 +14,13 @@ final readonly class SymfonyBlueprintYamlEncoder implements BlueprintEncoder
     {
         $environments = [];
         foreach ($blueprint->environments as $environment) {
-            $environments[$environment->name] = ['branch' => $environment->branch];
+            $definition = ['branch' => $environment->branch];
+            if ($environment->database->isAttached()) {
+                $definition['database'] = (string) $environment->database->reference();
+            } elseif ($environment->database->isDetached()) {
+                $definition['database'] = null;
+            }
+            $environments[$environment->name] = $definition;
         }
 
         $sections = [
