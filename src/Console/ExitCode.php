@@ -10,4 +10,5 @@ enum ExitCode: int
     case GENERAL_ERROR = 1;
     case BLUEPRINT_ERROR = 2;
     case DRIFT_CHECK_FAILED = 3;
+    public const self CHECK_FAILED = self::DRIFT_CHECK_FAILED;
 }
