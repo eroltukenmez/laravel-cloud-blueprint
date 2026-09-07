@@ -133,9 +133,17 @@ final class DriftCommand extends Command
         $output->writeln($this->humanRenderer->render($report));
 
         if ($checkResult !== null) {
-            $output->writeln($checkResult->passed()
-                ? 'Check passed.'
-                : sprintf('Check failed: %d observations violate the policy.', $checkResult->failingCount()));
+            if ($checkResult->passed()) {
+                $output->writeln('Check passed.');
+            } else {
+                $failingCount = $checkResult->failingCount();
+                $output->writeln(sprintf(
+                    'Check failed: %d %s %s the policy.',
+                    $failingCount,
+                    $failingCount === 1 ? 'observation' : 'observations',
+                    $failingCount === 1 ? 'violates' : 'violate',
+                ));
+            }
         }
 
         return $checkResult?->passed() === false

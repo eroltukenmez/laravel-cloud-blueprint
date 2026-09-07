@@ -178,7 +178,28 @@ final class DriftCommandTest extends TestCase
         self::assertStringNotContainsString('Check failed:', $normal->getDisplay());
 
         self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, $checked->execute(['--check' => true]));
-        self::assertStringContainsString('Check failed: 1 observations violate the policy.', $checked->getDisplay());
+        self::assertStringContainsString('Check failed: 1 observation violates the policy.', $checked->getDisplay());
+    }
+
+    public function testHumanCheckFailureUsesPluralGrammarForMultipleObservations(): void
+    {
+        $blueprint = <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: API
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/api
+environments:
+  production:
+    branch: main
+YAML;
+        $tester = self::tester($blueprint);
+
+        self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, $tester->execute(['--check' => true]));
+        self::assertStringContainsString('Check failed: 2 observations violate the policy.', $tester->getDisplay());
     }
 
     public function testHumanAndJsonOutputNeverExposeVariableValues(): void
