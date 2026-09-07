@@ -146,7 +146,10 @@ final class DriftCommandTest extends TestCase
             'app-id',
         ));
 
-        self::assertSame(ExitCode::SUCCESS->value, self::tester(self::blueprint(), $cloud, new DriftCommandStateStore($state))->execute(['--check' => true]));
+        $tester = self::tester(self::blueprint(), $cloud, new DriftCommandStateStore($state));
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--check' => true]));
+        self::assertStringContainsString('Check passed.', $tester->getDisplay());
+        self::assertStringNotContainsString('Check failed:', $tester->getDisplay());
     }
 
     public function testCheckModeDoesNotChangeJsonOutput(): void
@@ -160,6 +163,22 @@ final class DriftCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $normal->execute(['--json' => true]));
         self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, $checked->execute(['--json' => true, '--check' => true]));
         self::assertSame(self::decoded($normal), self::decoded($checked));
+    }
+
+    public function testHumanCheckFailureIncludesEvaluatorCountAndNormalModeHasNoFooter(): void
+    {
+        $cloud = new DriftCommandCloudClient([
+            new CloudApplication('app-id', 'API', null, 'eu-central-1', null),
+        ]);
+        $normal = self::tester(self::blueprint(), $cloud);
+        $checked = self::tester(self::blueprint(), $cloud);
+
+        self::assertSame(ExitCode::SUCCESS->value, $normal->execute([]));
+        self::assertStringNotContainsString('Check passed.', $normal->getDisplay());
+        self::assertStringNotContainsString('Check failed:', $normal->getDisplay());
+
+        self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, $checked->execute(['--check' => true]));
+        self::assertStringContainsString('Check failed: 1 observations violate the policy.', $checked->getDisplay());
     }
 
     public function testHumanAndJsonOutputNeverExposeVariableValues(): void

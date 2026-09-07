@@ -117,20 +117,28 @@ final class DriftCommand extends Command
             return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json);
         }
 
+        $checkResult = $check ? $this->checkEvaluator->evaluate($report) : null;
+
         if ($json) {
             $written = $this->json->write($this->jsonRenderer->render($report), $output);
             if (!$written) {
                 return ExitCode::GENERAL_ERROR->value;
             }
 
-            return $check && !$this->checkEvaluator->evaluate($report)->passed()
+            return $checkResult?->passed() === false
                 ? ExitCode::DRIFT_CHECK_FAILED->value
                 : ExitCode::SUCCESS->value;
         }
 
         $output->writeln($this->humanRenderer->render($report));
 
-        return $check && !$this->checkEvaluator->evaluate($report)->passed()
+        if ($checkResult !== null) {
+            $output->writeln($checkResult->passed()
+                ? 'Check passed.'
+                : sprintf('Check failed: %d observations violate the policy.', $checkResult->failingCount()));
+        }
+
+        return $checkResult?->passed() === false
             ? ExitCode::DRIFT_CHECK_FAILED->value
             : ExitCode::SUCCESS->value;
     }
