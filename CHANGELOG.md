@@ -4,6 +4,18 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `lcb drift --check` for strict, evidence-safe observed conformance checking with dedicated exit code `3` and concise human pass/fail output.
+
+### Changed
+
+- Kept Drift JSON output and schema unchanged in check mode; check status is communicated through the process exit code.
+
+### Safety
+
+- Check mode remains read-only, performs no State or Cloud mutation, and introduces no State schema changes.
+
 ## [0.1.0-alpha.10] - 2026-09-04
 
 ### Added

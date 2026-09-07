@@ -212,6 +212,25 @@ Creates a read-only comparison against Laravel Cloud. Supports `--file=<path>` a
 
 Run `lcb drift` for a concise human report, `lcb drift --json` for all scoped entries as deterministic JSON, or `lcb drift --file=cloud.yaml` for another Blueprint. Drift is read-only: it compares the desired Blueprint, State-owned identity, and current scoped Cloud evidence; it does not Apply, reconcile, or update State. Reports include configuration, identity, lifecycle, ownership, reconciliation, and evidence observations for Applications, Environments, declared variables, Database Clusters, logical Databases, and derived default Databases.
 
+`lcb drift` is observational reporting mode. A completed report can contain differences or unknown observations and still exits `0`. Use `lcb drift --check` for CI-aware strict observed conformance checking. Check mode evaluates exactly the resources already in Drift scope and passes only when every observation is `in_sync` with complete evidence. It is not Cloud-wide compliance scanning and does not discover additional unmanaged resources.
+
+Any non-conforming observation fails the check, including configuration differences, missing, replaced, or conflicting identities, lifecycle conditions, and incomplete or unknown evidence. Unknown evidence fails closed because CI must not become green when LCB cannot safely establish conformance. Lifecycle conditions are evaluated as strict conformance and lifecycle safety, not only as field-level configuration differences. The result does not depend on whether `lcb apply` could repair the observation; reconciliation status describes capability and context, not conformance.
+
+Check mode is read-only. It does not mutate Laravel Cloud or State, apply repairs, alter attachments, or perform destructive lifecycle operations. Its human output ends with `Check passed.` or, for example, `Check failed: 2 observations violate the policy.` The footer contains only the result and count; it does not expose Cloud IDs, credentials, or secret values. Existing variable redaction and safe Drift output guarantees continue to apply.
+
+For automation, a minimal GitHub Actions step is:
+
+```yaml
+- name: Validate Laravel Cloud Blueprint
+  env:
+    LCB_TOKEN: ${{ secrets.LCB_TOKEN }}
+  run: |
+    lcb validate
+    lcb drift --check
+```
+
+The explicit `validate` step is useful as a separate pipeline stage, although `lcb drift` also loads and validates the Blueprint internally. For machine-readable consumers, `lcb drift --json` and `lcb drift --json --check` produce the same JSON document for the same report; check status is communicated only through the process exit code.
+
 > A configuration difference means the current Blueprint and Cloud representation differ. Alpha.10 does not claim whether the Cloud resource drifted remotely or the Blueprint itself changed.
 
 Incomplete evidence remains `unknown`. Variable output never exposes current or desired values, and Drift output contains no remote IDs, secrets, or mutation instructions.
@@ -236,9 +255,12 @@ Run `lcb <command> --help` for exact usage.
 
 ### Exit codes
 
-- `0`: report completed successfully, including differences, identity observations, lifecycle conditions, or unknown evidence.
-- `1`: operational, Cloud, or State failure.
+- `0`: report completed successfully, or the strict drift check passed.
+- `1`: operational, Cloud, State, token, file, or output failure.
 - `2`: Blueprint decode or validation failure.
+- `3`: the drift check completed, but the conformance policy failed.
+
+Exit code `3` does not mean LCB failed to execute. It means LCB completed the check successfully and found nonconforming observations. Existing `lcb drift` behavior is unchanged and `--check` is opt-in, so scripts using `lcb drift` continue to receive the report-completed exit behavior.
 
 ## Plan Semantics
 
