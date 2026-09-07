@@ -4,6 +4,27 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.11] - 2026-09-07
+
+### Added
+
+- Added opt-in `lcb drift --check` for strict, evidence-safe observed conformance checking with dedicated exit code `3` and concise human pass/fail output.
+- Check mode fails for `UNKNOWN` or incomplete evidence and lifecycle conditions, and its result is independent of reconciliation support.
+
+### Changed
+
+- Kept Drift JSON output and schema unchanged in check mode; check status is communicated through the process exit code.
+- Preserved normal `lcb drift` exit behavior: completed reports exit `0`, while operational failures exit `1` and Blueprint decode/validation failures exit `2`.
+
+### Safety
+
+- Check mode remains read-only, performs no State or Cloud mutation, and introduces no State schema changes.
+
+### Verified
+
+- Validated against a disposable Laravel Cloud environment: baseline check exited `0`; an external Environment branch difference left normal Drift at `0` and check at `3`; normal and check JSON were byte-identical; LCB did not reconcile Cloud or change State; restoring the branch returned the final check to `0`.
+- CI usage and documentation cover strict check mode, including its human pass/fail footer and unchanged JSON contract.
+
 ## [0.1.0-alpha.10] - 2026-09-04
 
 ### Added

@@ -125,6 +125,83 @@ final class DriftCommandTest extends TestCase
         self::assertSame('incomplete', $entries[0]['evidence']);
     }
 
+    public function testCheckModeFailsForUnknownObservationsButNormalModeSucceeds(): void
+    {
+        $cloud = new DriftCommandCloudClient([
+            new CloudApplication('app-id', 'API', null, 'eu-central-1', null),
+        ]);
+
+        self::assertSame(ExitCode::SUCCESS->value, self::tester(self::blueprint(), $cloud)->execute([]));
+        self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, self::tester(self::blueprint(), $cloud)->execute(['--check' => true]));
+    }
+
+    public function testCheckModePassesForAnInSyncReport(): void
+    {
+        $cloud = new DriftCommandCloudClient([
+            new CloudApplication('app-id', 'API', null, 'eu-central-1', 'acme/api'),
+        ]);
+        $state = StateDocument::empty()->withOrganization('acme')->withResource(new StateResource(
+            new ResourceAddress(ResourceType::APPLICATION, 'API'),
+            ResourceType::APPLICATION,
+            'app-id',
+        ));
+
+        $tester = self::tester(self::blueprint(), $cloud, new DriftCommandStateStore($state));
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--check' => true]));
+        self::assertStringContainsString('Check passed.', $tester->getDisplay());
+        self::assertStringNotContainsString('Check failed:', $tester->getDisplay());
+    }
+
+    public function testCheckModeDoesNotChangeJsonOutput(): void
+    {
+        $cloud = new DriftCommandCloudClient([
+            new CloudApplication('app-id', 'API', null, 'eu-central-1', null),
+        ]);
+        $normal = self::tester(self::blueprint(), $cloud);
+        $checked = self::tester(self::blueprint(), $cloud);
+
+        self::assertSame(ExitCode::SUCCESS->value, $normal->execute(['--json' => true]));
+        self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, $checked->execute(['--json' => true, '--check' => true]));
+        self::assertSame(self::decoded($normal), self::decoded($checked));
+    }
+
+    public function testHumanCheckFailureIncludesEvaluatorCountAndNormalModeHasNoFooter(): void
+    {
+        $cloud = new DriftCommandCloudClient([
+            new CloudApplication('app-id', 'API', null, 'eu-central-1', null),
+        ]);
+        $normal = self::tester(self::blueprint(), $cloud);
+        $checked = self::tester(self::blueprint(), $cloud);
+
+        self::assertSame(ExitCode::SUCCESS->value, $normal->execute([]));
+        self::assertStringNotContainsString('Check passed.', $normal->getDisplay());
+        self::assertStringNotContainsString('Check failed:', $normal->getDisplay());
+
+        self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, $checked->execute(['--check' => true]));
+        self::assertStringContainsString('Check failed: 1 observation violates the policy.', $checked->getDisplay());
+    }
+
+    public function testHumanCheckFailureUsesPluralGrammarForMultipleObservations(): void
+    {
+        $blueprint = <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: API
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/api
+environments:
+  production:
+    branch: main
+YAML;
+        $tester = self::tester($blueprint);
+
+        self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, $tester->execute(['--check' => true]));
+        self::assertStringContainsString('Check failed: 2 observations violate the policy.', $tester->getDisplay());
+    }
+
     public function testHumanAndJsonOutputNeverExposeVariableValues(): void
     {
         $blueprint = <<<'YAML'
