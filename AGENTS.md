@@ -86,9 +86,9 @@ v0.1 supports:
 - NO_CHANGE
 - UNSUPPORTED
 
-Environment and logical Database are the only Cloud resources whose DELETE may execute in v0.1. Both require explicit approval, exact State identity, locked live rediscovery, complete SAFE dependency readiness, and confirmed remote absence before State removal. Logical Database deletion additionally requires its exact State-owned Cluster parent and complete empty reverse Environment attachments. Other DELETE resource types remain non-executable.
+Environment, logical Database, and Database Cluster are the only Cloud resources whose DELETE may execute in v0.1. Each requires explicit approval, exact State identity, locked live rediscovery, complete SAFE dependency readiness, and confirmed remote absence before State removal. Logical Database deletion additionally requires its exact State-owned Cluster parent and complete empty reverse Environment attachments. Database Cluster deletion is guarded child-first and additionally requires its exact State-owned Cluster identity, authoritative derived-child provenance where applicable, complete relationship evidence, and safe snapshot, recovery, and lifecycle readiness. Other DELETE resource types remain non-executable.
 
-Database Cluster destructive readiness includes read-only exact-ID child, snapshot, retained recovery configuration, and lifecycle discovery. Any snapshot blocks readiness; incomplete evidence remains unknown. Database Cluster and snapshot DELETE remain unsupported, and snapshots are never automatically deleted.
+Database Cluster destructive readiness includes read-only exact-ID child, snapshot, retained recovery configuration, and lifecycle discovery. Any snapshot blocks readiness; incomplete evidence remains unknown. Database Cluster DELETE remains guarded by these checks, while snapshot DELETE remains unsupported and snapshots are never automatically deleted.
 
 Environment destructive dependency discovery is live and read-only. It must remain conservative when relationship data is missing, malformed, or unknown, and it must not imply ownership. No force or recursive destroy behavior is permitted.
 
@@ -141,7 +141,7 @@ v0.1.0-alpha.7 supports only:
 - Database Cluster
 - logical Database
 
-Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, and guarded DELETE for Environment and logical Database only. Application repository and region changes, Database updates and replacements, Database Cluster deletion, and Environment Database attachment/detach are UNSUPPORTED.
+Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, and guarded DELETE for Environment, logical Database, and Database Cluster only. Application repository and region changes, Database updates and replacements, and Environment Database attachment/detach are UNSUPPORTED.
 
 Explicit import supports Application, Environment, Database Cluster, and logical Database identity adoption into local state only. Environment variables and Database attachments are not importable.
 
