@@ -74,7 +74,7 @@ final class DriftCheckEvaluatorTest extends TestCase
 
     private function evaluate(ResourceObservation ...$observations): \LaravelCloudBlueprint\Drift\DriftCheckResult
     {
-        return new DriftCheckEvaluator()->evaluate(new DriftReport(new ResourceObservationCollection(...$observations)));
+        return (new DriftCheckEvaluator())->evaluate(new DriftReport(new ResourceObservationCollection(...$observations)));
     }
 
     private static function observation(
