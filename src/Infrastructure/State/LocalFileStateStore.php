@@ -12,6 +12,7 @@ use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
+use LaravelCloudBlueprint\State\Inspection\LoadedState;
 use LaravelCloudBlueprint\State\StateDocument;
 use LaravelCloudBlueprint\State\StateOwnershipClassification;
 use LaravelCloudBlueprint\State\StateProvenance;
@@ -34,8 +35,13 @@ final readonly class LocalFileStateStore implements StateStore
 
     public function load(): StateDocument
     {
+        return $this->loadWithMetadata()->document;
+    }
+
+    public function loadWithMetadata(): LoadedState
+    {
         if (!file_exists($this->path)) {
-            return StateDocument::empty();
+            return new LoadedState(StateDocument::empty(), StateVersion::CURRENT);
         }
 
         $contents = @file_get_contents($this->path);
@@ -108,7 +114,7 @@ final readonly class LocalFileStateStore implements StateStore
         return $mapping;
     }
 
-    private function decodeDocument(mixed $decoded): StateDocument
+    private function decodeDocument(mixed $decoded): LoadedState
     {
         $root = $this->documentAsMapping($decoded, 'state');
         $this->requireExactFields($root, ['version', 'serial', 'organization', 'resources'], 'state');
@@ -170,7 +176,10 @@ final readonly class LocalFileStateStore implements StateStore
         }
 
         try {
-            return new StateDocument(StateVersion::CURRENT, $serial, $organization, ...$resources);
+            return new LoadedState(
+                new StateDocument(StateVersion::CURRENT, $serial, $organization, ...$resources),
+                $stateVersion,
+            );
         } catch (Throwable $exception) {
             throw new StateCorruptedException('Local state document is malformed.', previous: $exception);
         }
