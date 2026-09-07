@@ -14,6 +14,7 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Console\JsonOutput;
 use LaravelCloudBlueprint\Drift\CreateDriftReport;
+use LaravelCloudBlueprint\Drift\DriftCheckEvaluator;
 use LaravelCloudBlueprint\Drift\Rendering\DriftHumanRenderer;
 use LaravelCloudBlueprint\Drift\Rendering\DriftJsonRenderer;
 use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
@@ -44,6 +45,7 @@ final class DriftCommand extends Command
         private readonly StateStore $states,
         private readonly DriftHumanRenderer $humanRenderer = new DriftHumanRenderer(),
         private readonly DriftJsonRenderer $jsonRenderer = new DriftJsonRenderer(),
+        private readonly DriftCheckEvaluator $checkEvaluator = new DriftCheckEvaluator(),
         ?JsonOutput $json = null,
     ) {
         $this->json = $json ?? new JsonOutput();
@@ -54,12 +56,14 @@ final class DriftCommand extends Command
     {
         $this
             ->addOption('file', null, InputOption::VALUE_REQUIRED, 'Blueprint file path.', InitCommand::DEFAULT_FILE)
-            ->addOption('json', null, InputOption::VALUE_NONE, 'Output structured JSON.');
+            ->addOption('json', null, InputOption::VALUE_NONE, 'Output structured JSON.')
+            ->addOption('check', null, InputOption::VALUE_NONE, 'Fail when observations do not conform.');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $json = $input->getOption('json') === true;
+        $check = $input->getOption('check') === true;
         $path = $input->getOption('file');
         if (!is_string($path)) {
             return $this->error($output, 'The --file option must be a path.', ExitCode::GENERAL_ERROR, $json);
@@ -114,14 +118,21 @@ final class DriftCommand extends Command
         }
 
         if ($json) {
-            return $this->json->write($this->jsonRenderer->render($report), $output)
-                ? ExitCode::SUCCESS->value
-                : ExitCode::GENERAL_ERROR->value;
+            $written = $this->json->write($this->jsonRenderer->render($report), $output);
+            if (!$written) {
+                return ExitCode::GENERAL_ERROR->value;
+            }
+
+            return $check && !$this->checkEvaluator->evaluate($report)->passed()
+                ? ExitCode::DRIFT_CHECK_FAILED->value
+                : ExitCode::SUCCESS->value;
         }
 
         $output->writeln($this->humanRenderer->render($report));
 
-        return ExitCode::SUCCESS->value;
+        return $check && !$this->checkEvaluator->evaluate($report)->passed()
+            ? ExitCode::DRIFT_CHECK_FAILED->value
+            : ExitCode::SUCCESS->value;
     }
 
     private function error(OutputInterface $output, string $message, ExitCode $code, bool $json): int
