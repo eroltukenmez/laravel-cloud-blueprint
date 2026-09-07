@@ -8,4 +8,5 @@ enum DiagnosticEvidenceSource: string
 {
     case LOCAL_STATE = 'local_state';
     case SOURCE_VERSION = 'source_version';
+    case CLOUD = 'cloud';
 }
