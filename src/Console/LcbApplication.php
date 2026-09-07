@@ -17,6 +17,7 @@ use LaravelCloudBlueprint\Console\Command\CloudInspectCommand;
 use LaravelCloudBlueprint\Console\Command\DriftCommand;
 use LaravelCloudBlueprint\Console\Command\PlanCommand;
 use LaravelCloudBlueprint\Console\Command\StateUnmanageCommand;
+use LaravelCloudBlueprint\Console\Command\StateInspectCommand;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
 use LaravelCloudBlueprint\Console\Command\ValidateCommand;
 use LaravelCloudBlueprint\Console\Template\StarterBlueprintTemplate;
@@ -38,7 +39,7 @@ use Symfony\Component\Console\Application;
 final class LcbApplication extends Application
 {
     public const string NAME = 'Laravel Cloud Blueprint';
-    public const string VERSION = '0.1.0-alpha.11';
+    public const string VERSION = '0.1.0-alpha.12';
 
     public function __construct()
     {
@@ -101,5 +102,6 @@ final class LcbApplication extends Application
             $states,
         ));
         $this->add(new StateUnmanageCommand(new ReleaseStateOwnership(), $states));
+        $this->add(new StateInspectCommand($states, new LcbTokenProvider(), new SymfonyLaravelCloudClientFactory(), $files, $loader));
     }
 }

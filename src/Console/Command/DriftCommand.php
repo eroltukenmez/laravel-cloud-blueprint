@@ -126,7 +126,7 @@ final class DriftCommand extends Command
             }
 
             return $checkResult?->passed() === false
-                ? ExitCode::DRIFT_CHECK_FAILED->value
+                ? ExitCode::CHECK_FAILED->value
                 : ExitCode::SUCCESS->value;
         }
 
@@ -147,7 +147,7 @@ final class DriftCommand extends Command
         }
 
         return $checkResult?->passed() === false
-            ? ExitCode::DRIFT_CHECK_FAILED->value
+            ? ExitCode::CHECK_FAILED->value
             : ExitCode::SUCCESS->value;
     }
 

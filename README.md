@@ -11,7 +11,7 @@
 Laravel Cloud Blueprint is an unofficial community CLI for describing a supported subset of Laravel Cloud resources in version-controlled YAML blueprints. It produces a read-only plan before mutation, then reconciles supported application, environment, and environment-variable changes when you apply it.
 
 > [!WARNING]
-> Version `0.1.0-alpha.11` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
+> Version `0.1.0-alpha.12` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
 
 ## See the Plan Before You Apply
 
@@ -42,14 +42,14 @@ lcb --version
 Expected output:
 
 ```text
-Laravel Cloud Blueprint 0.1.0-alpha.11
+Laravel Cloud Blueprint 0.1.0-alpha.12
 ```
 
 Composer's global bin directory must be available in `PATH` for the `lcb` command to be found.
 
 ## Status
 
-Current version: `0.1.0-alpha.11`.
+Current version: `0.1.0-alpha.12`.
 
 The current build can discover and compare applications, environments, environment variables, Database Clusters, logical Databases, and Environment attachments. It can create missing resources in that supported set, update an environment's branch, an existing variable's value, or a managed attachment, and safely delete eligible State-owned Environments, logical Databases, or Database Clusters removed from the Blueprint. Database deletion requires exact State identity and complete dependency evidence. Application repository and region changes, renames, automatic adoption, remote state, and Database update/replacement remain unsupported.
 
@@ -102,6 +102,24 @@ When the Environment, Cluster, or logical Database is created in the same first 
 ### Upgrading to alpha.8
 
 State is now written canonically as V2 so LCB can distinguish ordinary managed resources from typed derived resources with authoritative provenance. Existing V1 State remains readable and migrates in memory without inferring provenance; the next material State mutation writes V2. Database Clusters created by alpha.8 capture their Cloud-created default logical Database as a derived child. Legacy and imported defaults do not gain that authorization and remain unmanaged Cluster-deletion blockers.
+
+## State Inspection and Guided Recovery
+
+`state:inspect` is a read-only alpha command for reviewing local ownership health. It never writes State, changes Laravel Cloud, imports resources, releases ownership, plans, or applies changes.
+
+```shell
+lcb state:inspect                 # local, token-free inspection
+lcb state:inspect --cloud         # optional State-anchored read-only Cloud verification
+lcb state:inspect --cloud --file=cloud.blueprint.yaml
+lcb state:inspect --json
+lcb state:inspect --check
+```
+
+Cloud verification is not a Cloud-wide inventory or compliance scan: it verifies only identities and relationships anchored by local State. `--file` enables Blueprint-aware guidance for existing explicit workflows, but inspection never executes them.
+
+Normal inspection exits `0` once a report completes, even with findings. `--check` exits `3` when strict policy fails; operational failures exit `1`, and Blueprint decode or validation failures exit `2`. JSON output has contract version 1 and is byte-stable between `--json` and `--json --check` for the same report.
+
+Current Cloud topology cannot reconstruct historical derived provenance. An unmanaged Database child may be adopted only as ordinary `MANAGED` ownership through explicit import; a temporary declaration and import never restore `DERIVED` or `CLUSTER_CREATE_RESPONSE` provenance.
 
 ## Requirements
 
