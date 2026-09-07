@@ -498,6 +498,22 @@ JSON);
         self::assertSame('{"branch":"main","name":"production"}', $response->getRequestOptions()['body']);
     }
 
+    public function testEnvironmentCreatePreservesAuthoritativeReturnedApplicationRelationship(): void
+    {
+        $response = new MockResponse(
+            '{"data":{"id":"env-created","type":"environments","attributes":{"name":"production"},"relationships":{"application":{"data":{"type":"applications","id":"app-created"}}}}}',
+            ['http_code' => 201],
+        );
+
+        $environment = $this->client([$response])->createEnvironment(
+            'app-created',
+            new CreateEnvironmentRequest('production', 'main'),
+        );
+
+        self::assertTrue($environment->hasResponseApplicationRelationship);
+        self::assertSame('app-created', $environment->responseApplicationId);
+    }
+
     public function testEnvironmentUpdateAcceptsRealRelationshipBranchResponseAndSendsBranchOnlyPatch(): void
     {
         $response = new MockResponse(

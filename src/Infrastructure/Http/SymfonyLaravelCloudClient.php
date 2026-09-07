@@ -358,12 +358,28 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $document = $this->post($path, ['branch' => $request->branch, 'name' => $request->name]);
         $resource = $this->mappingAt($document, 'data', $path);
         $attributes = $this->mappingAt($resource, 'attributes', $path);
+        $relationships = $this->optionalMapping($resource, 'relationships', $path);
+        $hasResponseApplicationRelationship = $relationships !== null
+            && array_key_exists('application', $relationships);
+        $responseApplicationId = null;
+        if ($hasResponseApplicationRelationship) {
+            $complete = true;
+            $responseApplicationId = $this->dependencyId(
+                $relationships,
+                'application',
+                'applications',
+                $path,
+                $complete,
+            );
+        }
 
         return new CloudEnvironment(
             $this->requiredResourceId($resource, 'id', $path),
             $applicationId,
             $this->requiredString($attributes, 'name', $path),
             $request->branch,
+            responseApplicationId: $responseApplicationId,
+            hasResponseApplicationRelationship: $hasResponseApplicationRelationship,
         );
     }
 

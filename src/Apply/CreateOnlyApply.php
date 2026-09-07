@@ -29,6 +29,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
@@ -342,12 +343,16 @@ final readonly class CreateOnlyApply
 
                 try {
                     if ($action->resourceType === ResourceType::APPLICATION) {
-                        $created = $cloud->createApplication(new CreateApplicationRequest(
+                        $request = new CreateApplicationRequest(
                             $blueprint->application->name,
                             $blueprint->application->source->repository,
                             $blueprint->application->region,
                             $blueprint->application->source->provider,
-                        ));
+                        );
+                        $created = $cloud->createApplication($request);
+                        if (!$this->isCompatibleApplicationCreateResponse($created, $request)) {
+                            return $this->createResponseIdentityFailure($outcomes, $action);
+                        }
                         $applicationId = $created->id;
                         $resource = new StateResource($action->address, ResourceType::APPLICATION, $created->id);
                     } else {
@@ -357,10 +362,14 @@ final readonly class CreateOnlyApply
                         $desired = $blueprint->environments->get($action->address->name);
                         $implicit = $implicitEnvironments[$desired->name] ?? null;
                         if ($implicit === null) {
+                            $request = new CreateEnvironmentRequest($desired->name, $desired->branch);
                             $created = $cloud->createEnvironment(
                                 $applicationId,
-                                new CreateEnvironmentRequest($desired->name, $desired->branch),
+                                $request,
                             );
+                            if (!$this->isCompatibleEnvironmentCreateResponse($created, $request, $applicationId)) {
+                                return $this->createResponseIdentityFailure($outcomes, $action);
+                            }
                             $environmentId = $created->id;
                         } else {
                             $environmentId = $implicit->id;
@@ -377,10 +386,14 @@ final readonly class CreateOnlyApply
                     $outcomes[] = new ApplyResourceOutcome(
                         $action->address,
                         ApplyOutcomeOperation::FAILED,
-                        $exception->getMessage(),
+                        $exception instanceof CloudResponseException
+                            ? $this->createResponseIdentityFailureMessage()
+                            : $exception->getMessage(),
                         $exception instanceof CloudValidationException ? $exception : null,
                     );
-                    $status = $this->confirmedMutationCount($outcomes) === 0 && !$exception instanceof CloudTransportException
+                    $status = $this->confirmedMutationCount($outcomes) === 0
+                        && !$exception instanceof CloudTransportException
+                        && !$exception instanceof CloudResponseException
                         ? ApplyStatus::FAILED
                         : ApplyStatus::PARTIAL_FAILURE;
                     return new ApplyResult($status, ...$outcomes);
@@ -737,6 +750,45 @@ final readonly class CreateOnlyApply
             }
         }
         return false;
+    }
+
+    private function isCompatibleApplicationCreateResponse(
+        CloudApplication $response,
+        CreateApplicationRequest $request,
+    ): bool {
+        return trim($response->id) !== ''
+            && $response->name === $request->name
+            && $response->region === $request->region
+            && ($response->repository === null || $response->repository === $request->repository)
+            && ($response->sourceProvider === null || $response->sourceProvider === $request->sourceProvider);
+    }
+
+    private function isCompatibleEnvironmentCreateResponse(
+        CloudEnvironment $response,
+        CreateEnvironmentRequest $request,
+        string $applicationId,
+    ): bool {
+        return trim($response->id) !== ''
+            && $response->name === $request->name
+            && (!$response->hasResponseApplicationRelationship
+                || $response->responseApplicationId === $applicationId);
+    }
+
+    /** @param list<ApplyResourceOutcome> $outcomes */
+    private function createResponseIdentityFailure(array $outcomes, PlanAction $action): ApplyResult
+    {
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::FAILED,
+            $this->createResponseIdentityFailureMessage(),
+        );
+
+        return new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes);
+    }
+
+    private function createResponseIdentityFailureMessage(): string
+    {
+        return 'Creation may have succeeded remotely, but its returned identity was incompatible or unverifiable. LCB refused to record ownership; inspect Cloud and explicitly recover before retrying.';
     }
 
     private function firstDatabaseCreate(ExecutionPlan $plan): PlanAction

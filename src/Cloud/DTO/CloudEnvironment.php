@@ -15,6 +15,8 @@ final readonly class CloudEnvironment
         public ?string $branch,
         public ?string $databaseId = null,
         ?EnvironmentDependencies $dependencies = null,
+        public ?string $responseApplicationId = null,
+        public bool $hasResponseApplicationRelationship = false,
     ) {
         $this->dependencies = $dependencies ?? EnvironmentDependencies::incomplete($databaseId);
     }
