@@ -145,7 +145,8 @@ final readonly class EnrichStateInspectionWithCloud
             }
             if (!isset($owned[$id])) {
                 $diagnostics[] = new StateDiagnostic(DiagnosticSeverity::WARNING, StateDiagnosticCode::UNMANAGED_REMOTE_CHILD,
-                    DiagnosticEvidenceSource::CLOUD, RecoveryDisposition::MANUAL_DECISION_REQUIRED, $resource->address);
+                    DiagnosticEvidenceSource::CLOUD, RecoveryDisposition::MANUAL_DECISION_REQUIRED, $resource->address,
+                    remoteName: $database->name);
             }
         }
     }

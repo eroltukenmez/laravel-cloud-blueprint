@@ -18,6 +18,7 @@ final readonly class StateDiagnostic
         public ?ResourceAddress $address = null,
         public ?StateOwnershipClassification $classification = null,
         public ?StateProvenance $provenance = null,
+        public ?string $remoteName = null,
     ) {
     }
 }
