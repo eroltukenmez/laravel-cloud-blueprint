@@ -67,8 +67,9 @@ final class DriftCheckEvaluatorTest extends TestCase
             static fn (ResourceObservation $observation): string => (string) $observation->address,
             iterator_to_array($result->failingObservations, false),
         ));
-        self::assertSame($result->failingCount() === 0, $result->passed());
-        self::assertSame($result->failingCount(), $result->failingObservations->count());
+        self::assertFalse($result->passed());
+        self::assertSame(2, $result->failingCount());
+        self::assertSame(2, $result->failingObservations->count());
     }
 
     private function evaluate(ResourceObservation ...$observations): \LaravelCloudBlueprint\Drift\DriftCheckResult
