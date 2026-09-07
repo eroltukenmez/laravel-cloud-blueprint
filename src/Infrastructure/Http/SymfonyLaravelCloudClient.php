@@ -56,7 +56,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string DATABASE_DESTRUCTIVE_INCLUDES = 'database,environments';
     private const string BASE_URL = 'https://cloud.laravel.com/api';
-    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.11';
+    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.12';
 
     public function __construct(
         private HttpClientInterface $http,

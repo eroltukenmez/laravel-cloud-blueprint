@@ -4,6 +4,17 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.12] - 2026-09-07
+
+### Added
+
+- Added read-only `lcb state:inspect` with offline local inspection, optional State-anchored Cloud verification, Blueprint-aware recovery guidance, JSON contract v1, and strict check mode.
+
+### Security
+
+- Inspection never mutates State or Laravel Cloud, never executes guidance, introduces no State V3, and never infers historical derived provenance from current Cloud topology.
+- `--check` returns exit code 3 for unhealthy completed reports; normal inspection remains observational and exits 0 when it completes.
+
 ## [0.1.0-alpha.11] - 2026-09-07
 
 ### Added

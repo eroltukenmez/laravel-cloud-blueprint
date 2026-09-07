@@ -14,7 +14,7 @@ final class LcbApplicationTest extends TestCase
         $application = new LcbApplication();
 
         self::assertSame('Laravel Cloud Blueprint', $application->getName());
-        self::assertSame('0.1.0-alpha.11', $application->getVersion());
+        self::assertSame('0.1.0-alpha.12', $application->getVersion());
     }
 
     public function testCommandDescriptionsClarifyReadOnlyLocalStateAndCloudMutationBoundaries(): void
@@ -29,6 +29,7 @@ final class LcbApplicationTest extends TestCase
         self::assertStringContainsString('Release local LCB ownership', $application->find('state:unmanage')->getDescription());
         self::assertStringContainsString('without modifying Laravel Cloud', $application->find('state:unmanage')->getDescription());
         self::assertStringContainsString('may modify Laravel Cloud', $application->find('apply')->getDescription());
+        self::assertStringContainsString('Read-only', $application->find('state:inspect')->getDescription());
     }
 
     public function testHelpClarifiesNonInteractiveApprovalAndReadOnlyCloudInit(): void
