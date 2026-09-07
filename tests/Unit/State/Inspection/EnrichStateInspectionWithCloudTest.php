@@ -21,6 +21,7 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Inspection\EnrichStateInspectionWithCloud;
+use LaravelCloudBlueprint\State\Inspection\CollectStateInspectionCloudEvidence;
 use LaravelCloudBlueprint\State\Inspection\InspectLocalState;
 use LaravelCloudBlueprint\State\Inspection\LoadedState;
 use LaravelCloudBlueprint\State\Inspection\StateDiagnosticCode;
@@ -102,6 +103,29 @@ final class EnrichStateInspectionWithCloudTest extends TestCase
         self::assertNotContains(StateDiagnosticCode::REMOTE_IDENTITY_MISSING, $this->codes($failure));
     }
 
+    public function testSingleEvidencePassReusesListsAndExactDetails(): void
+    {
+        $application = new StateResource(new ResourceAddress(ResourceType::APPLICATION, 'api'), ResourceType::APPLICATION, 'app-owned');
+        $environment = new StateResource(new ResourceAddress(ResourceType::ENVIRONMENT, 'production'), ResourceType::ENVIRONMENT, 'env-owned', $application->address);
+        $cluster = new StateResource(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'), ResourceType::DATABASE_CLUSTER, 'cluster-owned');
+        $database = new StateResource(new ResourceAddress(ResourceType::DATABASE, 'primary.app'), ResourceType::DATABASE, 'database-owned', $cluster->address);
+        $state = StateDocument::empty()->withResource($application)->withResource($environment)->withResource($cluster)->withResource($database);
+        $cloud = new InspectionCloud(
+            applications: [new CloudApplication('app-owned', 'api', null, 'region', null)],
+            environments: [new CloudEnvironment('env-owned', 'app-owned', 'production', 'main')],
+            cluster: new CloudDatabaseCluster('cluster-owned', 'primary', 'mysql', 'ready', 'region', new CloudUnknownDatabaseConfiguration(), ['database-owned'], true),
+            databases: [new CloudDatabase('database-owned', 'cluster-owned', 'app', 'cluster-owned')],
+            database: new CloudDatabase('database-owned', 'cluster-owned', 'app', 'cluster-owned'),
+        );
+
+        $this->enrich($state, $cloud);
+
+        self::assertSame([
+            'applications', 'environments:app-owned', 'databaseClusters', 'database:cluster-owned:database-owned',
+            'databaseCluster:cluster-owned', 'databases:cluster-owned',
+        ], $cloud->calls);
+    }
+
     private function applicationState(): StateDocument
     {
         return StateDocument::empty()->withResource(new StateResource(new ResourceAddress(ResourceType::APPLICATION, 'api'), ResourceType::APPLICATION, 'app-owned'));
@@ -110,7 +134,8 @@ final class EnrichStateInspectionWithCloudTest extends TestCase
     private function enrich(StateDocument $state, InspectionCloud $cloud): \LaravelCloudBlueprint\State\Inspection\StateInspectionReport
     {
         $local = (new InspectLocalState())->inspect(new LoadedState($state, StateVersion::V2));
-        return (new EnrichStateInspectionWithCloud())->enrich($local, $state, $cloud);
+        $evidence = (new CollectStateInspectionCloudEvidence())->collect($state, $cloud);
+        return (new EnrichStateInspectionWithCloud())->enrich($local, $state, $evidence);
     }
 
     /** @return list<StateDiagnosticCode> */
@@ -123,17 +148,18 @@ final class EnrichStateInspectionWithCloudTest extends TestCase
 final class InspectionCloud implements StateInspectionCloudReader
 {
     /** @var list<string> */ public array $mutations = [];
+    /** @var list<string> */ public array $calls = [];
     /**
      * @param list<CloudApplication> $applications
      * @param list<CloudEnvironment> $environments
      * @param list<CloudDatabase> $databases
      */
     public function __construct(private array $applications = [], private array $environments = [], private ?CloudDatabaseCluster $cluster = null, private array $databases = [], private ?CloudDatabase $database = null, private bool $clusterFailure = false) {}
-    public function applications(): array { return $this->applications; }
-    public function environments(string $applicationId): array { return $this->environments; }
-    public function databaseClusters(): array { return $this->cluster === null ? [] : [$this->cluster]; }
-    public function databaseCluster(string $clusterId): CloudDatabaseCluster { if ($this->clusterFailure) { throw new \LaravelCloudBlueprint\Cloud\Exception\CloudTransportException('failed', 'GET', ''); } if ($this->cluster === null) { throw new CloudResourceNotFoundException('missing', 'GET', '', 404); } return $this->cluster; }
-    public function databases(string $clusterId): array { return $this->databases; }
-    public function database(string $clusterId, string $databaseId): CloudDatabase { if ($this->database === null) { throw new CloudResourceNotFoundException('missing', 'GET', '', 404); } return $this->database; }
+    public function applications(): array { $this->calls[] = 'applications'; return $this->applications; }
+    public function environments(string $applicationId): array { $this->calls[] = 'environments:' . $applicationId; return $this->environments; }
+    public function databaseClusters(): array { $this->calls[] = 'databaseClusters'; return $this->cluster === null ? [] : [$this->cluster]; }
+    public function databaseCluster(string $clusterId): CloudDatabaseCluster { $this->calls[] = 'databaseCluster:' . $clusterId; if ($this->clusterFailure) { throw new \LaravelCloudBlueprint\Cloud\Exception\CloudTransportException('failed', 'GET', ''); } if ($this->cluster === null) { throw new CloudResourceNotFoundException('missing', 'GET', '', 404); } return $this->cluster; }
+    public function databases(string $clusterId): array { $this->calls[] = 'databases:' . $clusterId; return $this->databases; }
+    public function database(string $clusterId, string $databaseId): CloudDatabase { $this->calls[] = 'database:' . $clusterId . ':' . $databaseId; if ($this->database === null) { throw new CloudResourceNotFoundException('missing', 'GET', '', 404); } return $this->database; }
     public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase { return $this->database($clusterId, $databaseId); }
 }

@@ -23,6 +23,33 @@ final readonly class StateInspectionCloudEvidence
         public array $environments,
         public array $databaseClusters,
         public array $databasesByCluster,
+        /** @var array<string, list<CloudEnvironment>> */
+        private array $environmentsByApplication = [],
+        /** @var array<string, CloudDatabaseCluster|null> */
+        private array $clustersById = [],
+        /** @var array<string, array<string, CloudDatabase|null>> */
+        private array $databasesById = [],
+        /** @var array<string, true> */
+        private array $failedEnvironmentReads = [],
+        /** @var array<string, true> */
+        private array $failedClusterReads = [],
+        /** @var array<string, true> */
+        private array $failedDatabaseListReads = [],
+        /** @var array<string, true> */
+        private array $failedDatabaseReads = [],
+        private bool $applicationsReadFailed = false,
+        private bool $databaseClustersReadFailed = false,
     ) {
     }
+
+    public function applicationsReadFailed(): bool { return $this->applicationsReadFailed; }
+    public function databaseClustersReadFailed(): bool { return $this->databaseClustersReadFailed; }
+    /** @return list<CloudEnvironment>|null */
+    public function environmentsFor(string $applicationId): ?array { return $this->environmentsByApplication[$applicationId] ?? null; }
+    public function environmentReadFailed(string $applicationId): bool { return isset($this->failedEnvironmentReads[$applicationId]); }
+    public function cluster(string $clusterId): ?CloudDatabaseCluster { return $this->clustersById[$clusterId] ?? null; }
+    public function clusterReadFailed(string $clusterId): bool { return isset($this->failedClusterReads[$clusterId]); }
+    public function databasesReadFailed(string $clusterId): bool { return isset($this->failedDatabaseListReads[$clusterId]); }
+    public function database(string $clusterId, string $databaseId): ?CloudDatabase { return $this->databasesById[$clusterId][$databaseId] ?? null; }
+    public function databaseReadFailed(string $clusterId, string $databaseId): bool { return isset($this->failedDatabaseReads[$clusterId . ':' . $databaseId]); }
 }
