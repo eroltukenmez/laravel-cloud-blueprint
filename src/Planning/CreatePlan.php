@@ -34,6 +34,8 @@ use LaravelCloudBlueprint\Observation\ApplicationObservationFactory;
 use LaravelCloudBlueprint\Observation\DatabaseClusterCandidate;
 use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidenceStatus;
 use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceAssembler;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyQualityPolicy;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologySynthesis;
 use LaravelCloudBlueprint\Observation\DatabaseClusterObservationEvidence;
 use LaravelCloudBlueprint\Observation\DatabaseClusterObservationFactory;
 use LaravelCloudBlueprint\Observation\DatabaseParentEvidence;
@@ -75,6 +77,7 @@ final readonly class CreatePlan
         private ResourceObservationRecorder $observationRecorder = new ResourceObservationRecorder(),
         private DatabaseAttachmentObservationFactory $databaseAttachmentObservations = new DatabaseAttachmentObservationFactory(),
         private DatabaseClusterTopologyEvidenceAssembler $databaseTopologyEvidence = new DatabaseClusterTopologyEvidenceAssembler(),
+        private DatabaseClusterTopologyQualityPolicy $databaseTopologyQuality = new DatabaseClusterTopologyQualityPolicy(),
     ) {
     }
 
@@ -1745,49 +1748,56 @@ final readonly class CreatePlan
 
         $missing = $cluster->missingRelationships;
         $unknown = $cluster->unknownRelationships;
-        $remoteById = [];
-        $conflictedRemoteIds = [];
-        $databaseListComplete = true;
+        $databases = [];
+        $scopedListStatus = DatabaseClusterScopedListEvidenceStatus::COMPLETE;
         try {
-            foreach ($cloud->databases($resource->remoteId) as $database) {
-                $identityKey = 'id:' . $database->id;
-                if (isset($remoteById[$identityKey])) {
-                    $ownershipConflict = true;
-                    $conflictedRemoteIds[$identityKey] = true;
-                    continue;
-                }
-                $remoteById[$identityKey] = $database;
-            }
+            $databases = $cloud->databases($resource->remoteId);
         } catch (CloudException) {
             $missing[] = 'databases';
-            $databaseListComplete = false;
+            $scopedListStatus = DatabaseClusterScopedListEvidenceStatus::FAILED;
+        }
+
+        $topology = $this->databaseTopologyEvidence->assemble(
+            $resource->remoteId,
+            $cluster,
+            $scopedListStatus,
+            $databases,
+        );
+        $destructiveTopology = $this->databaseTopologyQuality->isDestructiveQuality($topology);
+        if ($topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING) {
+            $ownershipConflict = true;
+        }
+
+        /** @var array<string, CloudDatabase> $remoteById */
+        $remoteById = [];
+        foreach ($databases as $database) {
+            $remoteById['id:' . $database->id] ??= $database;
         }
 
         $ownedCount = 0;
         $derivedParentDependencyCount = 0;
         $unmanagedCount = 0;
-        $relationshipIds = [];
-        foreach ($cluster->databaseIds as $databaseId) {
+        foreach ($topology->childIds() as $databaseId) {
             $identityKey = 'id:' . $databaseId;
-            if (isset($relationshipIds[$identityKey])) {
-                $ownershipConflict = true;
-                continue;
-            }
-            $relationshipIds[$identityKey] = true;
-            if (!$databaseListComplete) {
-                continue;
-            }
             $remote = $remoteById[$identityKey] ?? null;
             $child = $childrenById[$identityKey] ?? null;
 
+            // Positive topology can conservatively identify an unmanaged child even when the
+            // evidence is not complete enough to authorize destructive absence.
+            if ($child === null) {
+                if (isset($databaseOwners[$identityKey])) {
+                    $ownershipConflict = true;
+                } else {
+                    ++$unmanagedCount;
+                }
+                continue;
+            }
+            if (!$destructiveTopology || $remote === null) {
+                continue;
+            }
+
             $classification = match (true) {
-                isset($conflictedRemoteIds[$identityKey]) => DatabaseClusterChildClassification::CONFLICT,
-                $remote === null => DatabaseClusterChildClassification::CONFLICT,
                 $remote->clusterId !== $resource->remoteId => DatabaseClusterChildClassification::CONFLICT,
-                $remote->relationshipClusterId !== null
-                    && $remote->relationshipClusterId !== $resource->remoteId => DatabaseClusterChildClassification::CONFLICT,
-                $child === null && isset($databaseOwners[$identityKey]) => DatabaseClusterChildClassification::CONFLICT,
-                $child === null => DatabaseClusterChildClassification::UNMANAGED,
                 $child->classification === StateOwnershipClassification::DERIVED
                     && $child->provenance === StateProvenance::CLUSTER_CREATE_RESPONSE
                     && $child->parent !== null
@@ -1803,19 +1813,13 @@ final readonly class CreatePlan
             match ($classification) {
                 DatabaseClusterChildClassification::BLUEPRINT_OWNED => ++$ownedCount,
                 DatabaseClusterChildClassification::DERIVED_PARENT_DEPENDENCY => ++$derivedParentDependencyCount,
-                DatabaseClusterChildClassification::UNMANAGED => ++$unmanagedCount,
                 DatabaseClusterChildClassification::CONFLICT => $ownershipConflict = true,
             };
         }
-        if ($databaseListComplete) {
-            foreach ($remoteById as $identityKey => $_remote) {
-                if (!isset($relationshipIds[$identityKey])) {
-                    $ownershipConflict = true;
-                }
-            }
+        if ($destructiveTopology) {
             foreach ($childrenById as $identityKey => $child) {
                 if ($child->classification === StateOwnershipClassification::DERIVED
-                    && !isset($relationshipIds[$identityKey])) {
+                    && !in_array($child->remoteId, $topology->childIds(), true)) {
                     $ownershipConflict = true;
                 }
             }
@@ -1872,7 +1876,7 @@ final readonly class CreatePlan
             $ownedCount,
             $unmanagedCount,
             $ownershipConflict,
-            $cluster->childDiscoveryComplete && $databaseListComplete && !$ownershipConflict,
+            $destructiveTopology && !$ownershipConflict,
             $unknown,
             $missing,
             count($snapshots),

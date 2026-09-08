@@ -52,6 +52,10 @@ use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\DatabaseDestructiveRole;
 use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
+use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidenceStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceAssembler;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyQualityPolicy;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologySynthesis;
 use LaravelCloudBlueprint\Resource\DerivedResource;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
@@ -70,7 +74,18 @@ final readonly class CreateOnlyApply
         private DatabaseDeletionVerification $databaseDeletionVerification = new DatabaseDeletionVerification(),
         private DatabaseClusterDeletionVerification $databaseClusterDeletionVerification = new DatabaseClusterDeletionVerification(),
         private DatabaseClusterDeletionReadiness $databaseClusterDeletionReadiness = new DatabaseClusterDeletionReadiness(),
+        private DatabaseClusterTopologyEvidenceAssembler $databaseTopologyEvidence = new DatabaseClusterTopologyEvidenceAssembler(),
+        private DatabaseClusterTopologyQualityPolicy $databaseTopologyQuality = new DatabaseClusterTopologyQualityPolicy(),
     ) {
+    }
+
+    private function planner(): CreatePlan
+    {
+        return new CreatePlan(
+            $this->values,
+            databaseTopologyEvidence: $this->databaseTopologyEvidence,
+            databaseTopologyQuality: $this->databaseTopologyQuality,
+        );
     }
 
     public function execute(
@@ -120,7 +135,7 @@ final readonly class CreateOnlyApply
             $lockedAttachmentActions = [];
             if ($approvedAttachmentActions !== []) {
                 try {
-                    $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                    $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
                 } catch (CloudException $exception) {
                     $action = reset($approvedAttachmentActions);
                     return new ApplyResult(
@@ -145,7 +160,7 @@ final readonly class CreateOnlyApply
                 }
                 $plannedDatabaseCreates = $this->databaseCreateActions($plan);
                 try {
-                    $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                    $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
                 } catch (CloudException $exception) {
                     $action = $this->firstDatabaseCreate($plan);
                     return new ApplyResult(
@@ -195,7 +210,7 @@ final readonly class CreateOnlyApply
             $this->verifyState($blueprint, $plan, $state);
             if ($this->hasDelete($plan, ResourceType::DATABASE_CLUSTER)) {
                 try {
-                    $lockedPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                    $lockedPlan = $this->planner()->create($blueprint, $cloud, $state);
                 } catch (CloudException $exception) {
                     throw new ApplyRefusedException('Locked Database Cluster approval-graph revalidation failed; no mutation was sent.');
                 }
@@ -1625,7 +1640,7 @@ final readonly class CreateOnlyApply
         }
 
         try {
-            $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+            $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
         } catch (CloudException $exception) {
             return $failure(
                 DestructiveOutcome::UNCERTAIN,
@@ -1865,8 +1880,8 @@ final readonly class CreateOnlyApply
         } catch (CloudException $exception) {
             return $failure(DestructiveOutcome::UNCERTAIN, 'Locked exact Database Cluster rediscovery failed before mutation: ' . $exception->getMessage());
         }
-        if ($cluster->id !== $managed->remoteId || !$cluster->childDiscoveryComplete) {
-            return $failure(DestructiveOutcome::REFUSED, 'Database Cluster deletion refused: exact child relationship discovery is incomplete or conflicted.');
+        if ($cluster->id !== $managed->remoteId) {
+            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster deletion refused: exact Cluster identity conflicts with locked State.');
         }
 
         $children = $state->childrenOf($managed->address);
@@ -1875,18 +1890,30 @@ final readonly class CreateOnlyApply
         if ($ordinary !== [] || count($derived) > 1) {
             return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster still has owned child State entries after ordinary child execution.');
         }
+        $listed = [];
+        $scopedListStatus = DatabaseClusterScopedListEvidenceStatus::COMPLETE;
         try {
             $listed = $cloud->databases($managed->remoteId);
-        } catch (CloudException $exception) {
-            return $failure(DestructiveOutcome::REFUSED, 'Database Cluster deletion refused: complete logical Database listing failed.');
+        } catch (CloudException) {
+            $scopedListStatus = DatabaseClusterScopedListEvidenceStatus::FAILED;
+        }
+        $topology = $this->databaseTopologyEvidence->assemble(
+            $managed->remoteId,
+            $cluster,
+            $scopedListStatus,
+            $listed,
+        );
+        if (!$this->databaseTopologyQuality->isDestructiveQuality($topology)) {
+            return $failure(
+                $topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING
+                    ? DestructiveOutcome::CONFLICT
+                    : DestructiveOutcome::REFUSED,
+                $topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING
+                    ? 'Database Cluster deletion refused: fresh topology evidence conflicts.'
+                    : 'Database Cluster deletion refused: fresh topology evidence is incomplete.',
+            );
         }
         $listedIds = array_map(static fn (CloudDatabase $database): string => $database->id, $listed);
-        if (count($listedIds) !== count(array_unique($listedIds))
-            || count($cluster->databaseIds) !== count(array_unique($cluster->databaseIds))
-            || array_values(array_diff($listedIds, $cluster->databaseIds)) !== []
-            || array_values(array_diff($cluster->databaseIds, $listedIds)) !== []) {
-            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster child relationship and complete listing disagree.');
-        }
 
         if ($derived !== []) {
             $child = $derived[0];
@@ -1972,7 +1999,7 @@ final readonly class CreateOnlyApply
 
         try {
             $cluster = $this->databaseClusterDeletionReadiness->wait($cloud, $cloud->databaseCluster($managed->remoteId));
-            $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+            $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
         } catch (CloudException $exception) {
             return $postChildFailure(DestructiveOutcome::REFUSED, 'Post-child Database Cluster readiness could not be proven: ' . $exception->getMessage());
         }
