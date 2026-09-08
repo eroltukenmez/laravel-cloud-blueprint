@@ -4,10 +4,8 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\State\Inspection;
 
-use LaravelCloudBlueprint\Cloud\Contract\StateInspectionCloudReader;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
-use LaravelCloudBlueprint\Cloud\Exception\CloudException;
-use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologySynthesis;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\StateDocument;
 use LaravelCloudBlueprint\State\StateResource;
@@ -17,7 +15,7 @@ final readonly class EnrichStateInspectionWithCloud
     public function enrich(
         StateInspectionReport $local,
         StateDocument $state,
-        StateInspectionCloudReader $cloud,
+        StateInspectionCloudEvidence $cloud,
     ): StateInspectionReport {
         $diagnostics = $local->diagnostics();
         $this->applications($state, $cloud, $diagnostics);
@@ -34,20 +32,19 @@ final readonly class EnrichStateInspectionWithCloud
     }
 
     /** @param list<StateDiagnostic> $diagnostics */
-    private function applications(StateDocument $state, StateInspectionCloudReader $cloud, array &$diagnostics): void
+    private function applications(StateDocument $state, StateInspectionCloudEvidence $cloud, array &$diagnostics): void
     {
         $owned = array_values(array_filter($state->resources(), static fn (StateResource $resource): bool => $resource->type === ResourceType::APPLICATION));
         if ($owned === []) {
             return;
         }
-        try {
-            $applications = $cloud->applications();
-        } catch (CloudException) {
+        if ($cloud->applicationsReadFailed()) {
             foreach ($owned as $resource) {
                 $this->incomplete($diagnostics, $resource);
             }
             return;
         }
+        $applications = $cloud->applications;
         foreach ($owned as $resource) {
             $exact = array_values(array_filter($applications, static fn ($remote): bool => $remote->id === $resource->remoteId));
             if (count($exact) === 1) {
@@ -63,16 +60,19 @@ final readonly class EnrichStateInspectionWithCloud
     }
 
     /** @param list<StateDiagnostic> $diagnostics */
-    private function environment(StateResource $resource, StateDocument $state, StateInspectionCloudReader $cloud, array &$diagnostics): void
+    private function environment(StateResource $resource, StateDocument $state, StateInspectionCloudEvidence $cloud, array &$diagnostics): void
     {
         $parent = $resource->parent === null ? null : $state->find($resource->parent);
         if ($parent === null) {
             $this->incomplete($diagnostics, $resource);
             return;
         }
-        try {
-            $environments = $cloud->environments($parent->remoteId);
-        } catch (CloudException) {
+        if ($cloud->environmentReadFailed($parent->remoteId)) {
+            $this->incomplete($diagnostics, $resource);
+            return;
+        }
+        $environments = $cloud->environmentsFor($parent->remoteId);
+        if ($environments === null) {
             $this->incomplete($diagnostics, $resource);
             return;
         }
@@ -93,20 +93,20 @@ final readonly class EnrichStateInspectionWithCloud
     }
 
     /** @param list<StateDiagnostic> $diagnostics */
-    private function cluster(StateResource $resource, StateDocument $state, StateInspectionCloudReader $cloud, array &$diagnostics): void
+    private function cluster(StateResource $resource, StateDocument $state, StateInspectionCloudEvidence $cloud, array &$diagnostics): void
     {
-        try {
-            $cluster = $cloud->databaseCluster($resource->remoteId);
-        } catch (CloudResourceNotFoundException) {
-            try {
-                $replacement = array_filter($cloud->databaseClusters(), static fn ($remote): bool => $remote->name === $resource->address->name);
-                $replacement === [] ? $this->missing($diagnostics, $resource) : $this->replacement($diagnostics, $resource);
-            } catch (CloudException) {
-                $this->incomplete($diagnostics, $resource);
-            }
-            return;
-        } catch (CloudException) {
+        if ($cloud->clusterReadFailed($resource->remoteId)) {
             $this->incomplete($diagnostics, $resource);
+            return;
+        }
+        $cluster = $cloud->cluster($resource->remoteId);
+        if ($cluster === null) {
+            if ($cloud->databaseClustersReadFailed()) {
+                $this->incomplete($diagnostics, $resource);
+                return;
+            }
+            $replacement = array_filter($cloud->databaseClusters, static fn ($remote): bool => $remote->name === $resource->address->name);
+            $replacement === [] ? $this->missing($diagnostics, $resource) : $this->replacement($diagnostics, $resource);
             return;
         }
         if ($cluster->id !== $resource->remoteId) {
@@ -114,20 +114,11 @@ final readonly class EnrichStateInspectionWithCloud
             return;
         }
         $this->verified($diagnostics, $resource);
-        if (!$cluster->childDiscoveryComplete || $cluster->missingRelationships !== [] || $cluster->unknownRelationships !== []) {
-            $this->incomplete($diagnostics, $resource);
-            return;
-        }
-        try {
-            $listed = $cloud->databases($resource->remoteId);
-        } catch (CloudException) {
-            $this->incomplete($diagnostics, $resource);
-            return;
-        }
-        $listedById = $this->uniqueById($listed);
-        $relationshipIds = array_fill_keys($cluster->databaseIds, true);
-        if (count($listedById) !== count($listed) || count($relationshipIds) !== count($cluster->databaseIds)
-            || array_keys($listedById) !== array_keys($relationshipIds)) {
+        $topology = $cloud->clusterTopology($resource->remoteId);
+        if (!in_array($topology->synthesis, [
+            DatabaseClusterTopologySynthesis::CORROBORATED_COMPLETE,
+            DatabaseClusterTopologySynthesis::SCOPED_COMPLETE,
+        ], true)) {
             $this->incomplete($diagnostics, $resource);
             return;
         }
@@ -137,12 +128,11 @@ final readonly class EnrichStateInspectionWithCloud
                 $owned[$child->remoteId] = $child;
             }
         }
-        foreach ($listedById as $id => $database) {
-            if ($database->clusterId !== $resource->remoteId
-                || ($database->relationshipClusterId !== null && $database->relationshipClusterId !== $resource->remoteId)) {
-                $this->incomplete($diagnostics, $resource);
-                return;
+        foreach ($cloud->databasesByCluster[$resource->remoteId] ?? [] as $database) {
+            if (!in_array($database->id, $topology->childIds(), true)) {
+                continue;
             }
+            $id = $database->id;
             if (!isset($owned[$id])) {
                 $diagnostics[] = new StateDiagnostic(DiagnosticSeverity::WARNING, StateDiagnosticCode::UNMANAGED_REMOTE_CHILD,
                     DiagnosticEvidenceSource::CLOUD, RecoveryDisposition::MANUAL_DECISION_REQUIRED, $resource->address,
@@ -152,26 +142,26 @@ final readonly class EnrichStateInspectionWithCloud
     }
 
     /** @param list<StateDiagnostic> $diagnostics */
-    private function database(StateResource $resource, StateDocument $state, StateInspectionCloudReader $cloud, array &$diagnostics): void
+    private function database(StateResource $resource, StateDocument $state, StateInspectionCloudEvidence $cloud, array &$diagnostics): void
     {
         $parent = $resource->parent === null ? null : $state->find($resource->parent);
         if ($parent === null) {
             $this->incomplete($diagnostics, $resource);
             return;
         }
-        try {
-            $database = $cloud->database($parent->remoteId, $resource->remoteId);
-        } catch (CloudResourceNotFoundException) {
-            try {
-                $replacement = array_filter($cloud->databases($parent->remoteId),
-                    static fn (CloudDatabase $remote): bool => $remote->name === $resource->address->name);
-                $replacement === [] ? $this->missing($diagnostics, $resource) : $this->replacement($diagnostics, $resource);
-            } catch (CloudException) {
-                $this->incomplete($diagnostics, $resource);
-            }
-            return;
-        } catch (CloudException) {
+        if ($cloud->databaseReadFailed($parent->remoteId, $resource->remoteId)) {
             $this->incomplete($diagnostics, $resource);
+            return;
+        }
+        $database = $cloud->database($parent->remoteId, $resource->remoteId);
+        if ($database === null) {
+            if ($cloud->databasesReadFailed($parent->remoteId)) {
+                $this->incomplete($diagnostics, $resource);
+                return;
+            }
+            $replacement = array_filter($cloud->databasesByCluster[$parent->remoteId] ?? [],
+                static fn (CloudDatabase $remote): bool => $remote->name === $resource->address->name);
+            $replacement === [] ? $this->missing($diagnostics, $resource) : $this->replacement($diagnostics, $resource);
             return;
         }
         if ($database->id !== $resource->remoteId) {
@@ -182,20 +172,6 @@ final readonly class EnrichStateInspectionWithCloud
         } else {
             $this->verified($diagnostics, $resource);
         }
-    }
-
-    /**
-     * @param list<CloudDatabase> $databases
-     * @return array<string, CloudDatabase>
-     */
-    private function uniqueById(array $databases): array
-    {
-        $indexed = [];
-        foreach ($databases as $database) {
-            $indexed[$database->id] = $database;
-        }
-        ksort($indexed, SORT_STRING);
-        return $indexed;
     }
 
     /** @param list<StateDiagnostic> $diagnostics */

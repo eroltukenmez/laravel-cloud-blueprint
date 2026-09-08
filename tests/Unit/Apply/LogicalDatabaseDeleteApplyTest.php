@@ -34,6 +34,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
+use LaravelCloudBlueprint\Cloud\DTO\DatabaseDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
@@ -56,6 +57,7 @@ use LaravelCloudBlueprint\State\StateDocument;
 use LaravelCloudBlueprint\State\StateResource;
 use LaravelCloudBlueprint\State\StateOwnershipClassification;
 use LaravelCloudBlueprint\State\StateProvenance;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class LogicalDatabaseDeleteApplyTest extends TestCase
@@ -74,6 +76,118 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         self::assertSame(['cluster-1'], $cloud->clusterDeletes);
         self::assertNull($states->state->find(self::clusterAddress()));
         self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+    }
+
+    /** @return iterable<string, array{CloudDatabaseCluster, list<CloudDatabase>, DestructiveOutcome}> */
+    public static function ineligibleExecutorTopologyCases(): iterable
+    {
+        yield 'scoped complete exact-parent child' => [
+            self::clusterEvidence([], false, ['databases']),
+            [self::database(parentId: 'cluster-1')],
+            DestructiveOutcome::REFUSED,
+        ];
+        yield 'scoped complete empty' => [
+            self::clusterEvidence([], false, ['databases']),
+            [],
+            DestructiveOutcome::REFUSED,
+        ];
+        yield 'partial positive' => [
+            self::clusterEvidence([], false, ['databases']),
+            [self::database(parentId: null)],
+            DestructiveOutcome::REFUSED,
+        ];
+        yield 'incomplete' => [
+            self::clusterEvidence(),
+            [],
+            DestructiveOutcome::REFUSED,
+        ];
+        yield 'conflicting' => [
+            self::clusterEvidence(['relationship-child'], true),
+            [self::database(id: 'scoped-child', parentId: 'cluster-1')],
+            DestructiveOutcome::CONFLICT,
+        ];
+        yield 'duplicate child identity' => [
+            self::clusterEvidence(['database-1', 'database-1'], true),
+            [self::database(parentId: 'cluster-1')],
+            DestructiveOutcome::CONFLICT,
+        ];
+        yield 'conflicting child parent' => [
+            self::clusterEvidence(['database-1'], true),
+            [self::database(parentId: 'other-cluster')],
+            DestructiveOutcome::CONFLICT,
+        ];
+    }
+
+    /** @param list<CloudDatabase> $listed */
+    #[DataProvider('ineligibleExecutorTopologyCases')]
+    public function testLockedExecutorRejectsEveryTopologyBelowCorroboratedComplete(
+        CloudDatabaseCluster $cluster,
+        array $listed,
+        DestructiveOutcome $expectedOutcome,
+    ): void {
+        $cloud = self::cloud([]);
+        $cloud->clusterEvidence = [self::clusterEvidence([], true), $cluster];
+        $cloud->databaseListEvidence = [[], $listed];
+        $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1')));
+        $plan = new ExecutionPlan(new PlanAction(
+            self::clusterAddress(),
+            ResourceType::DATABASE_CLUSTER,
+            PlanOperation::DELETE,
+            'approved safe topology',
+            'cluster-1',
+            new DatabaseDependencies(0, 0, 0, false, true),
+        ));
+
+        $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::FAILED, $result->status);
+        self::assertSame($expectedOutcome, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame([], $cloud->clusterDeletes);
+        self::assertNotNull($states->state->find(self::clusterAddress()));
+        self::assertSame(2, $cloud->databaseListCalls);
+    }
+
+    public function testLockedExecutorTreatsFailedScopedListAsIncompleteTopology(): void
+    {
+        $cloud = self::cloud([]);
+        $cloud->clusterEvidence = [self::clusterEvidence([], true), self::clusterEvidence([], true)];
+        $cloud->databaseListEvidence = [[], new CloudTransportException('failed', 'GET', '/databases')];
+        $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1')));
+        $plan = new ExecutionPlan(new PlanAction(
+            self::clusterAddress(),
+            ResourceType::DATABASE_CLUSTER,
+            PlanOperation::DELETE,
+            'approved safe topology',
+            'cluster-1',
+            new DatabaseDependencies(0, 0, 0, false, true),
+        ));
+
+        $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::FAILED, $result->status);
+        self::assertSame(DestructiveOutcome::REFUSED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame([], $cloud->clusterDeletes);
+        self::assertNotNull($states->state->find(self::clusterAddress()));
+        self::assertSame(2, $cloud->databaseListCalls);
+    }
+
+    public function testLockedPlannerAndExecutorBothAcceptSameCorroboratedCompleteFixture(): void
+    {
+        $cloud = self::cloud([]);
+        $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1')));
+        $plan = (new \LaravelCloudBlueprint\Planning\CreatePlan(new VariableValueResolver(new LogicalDatabaseDeleteValues())))
+            ->create(self::blueprintWithoutCluster(), $cloud, $states->state);
+
+        self::assertSame(PlanOperation::DELETE, iterator_to_array($plan)[0]->operation);
+        self::assertSame(DatabaseDestructiveReadiness::SAFE, iterator_to_array($plan)[0]->databaseDependencies?->readiness());
+
+        $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(['cluster-1'], $cloud->clusterDeletes);
     }
 
     public function testDerivedChildIsDeletedAndCheckpointedBeforeCluster(): void
@@ -98,6 +212,80 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         self::assertSame(['cluster-1'], $cloud->clusterDeletes);
         self::assertSame(2, $states->saveCount);
         self::assertSame([], $states->state->resources());
+    }
+
+    public function testPostChildFreshTopologyConflictRetainsParentAfterImmediateChildCheckpoint(): void
+    {
+        $derivedAddress = self::databaseAddress('__derived_default');
+        $listedChild = self::database(id: 'derived-1', name: 'production', parentId: null);
+        $cloud = self::cloud([
+            'derived-1' => [
+                self::database(id: 'derived-1', name: 'production'),
+                self::notFound(),
+            ],
+        ], [$listedChild]);
+        $safeWithChild = self::clusterEvidence(['derived-1'], true);
+        $cloud->clusterEvidence = [
+            $safeWithChild,
+            $safeWithChild,
+            $safeWithChild,
+            self::clusterEvidence([], true),
+            self::clusterEvidence(['relationship-child'], true),
+        ];
+        $cloud->databaseListEvidence = [
+            [$listedChild],
+            [$listedChild],
+            [$listedChild],
+            [self::database(id: 'scoped-child', parentId: 'cluster-1')],
+        ];
+        $states = new LogicalDatabaseDeleteStateStore(StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource(self::clusterAddress(), ResourceType::DATABASE_CLUSTER, 'cluster-1'))
+            ->withResource(new StateResource(
+                $derivedAddress,
+                ResourceType::DATABASE,
+                'derived-1',
+                self::clusterAddress(),
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+            )));
+        $dependency = new DatabaseParentLifecycleDependency(
+            $derivedAddress,
+            StateOwnershipClassification::DERIVED,
+            StateProvenance::CLUSTER_CREATE_RESPONSE,
+            DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY,
+        );
+        $plan = new ExecutionPlan(
+            new PlanAction(
+                self::clusterAddress(),
+                ResourceType::DATABASE_CLUSTER,
+                PlanOperation::DELETE,
+                'delete',
+                'cluster-1',
+                new DatabaseDependencies(0, 0, 0, false, true, derivedParentDependencyCount: 1),
+                $dependency,
+            ),
+            new PlanAction(
+                $derivedAddress,
+                ResourceType::DATABASE,
+                PlanOperation::NO_CHANGE,
+                'derived',
+                'derived-1',
+                self::clusterAddress(),
+                StateOwnershipClassification::DERIVED,
+                StateProvenance::CLUSTER_CREATE_RESPONSE,
+                DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY,
+            ),
+        );
+
+        $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame([['cluster-1', 'derived-1']], $cloud->deletes);
+        self::assertSame([], $cloud->clusterDeletes);
+        self::assertSame(1, $states->saveCount);
+        self::assertNull($states->state->find($derivedAddress));
+        self::assertNotNull($states->state->find(self::clusterAddress()));
+        self::assertSame(4, $cloud->databaseListCalls);
     }
 
     public function testDerivedExactDetailStillFailsClosedForUnsafeParentOrAttachments(): void
@@ -504,6 +692,28 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         return new CloudDatabase($id, 'cluster-1', $name, $parentId, $environmentIds, true);
     }
 
+    /**
+     * @param list<string> $databaseIds
+     * @param list<string> $missingRelationships
+     */
+    private static function clusterEvidence(
+        array $databaseIds = [],
+        bool $childDiscoveryComplete = false,
+        array $missingRelationships = [],
+    ): CloudDatabaseCluster {
+        return new CloudDatabaseCluster(
+            'cluster-1',
+            'primary',
+            'laravel_mysql_8',
+            'available',
+            'eu-central-1',
+            new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false),
+            $databaseIds,
+            $childDiscoveryComplete,
+            $missingRelationships,
+        );
+    }
+
     private static function notFound(): CloudResourceNotFoundException
     {
         return new CloudResourceNotFoundException('not found', 'GET', '/database', 404);
@@ -541,6 +751,13 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
     public array $clusterDeletes = [];
     private bool $clusterDeleted = false;
     public int $clusterDiscoveries = 0;
+    public int $databaseListCalls = 0;
+
+    /** @var list<CloudDatabaseCluster|CloudException> */
+    public array $clusterEvidence = [];
+
+    /** @var list<list<CloudDatabase>|CloudException> */
+    public array $databaseListEvidence = [];
 
     /**
      * @param array<string, list<CloudDatabase|CloudException>> $discoveries
@@ -583,6 +800,13 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
         if ($this->clusterDeleted) {
             throw new CloudResourceNotFoundException('not found', 'GET', '/cluster', 404);
         }
+        if ($this->clusterEvidence !== []) {
+            $evidence = array_shift($this->clusterEvidence);
+            if ($evidence instanceof CloudException) {
+                throw $evidence;
+            }
+            return $evidence;
+        }
         return new CloudDatabaseCluster(
             'cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1',
             new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false),
@@ -591,7 +815,18 @@ final class LogicalDatabaseDeleteCloud implements LaravelCloudLogicalDatabaseDel
         );
     }
     public function databaseSnapshots(string $clusterId): array { return []; }
-    public function databases(string $clusterId): array { return $this->listed; }
+    public function databases(string $clusterId): array
+    {
+        ++$this->databaseListCalls;
+        if ($this->databaseListEvidence !== []) {
+            $evidence = array_shift($this->databaseListEvidence);
+            if ($evidence instanceof CloudException) {
+                throw $evidence;
+            }
+            return $evidence;
+        }
+        return $this->listed;
+    }
     public function database(string $clusterId, string $databaseId): CloudDatabase
     {
         $this->verificationDiscoveries[] = [$clusterId, $databaseId];

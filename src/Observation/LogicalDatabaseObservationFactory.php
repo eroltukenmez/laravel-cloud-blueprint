@@ -41,6 +41,9 @@ final readonly class LogicalDatabaseObservationFactory
                     && $database->name === $desired->name,
             ));
             if ($matches === []) {
+                if (!$this->topologyAuthorizesAbsence($evidence)) {
+                    return $this->unknown($address, OwnershipStatus::NONE);
+                }
                 if (!$evidence->parent->authorizesChildren()) {
                     return $this->unknown($address, OwnershipStatus::NONE);
                 }
@@ -48,6 +51,12 @@ final readonly class LogicalDatabaseObservationFactory
             }
             if (count($matches) !== 1) {
                 return $this->result($address, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::UNMANAGED, ReconciliationStatus::BLOCKED);
+            }
+            if ($evidence->topology?->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING) {
+                return $this->result($address, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::UNMANAGED, ReconciliationStatus::BLOCKED);
+            }
+            if ($evidence->topology?->synthesis === DatabaseClusterTopologySynthesis::INCOMPLETE) {
+                return $this->unknown($address, OwnershipStatus::UNMANAGED);
             }
             return $this->present($address, $matches[0], $parentId, OwnershipStatus::UNMANAGED, $evidence->observeRelationships);
         }
@@ -60,6 +69,9 @@ final readonly class LogicalDatabaseObservationFactory
             return $this->result($address, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::CONFLICT, ReconciliationStatus::UNSUPPORTED);
         }
         if ($exact === []) {
+            if (!$this->topologyAuthorizesAbsence($evidence)) {
+                return $this->unknown($address, OwnershipStatus::MANAGED);
+            }
             $replacement = array_filter(
                 $databases,
                 static fn (CloudDatabase $database): bool => $database->clusterId === $parentId
@@ -75,7 +87,19 @@ final readonly class LogicalDatabaseObservationFactory
         if ($exact[0]->name !== $desired->name) {
             return $this->result($address, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED, ReconciliationStatus::UNSUPPORTED);
         }
+        if ($evidence->topology?->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING) {
+            return $this->result($address, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::MANAGED, ReconciliationStatus::UNSUPPORTED);
+        }
+        if ($evidence->topology?->synthesis === DatabaseClusterTopologySynthesis::INCOMPLETE) {
+            return $this->unknown($address, OwnershipStatus::MANAGED);
+        }
         return $this->present($address, $exact[0], $parentId, OwnershipStatus::MANAGED, $evidence->observeRelationships);
+    }
+
+    private function topologyAuthorizesAbsence(LogicalDatabaseObservationEvidence $evidence): bool
+    {
+        return $evidence->topology === null
+            || $evidence->topology->synthesis === DatabaseClusterTopologySynthesis::CORROBORATED_COMPLETE;
     }
 
     private function validState(

@@ -8,6 +8,8 @@ use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Cloud\DTO\CloudLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudUnknownDatabaseConfiguration;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedListStatus;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedPaginationStatus;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseClusterRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateDatabaseRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateLaravelMySqlConfiguration;
@@ -646,6 +648,101 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
         self::assertSame('application', $databases[0]->name);
     }
 
+    public function testScopedLogicalDatabaseListValidatesSingleAndMultiplePagePagination(): void
+    {
+        $single = $this->client([new MockResponse(self::scopedPage([
+            self::databaseResource('database-1', 'application'),
+        ], null, 1, 1))])->scopedDatabases('cluster-1');
+        $multiple = $this->client([
+            new MockResponse(self::scopedPage([
+                self::databaseResource('database-2', 'reporting'),
+            ], 'https://cloud.laravel.com/api/databases/clusters/cluster-1/databases?page=2', 1, 2)),
+            new MockResponse(self::scopedPage([
+                self::databaseResource('database-1', 'application'),
+            ], null, 2, 2)),
+        ])->scopedDatabases('cluster-1');
+
+        self::assertSame(CloudDatabaseScopedListStatus::COMPLETE, $single->status);
+        self::assertSame(CloudDatabaseScopedPaginationStatus::VALIDATED, $single->paginationStatus);
+        self::assertSame(['database-1'], array_map(static fn ($database): string => $database->id, $single->databases));
+        self::assertSame(CloudDatabaseScopedPaginationStatus::VALIDATED, $multiple->paginationStatus);
+        self::assertSame(['database-1', 'database-2'], array_map(static fn ($database): string => $database->id, $multiple->databases));
+    }
+
+    public function testScopedLogicalDatabaseListMarksLinksOnlyPaginationUnverified(): void
+    {
+        $list = $this->client([new MockResponse(self::page([
+            self::databaseResource('database-1', 'application'),
+        ]))])->scopedDatabases('cluster-1');
+
+        self::assertSame(CloudDatabaseScopedListStatus::COMPLETE, $list->status);
+        self::assertSame(CloudDatabaseScopedPaginationStatus::UNVERIFIED, $list->paginationStatus);
+    }
+
+    #[DataProvider('invalidScopedDatabasePagination')]
+    public function testScopedLogicalDatabaseListRejectsInvalidPagination(string $response): void
+    {
+        $list = $this->client([new MockResponse($response)])->scopedDatabases('cluster-1');
+
+        self::assertSame(CloudDatabaseScopedListStatus::MALFORMED, $list->status);
+        self::assertSame(CloudDatabaseScopedPaginationStatus::INVALID, $list->paginationStatus);
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function invalidScopedDatabasePagination(): iterable
+    {
+        yield 'premature next null' => [self::scopedPage([], null, 1, 2)];
+        yield 'repeated next URL' => [self::scopedPage([], '/databases/clusters/cluster-1/databases', 1, 2)];
+        yield 'foreign next URL' => [self::scopedPage([], 'https://example.test/databases', 1, 2)];
+        yield 'malformed metadata' => [json_encode([
+            'data' => [], 'links' => ['next' => null], 'meta' => ['current_page' => '1', 'last_page' => 1],
+        ], JSON_THROW_ON_ERROR)];
+    }
+
+    public function testScopedLogicalDatabaseListPreservesPositiveRowsWhenLaterPageFails(): void
+    {
+        $first = new MockResponse(self::scopedPage([
+            self::databaseResource('database-1', 'application'),
+        ], 'https://cloud.laravel.com/api/databases/clusters/cluster-1/databases?page=2', 1, 2));
+        $calls = 0;
+        $http = new MockHttpClient(static function () use ($first, &$calls): MockResponse {
+            if ($calls++ === 0) {
+                return $first;
+            }
+            throw new TransportException('connection reset');
+        });
+
+        $list = (new SymfonyLaravelCloudClient($http, new CloudApiToken('secret-token')))->scopedDatabases('cluster-1');
+
+        self::assertSame(CloudDatabaseScopedListStatus::PARTIAL, $list->status);
+        self::assertSame(['database-1'], array_map(static fn ($database): string => $database->id, $list->databases));
+    }
+
+    public function testScopedLogicalDatabaseListPreservesPositiveRowsWhenLaterPageReturnsAnError(): void
+    {
+        $list = $this->client([
+            new MockResponse(self::scopedPage([
+                self::databaseResource('database-1', 'application'),
+            ], 'https://cloud.laravel.com/api/databases/clusters/cluster-1/databases?page=2', 1, 2)),
+            new MockResponse('{"message":"unavailable"}', ['http_code' => 503]),
+        ])->scopedDatabases('cluster-1');
+
+        self::assertSame(CloudDatabaseScopedListStatus::PARTIAL, $list->status);
+        self::assertSame(['database-1'], array_map(static fn ($database): string => $database->id, $list->databases));
+    }
+
+    public function testScopedLogicalDatabaseDuplicateIdsRemainRowIdentityEvidence(): void
+    {
+        $list = $this->client([new MockResponse(self::scopedPage([
+            self::databaseResource('duplicate', 'application'),
+            self::databaseResource('duplicate', 'reporting'),
+        ], null, 1, 1))])->scopedDatabases('cluster-1');
+
+        self::assertSame(CloudDatabaseScopedListStatus::COMPLETE, $list->status);
+        self::assertSame(CloudDatabaseScopedPaginationStatus::VALIDATED, $list->paginationStatus);
+        self::assertSame(['duplicate', 'duplicate'], array_map(static fn ($database): string => $database->id, $list->databases));
+    }
+
     public function testDuplicateLogicalDatabaseIdsAreRejected(): void
     {
         $this->expectException(CloudResponseException::class);
@@ -971,6 +1068,16 @@ final class SymfonyLaravelCloudDatabaseClientTest extends TestCase
     private static function page(array $resources, mixed $next = null): string
     {
         return json_encode(['data' => $resources, 'links' => ['next' => $next]], JSON_THROW_ON_ERROR);
+    }
+
+    /** @param list<array<string, mixed>> $resources */
+    private static function scopedPage(array $resources, mixed $next, int $currentPage, int $lastPage): string
+    {
+        return json_encode([
+            'data' => $resources,
+            'links' => ['next' => $next],
+            'meta' => ['current_page' => $currentPage, 'last_page' => $lastPage],
+        ], JSON_THROW_ON_ERROR);
     }
 
     /**

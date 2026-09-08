@@ -10,6 +10,12 @@ use LaravelCloudBlueprint\Observation\DatabaseParentEvidence;
 use LaravelCloudBlueprint\Observation\EvidenceStatus;
 use LaravelCloudBlueprint\Observation\LogicalDatabaseObservationEvidence;
 use LaravelCloudBlueprint\Observation\LogicalDatabaseObservationFactory;
+use LaravelCloudBlueprint\Observation\DatabaseClusterExactIdentityStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterRelationshipEvidence;
+use LaravelCloudBlueprint\Observation\DatabaseClusterRelationshipEvidenceStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidence;
+use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidenceStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceSynthesizer;
 use LaravelCloudBlueprint\Observation\ObservationKind;
 use LaravelCloudBlueprint\Observation\OwnershipStatus;
 use LaravelCloudBlueprint\Observation\ReconciliationStatus;
@@ -52,6 +58,29 @@ final class LogicalDatabaseObservationFactoryTest extends TestCase
     {
         self::assertObservation($this->create(self::managed()), ObservationKind::IDENTITY_MISSING, OwnershipStatus::MANAGED, ReconciliationStatus::UNSUPPORTED);
         self::assertObservation($this->create(self::managed(), self::remote(id: 'replacement')), ObservationKind::IDENTITY_REPLACEMENT, OwnershipStatus::MANAGED, ReconciliationStatus::UNSUPPORTED);
+    }
+
+    public function testScopedOnlyEmptyTopologyDoesNotTurnManagedAbsenceIntoDefinitiveDrift(): void
+    {
+        $evidence = new LogicalDatabaseObservationEvidence(
+            self::parent(),
+            [],
+            EvidenceStatus::COMPLETE,
+            topology: (new DatabaseClusterTopologyEvidenceSynthesizer())->synthesize(
+                'cluster-1',
+                DatabaseClusterExactIdentityStatus::VERIFIED,
+                new DatabaseClusterRelationshipEvidence(DatabaseClusterRelationshipEvidenceStatus::ABSENT),
+                new DatabaseClusterScopedListEvidence(DatabaseClusterScopedListEvidenceStatus::COMPLETE),
+            ),
+        );
+
+        self::assertObservation(
+            $this->factory->create('primary', self::desired(), self::managed(), $evidence),
+            ObservationKind::UNKNOWN,
+            OwnershipStatus::MANAGED,
+            ReconciliationStatus::BLOCKED,
+            EvidenceStatus::INCOMPLETE,
+        );
     }
 
     public function testWrongParentWinsOverSameNameReplacement(): void

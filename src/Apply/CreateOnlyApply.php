@@ -17,8 +17,12 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseAttachmentMutationC
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClusterDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudScopedDatabaseListReader;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedList;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedListStatus;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedPaginationStatus;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencyType;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseClusterLifecycleReadiness;
@@ -29,6 +33,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateLaravelMySqlConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateNeonPostgresConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
+use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentVariableInput;
@@ -51,6 +56,10 @@ use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\DatabaseDestructiveRole;
 use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
+use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidenceStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceAssembler;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyQualityPolicy;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologySynthesis;
 use LaravelCloudBlueprint\Resource\DerivedResource;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Contract\StateTransaction;
@@ -69,7 +78,18 @@ final readonly class CreateOnlyApply
         private DatabaseDeletionVerification $databaseDeletionVerification = new DatabaseDeletionVerification(),
         private DatabaseClusterDeletionVerification $databaseClusterDeletionVerification = new DatabaseClusterDeletionVerification(),
         private DatabaseClusterDeletionReadiness $databaseClusterDeletionReadiness = new DatabaseClusterDeletionReadiness(),
+        private DatabaseClusterTopologyEvidenceAssembler $databaseTopologyEvidence = new DatabaseClusterTopologyEvidenceAssembler(),
+        private DatabaseClusterTopologyQualityPolicy $databaseTopologyQuality = new DatabaseClusterTopologyQualityPolicy(),
     ) {
+    }
+
+    private function planner(): CreatePlan
+    {
+        return new CreatePlan(
+            $this->values,
+            databaseTopologyEvidence: $this->databaseTopologyEvidence,
+            databaseTopologyQuality: $this->databaseTopologyQuality,
+        );
     }
 
     public function execute(
@@ -119,7 +139,7 @@ final readonly class CreateOnlyApply
             $lockedAttachmentActions = [];
             if ($approvedAttachmentActions !== []) {
                 try {
-                    $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                    $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
                 } catch (CloudException $exception) {
                     $action = reset($approvedAttachmentActions);
                     return new ApplyResult(
@@ -144,7 +164,7 @@ final readonly class CreateOnlyApply
                 }
                 $plannedDatabaseCreates = $this->databaseCreateActions($plan);
                 try {
-                    $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                    $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
                 } catch (CloudException $exception) {
                     $action = $this->firstDatabaseCreate($plan);
                     return new ApplyResult(
@@ -194,7 +214,7 @@ final readonly class CreateOnlyApply
             $this->verifyState($blueprint, $plan, $state);
             if ($this->hasDelete($plan, ResourceType::DATABASE_CLUSTER)) {
                 try {
-                    $lockedPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+                    $lockedPlan = $this->planner()->create($blueprint, $cloud, $state);
                 } catch (CloudException $exception) {
                     throw new ApplyRefusedException('Locked Database Cluster approval-graph revalidation failed; no mutation was sent.');
                 }
@@ -342,12 +362,16 @@ final readonly class CreateOnlyApply
 
                 try {
                     if ($action->resourceType === ResourceType::APPLICATION) {
-                        $created = $cloud->createApplication(new CreateApplicationRequest(
+                        $request = new CreateApplicationRequest(
                             $blueprint->application->name,
                             $blueprint->application->source->repository,
                             $blueprint->application->region,
                             $blueprint->application->source->provider,
-                        ));
+                        );
+                        $created = $cloud->createApplication($request);
+                        if (!$this->isCompatibleApplicationCreateResponse($created, $request)) {
+                            return $this->createResponseIdentityFailure($outcomes, $action);
+                        }
                         $applicationId = $created->id;
                         $resource = new StateResource($action->address, ResourceType::APPLICATION, $created->id);
                     } else {
@@ -357,10 +381,14 @@ final readonly class CreateOnlyApply
                         $desired = $blueprint->environments->get($action->address->name);
                         $implicit = $implicitEnvironments[$desired->name] ?? null;
                         if ($implicit === null) {
+                            $request = new CreateEnvironmentRequest($desired->name, $desired->branch);
                             $created = $cloud->createEnvironment(
                                 $applicationId,
-                                new CreateEnvironmentRequest($desired->name, $desired->branch),
+                                $request,
                             );
+                            if (!$this->isCompatibleEnvironmentCreateResponse($created, $request, $applicationId)) {
+                                return $this->createResponseIdentityFailure($outcomes, $action);
+                            }
                             $environmentId = $created->id;
                         } else {
                             $environmentId = $implicit->id;
@@ -377,10 +405,14 @@ final readonly class CreateOnlyApply
                     $outcomes[] = new ApplyResourceOutcome(
                         $action->address,
                         ApplyOutcomeOperation::FAILED,
-                        $exception->getMessage(),
+                        $exception instanceof CloudResponseException
+                            ? $this->createResponseIdentityFailureMessage()
+                            : $exception->getMessage(),
                         $exception instanceof CloudValidationException ? $exception : null,
                     );
-                    $status = $this->confirmedMutationCount($outcomes) === 0 && !$exception instanceof CloudTransportException
+                    $status = $this->confirmedMutationCount($outcomes) === 0
+                        && !$exception instanceof CloudTransportException
+                        && !$exception instanceof CloudResponseException
                         ? ApplyStatus::FAILED
                         : ApplyStatus::PARTIAL_FAILURE;
                     return new ApplyResult($status, ...$outcomes);
@@ -737,6 +769,45 @@ final readonly class CreateOnlyApply
             }
         }
         return false;
+    }
+
+    private function isCompatibleApplicationCreateResponse(
+        CloudApplication $response,
+        CreateApplicationRequest $request,
+    ): bool {
+        return trim($response->id) !== ''
+            && $response->name === $request->name
+            && $response->region === $request->region
+            && ($response->repository === null || $response->repository === $request->repository)
+            && ($response->sourceProvider === null || $response->sourceProvider === $request->sourceProvider);
+    }
+
+    private function isCompatibleEnvironmentCreateResponse(
+        CloudEnvironment $response,
+        CreateEnvironmentRequest $request,
+        string $applicationId,
+    ): bool {
+        return trim($response->id) !== ''
+            && $response->name === $request->name
+            && (!$response->hasResponseApplicationRelationship
+                || $response->responseApplicationId === $applicationId);
+    }
+
+    /** @param list<ApplyResourceOutcome> $outcomes */
+    private function createResponseIdentityFailure(array $outcomes, PlanAction $action): ApplyResult
+    {
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::FAILED,
+            $this->createResponseIdentityFailureMessage(),
+        );
+
+        return new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes);
+    }
+
+    private function createResponseIdentityFailureMessage(): string
+    {
+        return 'Creation may have succeeded remotely, but its returned identity was incompatible or unverifiable. LCB refused to record ownership; inspect Cloud and explicitly recover before retrying.';
     }
 
     private function firstDatabaseCreate(ExecutionPlan $plan): PlanAction
@@ -1573,7 +1644,7 @@ final readonly class CreateOnlyApply
         }
 
         try {
-            $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+            $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
         } catch (CloudException $exception) {
             return $failure(
                 DestructiveOutcome::UNCERTAIN,
@@ -1813,8 +1884,8 @@ final readonly class CreateOnlyApply
         } catch (CloudException $exception) {
             return $failure(DestructiveOutcome::UNCERTAIN, 'Locked exact Database Cluster rediscovery failed before mutation: ' . $exception->getMessage());
         }
-        if ($cluster->id !== $managed->remoteId || !$cluster->childDiscoveryComplete) {
-            return $failure(DestructiveOutcome::REFUSED, 'Database Cluster deletion refused: exact child relationship discovery is incomplete or conflicted.');
+        if ($cluster->id !== $managed->remoteId) {
+            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster deletion refused: exact Cluster identity conflicts with locked State.');
         }
 
         $children = $state->childrenOf($managed->address);
@@ -1823,18 +1894,32 @@ final readonly class CreateOnlyApply
         if ($ordinary !== [] || count($derived) > 1) {
             return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster still has owned child State entries after ordinary child execution.');
         }
+        $listed = [];
+        $scopedDatabases = null;
         try {
-            $listed = $cloud->databases($managed->remoteId);
-        } catch (CloudException $exception) {
-            return $failure(DestructiveOutcome::REFUSED, 'Database Cluster deletion refused: complete logical Database listing failed.');
+            $scopedDatabases = $this->scopedDatabases($cloud, $managed->remoteId);
+            $listed = $scopedDatabases->databases;
+        } catch (CloudException) {
+        }
+        $topology = $scopedDatabases === null
+            ? $this->databaseTopologyEvidence->assemble(
+                $managed->remoteId,
+                $cluster,
+                DatabaseClusterScopedListEvidenceStatus::FAILED,
+                $listed,
+            )
+            : $this->databaseTopologyEvidence->assembleScopedList($managed->remoteId, $cluster, $scopedDatabases);
+        if (!$this->databaseTopologyQuality->isDestructiveQuality($topology)) {
+            return $failure(
+                $topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING
+                    ? DestructiveOutcome::CONFLICT
+                    : DestructiveOutcome::REFUSED,
+                $topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING
+                    ? 'Database Cluster deletion refused: fresh topology evidence conflicts.'
+                    : 'Database Cluster deletion refused: fresh topology evidence is incomplete.',
+            );
         }
         $listedIds = array_map(static fn (CloudDatabase $database): string => $database->id, $listed);
-        if (count($listedIds) !== count(array_unique($listedIds))
-            || count($cluster->databaseIds) !== count(array_unique($cluster->databaseIds))
-            || array_values(array_diff($listedIds, $cluster->databaseIds)) !== []
-            || array_values(array_diff($cluster->databaseIds, $listedIds)) !== []) {
-            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster child relationship and complete listing disagree.');
-        }
 
         if ($derived !== []) {
             $child = $derived[0];
@@ -1920,7 +2005,7 @@ final readonly class CreateOnlyApply
 
         try {
             $cluster = $this->databaseClusterDeletionReadiness->wait($cloud, $cloud->databaseCluster($managed->remoteId));
-            $freshPlan = (new CreatePlan($this->values))->create($blueprint, $cloud, $state);
+            $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
         } catch (CloudException $exception) {
             return $postChildFailure(DestructiveOutcome::REFUSED, 'Post-child Database Cluster readiness could not be proven: ' . $exception->getMessage());
         }
@@ -1977,6 +2062,21 @@ final readonly class CreateOnlyApply
         }
         $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::DELETED, $message, destructiveOutcome: $kind, deleted: $deleteSent, confirmed: true, stateCheckpointed: true);
         return ['state' => $state, 'outcomes' => $outcomes, 'failure' => null];
+    }
+
+    private function scopedDatabases(
+        LaravelCloudDatabaseClusterDeletionClient $cloud,
+        string $clusterId,
+    ): CloudDatabaseScopedList {
+        if ($cloud instanceof LaravelCloudScopedDatabaseListReader) {
+            return $cloud->scopedDatabases($clusterId);
+        }
+
+        return new CloudDatabaseScopedList(
+            $cloud->databases($clusterId),
+            CloudDatabaseScopedListStatus::COMPLETE,
+            CloudDatabaseScopedPaginationStatus::VALIDATED,
+        );
     }
 
     /**

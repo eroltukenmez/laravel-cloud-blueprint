@@ -88,7 +88,7 @@ v0.1 supports:
 
 Environment, logical Database, and Database Cluster are the only Cloud resources whose DELETE may execute in v0.1. Each requires explicit approval, exact State identity, locked live rediscovery, complete SAFE dependency readiness, and confirmed remote absence before State removal. Logical Database deletion additionally requires its exact State-owned Cluster parent and complete empty reverse Environment attachments. Database Cluster deletion is guarded child-first and additionally requires its exact State-owned Cluster identity, authoritative derived-child provenance where applicable, complete relationship evidence, and safe snapshot, recovery, and lifecycle readiness. Other DELETE resource types remain non-executable.
 
-Database Cluster destructive readiness includes read-only exact-ID child, snapshot, retained recovery configuration, and lifecycle discovery. Any snapshot blocks readiness; incomplete evidence remains unknown. Database Cluster DELETE remains guarded by these checks, while snapshot DELETE remains unsupported and snapshots are never automatically deleted.
+Database Cluster destructive readiness includes read-only exact-ID child, snapshot, retained recovery configuration, lifecycle discovery, and `CORROBORATED_COMPLETE` topology evidence. Corroboration requires exact Cluster identity, complete exact relationship evidence, a complete scoped logical-Database list with validated pagination, exact child-ID agreement, and no duplicate, parent, or identity conflict. Scoped-only topology is read-only observation only: it can never prove absence, ownership, derived provenance, or DELETE readiness. Any snapshot blocks readiness; incomplete, conflicting, or unverified evidence remains unknown. Database Cluster DELETE remains guarded by these checks, while snapshot DELETE remains unsupported and snapshots are never automatically deleted.
 
 Environment destructive dependency discovery is live and read-only. It must remain conservative when relationship data is missing, malformed, or unknown, and it must not imply ownership. No force or recursive destroy behavior is permitted.
 
@@ -133,7 +133,7 @@ Both commands must pass.
 
 ## Scope
 
-v0.1.0-alpha.7 supports only:
+v0.1.0-alpha.13 supports only:
 
 - Application
 - Environment
@@ -141,7 +141,7 @@ v0.1.0-alpha.7 supports only:
 - Database Cluster
 - logical Database
 
-Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, and guarded DELETE for Environment, logical Database, and Database Cluster only. Application repository and region changes, Database updates and replacements, and Environment Database attachment/detach are UNSUPPORTED.
+Supported mutations are CREATE for all five resource types, UPDATE for environment branches and environment-variable values, guarded Environment Database attachment reconciliation (attach, switch, and explicit detach), and guarded DELETE for Environment, logical Database, and Database Cluster only. Application repository and region changes and Database updates and replacements are UNSUPPORTED.
 
 Explicit import supports Application, Environment, Database Cluster, and logical Database identity adoption into local state only. Environment variables and Database attachments are not importable.
 
@@ -151,8 +151,10 @@ Commands:
 - lcb validate
 - lcb cloud:inspect
 - lcb plan
+- lcb drift
 - lcb apply
 - lcb import
+- lcb state:inspect
 - lcb state:unmanage
 
 `lcb state:unmanage` mutates local ownership state only. It must never delete, detach, or otherwise mutate a Laravel Cloud resource.
@@ -160,7 +162,6 @@ Commands:
 Do not add:
 
 - destroy
-- drift detection
 - remote state
 - provider plugins
 - cache

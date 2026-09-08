@@ -8,10 +8,10 @@
 
 <p align="center"><code>YAML → PLAN → APPLY</code></p>
 
-Laravel Cloud Blueprint is an unofficial community CLI for describing a supported subset of Laravel Cloud resources in version-controlled YAML blueprints. It produces a read-only plan before mutation, then reconciles supported application, environment, and environment-variable changes when you apply it.
+Laravel Cloud Blueprint is an unofficial community CLI for describing a supported subset of Laravel Cloud resources in version-controlled YAML blueprints. It produces a read-only plan before mutation, then reconciles supported application, environment, environment-variable, Database, and attachment changes when you apply it.
 
 > [!WARNING]
-> Version `0.1.0-alpha.12` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
+> Version `0.1.0-alpha.13` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
 
 ## See the Plan Before You Apply
 
@@ -28,7 +28,7 @@ Laravel Cloud Blueprint Plan
 Plan: 0 to create, 2 to update, 0 unchanged, 0 unsupported.
 ```
 
-Planning is read-only. Applying a supported plan brings the currently supported subset of Laravel Cloud resources toward the desired blueprint. Remote deletion is limited to explicitly approved, eligible State-owned Environments omitted from the Blueprint.
+Planning is read-only. Applying a supported plan brings the currently supported subset of Laravel Cloud resources toward the desired blueprint. Remote deletion is limited to explicitly approved, eligible State-owned Environments, logical Databases, and Database Clusters omitted from the Blueprint.
 
 ## Installation
 
@@ -42,31 +42,36 @@ lcb --version
 Expected output:
 
 ```text
-Laravel Cloud Blueprint 0.1.0-alpha.12
+Laravel Cloud Blueprint 0.1.0-alpha.13
 ```
 
 Composer's global bin directory must be available in `PATH` for the `lcb` command to be found.
 
 ## Status
 
-Current version: `0.1.0-alpha.12`.
+Current version: `0.1.0-alpha.13`.
 
 The current build can discover and compare applications, environments, environment variables, Database Clusters, logical Databases, and Environment attachments. It can create missing resources in that supported set, update an environment's branch, an existing variable's value, or a managed attachment, and safely delete eligible State-owned Environments, logical Databases, or Database Clusters removed from the Blueprint. Database deletion requires exact State identity and complete dependency evidence. Application repository and region changes, renames, automatic adoption, remote state, and Database update/replacement remain unsupported.
 
-| Database capability | Status |
+| Resource or capability | Supported lifecycle |
 | --- | --- |
-| Blueprint definitions | Supported |
-| Cloud discovery and planning | Supported |
-| Import and state ownership | Supported |
-| Database Cluster CREATE | Supported |
-| Logical Database CREATE | Supported |
-| Environment attachment | Guarded reconciliation |
-| Database UPDATE or replacement | Unsupported |
-| Logical Database DELETE | Guarded; State-owned, omitted, unattached, fully discovered, explicitly approved, and exactly verified only |
-| Guarded Database Cluster DELETE | Supported with explicit approval and complete safe child, snapshot, recovery, and lifecycle evidence |
+| Application | CREATE and explicit import; repository/region updates and DELETE are unsupported |
+| Environment | CREATE, branch UPDATE, explicit import, and guarded State-owned DELETE |
+| Environment variable | CREATE and value UPDATE; no import or DELETE |
+| Database Cluster | CREATE, explicit import, and guarded State-owned DELETE; UPDATE/replacement unsupported |
+| Logical Database | CREATE, explicit import, and guarded State-owned DELETE |
+| Environment Database attachment | Guarded attach, switch, and explicit detach reconciliation; no import |
 | General destroy | Unsupported |
 
 Database Cluster DELETE planning performs read-only discovery of exact-ID logical Database children, all paginated snapshot rows, retained recovery configuration, and current lifecycle status. A Cluster-create-derived default Database with exact State provenance and matching live parent identity is disclosed as a parent-lifecycle dependency; it is deleted only inside an approved guarded parent lifecycle. Ordinary children remain explicit child-first DELETE actions. Legacy/imported defaults and released derived identities remain unmanaged blockers. Any snapshot or retained recovery configuration blocks deletion; incomplete discovery and unknown lifecycle evidence remain `UNKNOWN`, and snapshots are never deleted automatically.
+
+### Database Cluster topology evidence
+
+LCB combines the exact Database Cluster relationship and a scoped logical-Database list when evaluating Cluster topology. A complete agreement between those sources is **corroborated** evidence. Only corroborated, validated, exact-parent topology can contribute to guarded Database Cluster DELETE; it is still only one of the required safety checks.
+
+Read-only commands may report a scoped-only child when the scoped list is complete, its pagination is validated, and every returned row explicitly proves the requested Cluster parent. This is qualified observation, not ownership, derived provenance, adoption, absence proof, lifecycle permission, or delete authorization.
+
+Partial reads retain useful positive child observations, but never prove a full child set or absence. Missing, malformed, conflicting, or unverified evidence fails closed for destructive reconciliation. In particular, a list that exhausts links without enough pagination validation is not treated as destructive proof. LCB never reconstructs `DERIVED` or `CLUSTER_CREATE_RESPONSE` provenance from current topology.
 
 ### Database attachments
 
@@ -249,13 +254,13 @@ For automation, a minimal GitHub Actions step is:
 
 The explicit `validate` step is useful as a separate pipeline stage, although `lcb drift` also loads and validates the Blueprint internally. For machine-readable consumers, `lcb drift --json` and `lcb drift --json --check` produce the same JSON document for the same report; check status is communicated only through the process exit code.
 
-> A configuration difference means the current Blueprint and Cloud representation differ. Alpha.11 does not claim whether the Cloud resource drifted remotely or the Blueprint itself changed.
+> A configuration difference means the current Blueprint and Cloud representation differ. It does not claim whether the Cloud resource drifted remotely or the Blueprint itself changed.
 
 Incomplete evidence remains `unknown`. Variable output never exposes current or desired values, and Drift output contains no remote IDs, secrets, or mutation instructions.
 
 ### `apply`
 
-Applies supported creates, updates, and guarded Environment deletions after producing a fresh plan. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
+Applies supported creates, updates, and guarded Environment, logical Database, and Database Cluster deletions after producing a fresh plan. Supports `--file=<path>`, `--auto-approve`, `--non-interactive`, and `--json`.
 
 ### `import`
 
@@ -273,12 +278,12 @@ Run `lcb <command> --help` for exact usage.
 
 ### Exit codes
 
-- `0`: report completed successfully, or the strict drift check passed.
+- `0`: command or report completed successfully, including a passing strict check.
 - `1`: operational, Cloud, State, token, file, or output failure.
 - `2`: Blueprint decode or validation failure.
-- `3`: the drift check completed, but the conformance policy failed.
+- `3`: a strict check completed, but its policy failed.
 
-Exit code `3` does not mean LCB failed to execute. It means LCB completed the check successfully and found nonconforming observations. Existing `lcb drift` behavior is unchanged and `--check` is opt-in, so scripts using `lcb drift` continue to receive the report-completed exit behavior.
+Exit code `3` does not mean LCB failed to execute. It means `lcb drift --check` or `lcb state:inspect --check` completed successfully and found observations that fail its strict policy. Normal observational reports continue to exit `0` when they complete.
 
 ## Plan Semantics
 
@@ -316,7 +321,7 @@ Guarded Database Cluster deletion was validated against a disposable real Larave
 
 Environment Database attachment updates are guarded and require exact State ownership and authoritative read-after-write confirmation. They do not write State or reconstruct platform-injected variables.
 
-Database Cluster and logical Database creation were verified in a controlled real Laravel Cloud E2E using `neon_serverless_postgres_18` with a Dev-sized configuration. Both identities were checkpointed, the post-create plan reconciled to `NO_CHANGE`, and repeat apply returned `No changes` without rewriting state. No credential material appeared in visible output or state. Environment attachment was neither tested nor enabled, and the CLI output did not expose the internal readiness status sequence or raw create HTTP status.
+Database Cluster and logical Database creation were verified in a controlled real Laravel Cloud E2E using `neon_serverless_postgres_18` with a Dev-sized configuration. Both identities were checkpointed, the post-create plan reconciled to `NO_CHANGE`, and repeat apply returned `No changes` without rewriting state. No credential material appeared in visible output or state.
 
 Successful application and environment creations are checkpointed as work progresses. Environment branch updates retain their remote identity and do not cause a state save or serial increment solely because of the update. Variables remain outside state, so variable updates likewise do not save or increment state. A pure supported UPDATE apply leaves `.lcb/state.json` unchanged; a mixed CREATE + UPDATE apply can change it when a successful CREATE identity is checkpointed. A later failure is reported as partial, with completed checkpoints retained, and confirmed remote mutations are not rolled back.
 
@@ -351,7 +356,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 ## Known Limitations
 
 - This is early alpha software with a limited mutation model.
-- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references. Discovery, planning, explicit import, Database Cluster CREATE, logical Database CREATE, and guarded logical Database/Cluster DELETE are supported. Existing resources require import before owned mutation. Database configuration UPDATE, Environment Database attachment/detach, and general destroy remain unsupported.
+- Blueprint schema v1 accepts typed `database_clusters` declarations and Environment `database` references. Discovery, planning, explicit import, Database Cluster CREATE, logical Database CREATE, guarded attachment reconciliation, and guarded logical Database/Cluster DELETE are supported. Existing resources require import before owned mutation. Database configuration UPDATE and general destroy remain unsupported.
 - Environment branch and variable value updates are supported; other updates and renames are not. A variable-key change is not an in-place rename and cannot remove the old remote key.
 - Application repository changes are explicitly unsupported because changing a repository can affect existing environment branch relationships in Laravel Cloud, requiring a broader lifecycle/rebinding workflow than this release implements. No repository mutation request is sent.
 - Application region changes are unsupported.
@@ -359,7 +364,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 - Managed resources removed from the blueprint produce DELETE plans. Eligible Environment, logical Database, and Database Cluster actions may execute; other resource types remain in State unless ownership is explicitly released with `lcb state:unmanage`. Rename/state-move semantics are not supported.
 - Removed environment-variable keys are not reported because variables do not yet have state ownership; remote variables remain untouched.
 - DELETE execution for Application resources, automatic Database detach, destroy commands, force bypasses, drift repair, and remote state are not supported. Database Cluster deletion is limited to the guarded State-owned lifecycle described above.
-- Database configuration mutation, attachment lifecycle beyond guarded reconciliation, caches, storage, domains, and Secrets Manager are not supported.
+- Database configuration mutation, caches, storage, domains, and Secrets Manager are not supported.
 - `init --from-cloud` does not export environment variables or secrets.
 - Source-provider metadata may be absent from API responses and require `--provider`.
 - Environment-variable mutation uses Laravel Cloud's `method=set` request mode for both creates and updates.
@@ -369,11 +374,11 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting guidance.
 
 ## Roadmap
 
-- Database attachment and configuration updates; attachment work must define safe handling for automatically injected resource variables before enabling PATCH
+- Database configuration updates and replacements
 - Cache resources
 - Richer planning and update semantics
 - Broader import workflows and conflict repair
-- Destroy and drift detection
+- Broader safe lifecycle operations
 - Distribution improvements
 
 No release dates are promised for roadmap items.

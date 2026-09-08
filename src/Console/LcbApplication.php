@@ -25,6 +25,7 @@ use LaravelCloudBlueprint\Infrastructure\File\NativeFileSystem;
 use LaravelCloudBlueprint\Infrastructure\Environment\LcbTokenProvider;
 use LaravelCloudBlueprint\Infrastructure\Environment\NativeEnvironmentValueProvider;
 use LaravelCloudBlueprint\Infrastructure\Http\SymfonyLaravelCloudClientFactory;
+use LaravelCloudBlueprint\Infrastructure\Http\SymfonyStateInspectionCloudReaderFactory;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyBlueprintYamlEncoder;
 use LaravelCloudBlueprint\Planning\CreatePlan;
@@ -39,7 +40,7 @@ use Symfony\Component\Console\Application;
 final class LcbApplication extends Application
 {
     public const string NAME = 'Laravel Cloud Blueprint';
-    public const string VERSION = '0.1.0-alpha.12';
+    public const string VERSION = '0.1.0-alpha.13';
 
     public function __construct()
     {
@@ -102,6 +103,6 @@ final class LcbApplication extends Application
             $states,
         ));
         $this->add(new StateUnmanageCommand(new ReleaseStateOwnership(), $states));
-        $this->add(new StateInspectCommand($states, new LcbTokenProvider(), new SymfonyLaravelCloudClientFactory(), $files, $loader));
+        $this->add(new StateInspectCommand($states, new LcbTokenProvider(), new SymfonyStateInspectionCloudReaderFactory(), $files, $loader));
     }
 }

@@ -139,7 +139,7 @@ JSON);
         self::assertIsArray($headers['user-agent']);
         self::assertContains('Authorization: Bearer secret-token', $headers['authorization']);
         self::assertContains('Accept: application/json', $headers['accept']);
-        self::assertContains('User-Agent: Laravel-Cloud-Blueprint/0.1.0-alpha.12', $headers['user-agent']);
+        self::assertContains('User-Agent: Laravel-Cloud-Blueprint/0.1.0-alpha.13', $headers['user-agent']);
     }
 
     public function testApplicationsMapNullableFieldsAndFollowPagination(): void
@@ -496,6 +496,22 @@ JSON);
         self::assertSame('app-created', $environment->applicationId);
         self::assertSame('main', $environment->branch);
         self::assertSame('{"branch":"main","name":"production"}', $response->getRequestOptions()['body']);
+    }
+
+    public function testEnvironmentCreatePreservesAuthoritativeReturnedApplicationRelationship(): void
+    {
+        $response = new MockResponse(
+            '{"data":{"id":"env-created","type":"environments","attributes":{"name":"production"},"relationships":{"application":{"data":{"type":"applications","id":"app-created"}}}}}',
+            ['http_code' => 201],
+        );
+
+        $environment = $this->client([$response])->createEnvironment(
+            'app-created',
+            new CreateEnvironmentRequest('production', 'main'),
+        );
+
+        self::assertTrue($environment->hasResponseApplicationRelationship);
+        self::assertSame('app-created', $environment->responseApplicationId);
     }
 
     public function testEnvironmentUpdateAcceptsRealRelationshipBranchResponseAndSendsBranchOnlyPatch(): void

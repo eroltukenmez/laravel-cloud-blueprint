@@ -240,6 +240,31 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame([], $derivedCloud->destructiveDatabaseCalls);
     }
 
+    public function testReportingTreatsScopedOnlyEmptyTopologyAsIncompleteRatherThanDefinitiveAbsence(): void
+    {
+        $cluster = new CloudDatabaseCluster(
+            'cluster-1',
+            'primary',
+            'laravel_mysql_8',
+            'available',
+            'eu-central-1',
+            new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+            [],
+            false,
+            ['databases'],
+        );
+        $cloud = self::matchingCloud($cluster, []);
+
+        $observation = self::observation(
+            self::observations(self::blueprint(), $cloud, self::databaseState()),
+            'database.primary.application',
+        );
+
+        self::assertSame(ObservationKind::UNKNOWN, $observation->observation);
+        self::assertSame(EvidenceStatus::INCOMPLETE, $observation->evidence);
+        self::assertSame([], $cloud->destructiveDatabaseCalls);
+    }
+
     public function testReleasedLogicalDatabaseUsesUnmanagedPlanningSemantics(): void
     {
         $released = self::databaseState()->withoutResource(
@@ -874,6 +899,94 @@ final class DatabasePlanningTest extends TestCase
         ), 'database_cluster.primary');
 
         self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $action->databaseDependencies?->readiness());
+    }
+
+    /**
+     * @return iterable<string, array{CloudDatabaseCluster, list<CloudDatabase>, DatabaseDestructiveReadiness, bool}>
+     */
+    public static function destructiveTopologyQualityCases(): iterable
+    {
+        $configuration = new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 0, false, false);
+
+        yield 'corroborated complete empty' => [
+            new CloudDatabaseCluster('cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1', $configuration, [], true),
+            [],
+            DatabaseDestructiveReadiness::SAFE,
+            true,
+        ];
+        yield 'scoped complete exact-parent child' => [
+            new CloudDatabaseCluster('cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1', $configuration, [], false, ['databases']),
+            [new CloudDatabase('database-1', 'cluster-1', 'application', 'cluster-1')],
+            DatabaseDestructiveReadiness::BLOCKED,
+            false,
+        ];
+        yield 'scoped complete empty' => [
+            new CloudDatabaseCluster('cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1', $configuration, [], false, ['databases']),
+            [],
+            DatabaseDestructiveReadiness::UNKNOWN,
+            false,
+        ];
+        yield 'partial positive child without parent proof' => [
+            new CloudDatabaseCluster('cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1', $configuration, [], false, ['databases']),
+            [new CloudDatabase('database-1', 'cluster-1', 'application')],
+            DatabaseDestructiveReadiness::BLOCKED,
+            false,
+        ];
+        yield 'incomplete malformed relationship' => [
+            new CloudDatabaseCluster('cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1', $configuration),
+            [],
+            DatabaseDestructiveReadiness::UNKNOWN,
+            false,
+        ];
+        yield 'conflicting complete sources' => [
+            new CloudDatabaseCluster('cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1', $configuration, ['relationship-child'], true),
+            [new CloudDatabase('scoped-child', 'cluster-1', 'application', 'cluster-1')],
+            DatabaseDestructiveReadiness::BLOCKED,
+            false,
+        ];
+        yield 'duplicate child identity' => [
+            new CloudDatabaseCluster('cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1', $configuration, ['database-1', 'database-1'], true),
+            [new CloudDatabase('database-1', 'cluster-1', 'application', 'cluster-1')],
+            DatabaseDestructiveReadiness::BLOCKED,
+            false,
+        ];
+        yield 'conflicting child parent' => [
+            new CloudDatabaseCluster('cluster-1', 'primary', 'laravel_mysql_8', 'available', 'eu-central-1', $configuration, ['database-1'], true),
+            [new CloudDatabase('database-1', 'cluster-1', 'application', 'other-cluster')],
+            DatabaseDestructiveReadiness::BLOCKED,
+            false,
+        ];
+    }
+
+    /** @param list<CloudDatabase> $databases */
+    #[DataProvider('destructiveTopologyQualityCases')]
+    public function testPlannerAllowsOnlyCorroboratedCompleteTopologyThroughDestructiveGate(
+        CloudDatabaseCluster $cluster,
+        array $databases,
+        DatabaseDestructiveReadiness $expectedReadiness,
+        bool $expectedComplete,
+    ): void {
+        $state = new StateDocument(
+            StateVersion::V1,
+            0,
+            null,
+            new StateResource(
+                new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'),
+                ResourceType::DATABASE_CLUSTER,
+                'cluster-1',
+            ),
+        );
+        $cloud = self::matchingCloud($cluster, $databases);
+
+        $action = self::action(
+            self::plan(self::blueprint(database: false), $cloud, $state),
+            'database_cluster.primary',
+        );
+
+        self::assertNotNull($action->databaseDependencies);
+        self::assertSame($expectedComplete, $action->databaseDependencies->complete);
+        self::assertSame($expectedReadiness, $action->databaseDependencies->readiness());
+        self::assertSame(1, $cloud->databaseCalls['cluster-1']);
     }
 
     public function testClusterReadinessBlocksMultipleOwnedAndMixedUnmanagedChildren(): void

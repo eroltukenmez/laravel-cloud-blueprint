@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-The current supported release is `0.1.0-alpha.7`. As early alpha software, fixes may require upgrading to the latest available alpha.
+The current supported release is `0.1.0-alpha.13`. As early alpha software, fixes may require upgrading to the latest available alpha.
 
 ## Reporting a Vulnerability
 

@@ -25,6 +25,7 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\PlanAction;
@@ -388,6 +389,77 @@ final class CreateOnlyApplyTest extends TestCase
         self::assertSame(['lock', 'create:application', 'save:application.my-api', 'release'], $events->values);
     }
 
+    public function testIncompatibleApplicationCreateResponseIsNotCheckpointedOrRetried(): void
+    {
+        $events = new ApplyEvents();
+        $states = new ApplyStateStore($events);
+        $cloud = new ApplyCloudClient(
+            $events,
+            applicationResponse: new CloudApplication('app-unexpected', 'other-api', null, 'eu-central-1', 'acme/my-api'),
+        );
+
+        $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(0, $states->state->serial);
+        self::assertSame([], $states->state->resources());
+        self::assertSame(['lock', 'create:application', 'release'], $events->values);
+        $message = iterator_to_array($result)[0]->message;
+        self::assertNotNull($message);
+        self::assertStringContainsString('may have succeeded remotely', $message);
+        self::assertStringContainsString('refused to record ownership', $message);
+        self::assertStringNotContainsString('app-unexpected', $message);
+    }
+
+    public function testIncompatibleApplicationRepositoryRegionOrProviderIsNotCheckpointed(): void
+    {
+        $cases = [
+            new CloudApplication('app-created', 'my-api', null, 'eu-central-1', 'other/api'),
+            new CloudApplication('app-created', 'my-api', null, 'us-east-1', 'acme/my-api'),
+            new CloudApplication('app-created', 'my-api', null, 'eu-central-1', 'acme/my-api', SourceProvider::GITLAB),
+            new CloudApplication('', 'my-api', null, 'eu-central-1', 'acme/my-api'),
+        ];
+
+        foreach ($cases as $response) {
+            $events = new ApplyEvents();
+            $states = new ApplyStateStore($events);
+
+            $result = self::apply()->execute(
+                self::blueprint(),
+                new ExecutionPlan(self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::CREATE)),
+                new ApplyCloudClient($events, applicationResponse: $response),
+                $states,
+            );
+
+            self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+            self::assertSame(0, $states->state->serial);
+            self::assertSame([], $states->state->resources());
+            self::assertSame(['lock', 'create:application', 'release'], $events->values);
+        }
+    }
+
+    public function testMalformedApplicationCreateResponseIsAnUncertainUncheckpointedFailure(): void
+    {
+        $events = new ApplyEvents();
+        $states = new ApplyStateStore($events);
+
+        $result = self::apply()->execute(
+            self::blueprint(),
+            self::createPlan(),
+            new ApplyCloudClient($events, malformedApplicationResponse: true),
+            $states,
+        );
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(0, $states->state->serial);
+        self::assertSame([], $states->state->resources());
+        self::assertSame(['lock', 'create:application', 'release'], $events->values);
+        $message = iterator_to_array($result)[0]->message;
+        self::assertNotNull($message);
+        self::assertStringContainsString('may have succeeded remotely', $message);
+        self::assertStringNotContainsString('unsafe raw application payload', $message);
+    }
+
     public function testApplicationRemainsCheckpointedWhenEnvironmentFails(): void
     {
         $events = new ApplyEvents();
@@ -399,6 +471,85 @@ final class CreateOnlyApplyTest extends TestCase
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertNotNull($states->state->find(self::address(ResourceType::APPLICATION, 'my-api')));
         self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
+    }
+
+    public function testIncompatibleEnvironmentCreateResponseIsNotCheckpointedOrRetriedAndStopsLaterWork(): void
+    {
+        $events = new ApplyEvents();
+        $states = new ApplyStateStore($events);
+        $cloud = new ApplyCloudClient(
+            $events,
+            environmentResponse: new CloudEnvironment('env-unexpected', 'app-created', 'other-environment', 'main'),
+        );
+
+        $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(1, $states->state->serial);
+        self::assertNotNull($states->state->find(self::address(ResourceType::APPLICATION, 'my-api')));
+        self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
+        self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'staging')));
+        self::assertSame([
+            'lock', 'create:application', 'save:application.my-api', 'create:environment.production', 'release',
+        ], $events->values);
+        $message = iterator_to_array($result)[1]->message;
+        self::assertNotNull($message);
+        self::assertStringContainsString('may have succeeded remotely', $message);
+    }
+
+    public function testConflictingEnvironmentResponseParentIsNotCheckpointed(): void
+    {
+        $events = new ApplyEvents();
+        $application = self::address(ResourceType::APPLICATION, 'my-api');
+        $states = new ApplyStateStore($events, StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-existing'))
+            ->withSerial(4));
+        $cloud = new ApplyCloudClient(
+            $events,
+            environmentResponse: new CloudEnvironment(
+                'env-production',
+                'app-existing',
+                'production',
+                'main',
+                responseApplicationId: 'app-other',
+                hasResponseApplicationRelationship: true,
+            ),
+        );
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::NO_CHANGE, 'app-existing'),
+            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
+        );
+
+        $result = self::apply()->execute(self::blueprint(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(4, $states->state->serial);
+        self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
+        self::assertSame(['lock', 'create:environment.production', 'release'], $events->values);
+    }
+
+    public function testUnverifiableEnvironmentResponseIdentityIsNotCheckpointed(): void
+    {
+        $events = new ApplyEvents();
+        $application = self::address(ResourceType::APPLICATION, 'my-api');
+        $states = new ApplyStateStore($events, StateDocument::empty()->withOrganization('acme')
+            ->withResource(new StateResource($application, ResourceType::APPLICATION, 'app-existing'))
+            ->withSerial(4));
+        $cloud = new ApplyCloudClient(
+            $events,
+            environmentResponse: new CloudEnvironment('', 'app-existing', 'production', 'main'),
+        );
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::APPLICATION, 'my-api', PlanOperation::NO_CHANGE, 'app-existing'),
+            self::action(ResourceType::ENVIRONMENT, 'production', PlanOperation::CREATE),
+        );
+
+        $result = self::apply()->execute(self::blueprint(), $plan, $cloud, $states);
+
+        self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(4, $states->state->serial);
+        self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
+        self::assertSame(['lock', 'create:environment.production', 'release'], $events->values);
     }
 
     public function testFirstEnvironmentRemainsCheckpointedWhenSecondFails(): void
@@ -486,6 +637,9 @@ final class ApplyCloudClient implements LaravelCloudClient
         private readonly ApplyEvents $events,
         private readonly bool $failApplication = false,
         private readonly ?int $failEnvironmentNumber = null,
+        private readonly ?CloudApplication $applicationResponse = null,
+        private readonly ?CloudEnvironment $environmentResponse = null,
+        private readonly bool $malformedApplicationResponse = false,
     ) {
     }
 
@@ -503,7 +657,11 @@ final class ApplyCloudClient implements LaravelCloudClient
         if ($this->failApplication) {
             throw new CloudApiException('Application creation failed.', 'POST', '/applications', 422);
         }
-        return new CloudApplication('app-created', $request->name, $request->name, $request->region, $request->repository);
+        if ($this->malformedApplicationResponse) {
+            throw new CloudResponseException('unsafe raw application payload', 'POST', '/applications');
+        }
+        return $this->applicationResponse
+            ?? new CloudApplication('app-created', $request->name, $request->name, $request->region, $request->repository);
     }
 
     public function createEnvironment(string $applicationId, CreateEnvironmentRequest $request): CloudEnvironment
@@ -514,7 +672,8 @@ final class ApplyCloudClient implements LaravelCloudClient
         if ($this->environmentAttempt === $this->failEnvironmentNumber) {
             throw new CloudApiException('Environment creation failed.', 'POST', '/environments', 422);
         }
-        return new CloudEnvironment('env-' . $request->name, $applicationId, $request->name, $request->branch);
+        return $this->environmentResponse
+            ?? new CloudEnvironment('env-' . $request->name, $applicationId, $request->name, $request->branch);
     }
 
     public function setEnvironmentVariables(string $environmentId, SetEnvironmentVariablesRequest $request): void

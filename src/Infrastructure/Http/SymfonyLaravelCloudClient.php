@@ -10,11 +10,15 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseAttachmentMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClusterDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudScopedDatabaseListReader;
 use LaravelCloudBlueprint\Cloud\Contract\StateInspectionCloudReader;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseLifecycleClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedList;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedListStatus;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedPaginationStatus;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseClusterConfiguration;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseSnapshot;
@@ -40,6 +44,7 @@ use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentDatabaseAttachmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudRateLimitException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
@@ -51,12 +56,12 @@ use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
-final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudDatabaseAttachmentMutationClient, LaravelCloudDatabaseLifecycleClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient, LaravelCloudDatabaseClusterDeletionClient, StateInspectionCloudReader
+final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMutationClient, LaravelCloudDatabaseAttachmentMutationClient, LaravelCloudDatabaseLifecycleClient, LaravelCloudEnvironmentMutationClient, LaravelCloudLogicalDatabaseDeletionClient, LaravelCloudDatabaseClusterDeletionClient, StateInspectionCloudReader, LaravelCloudScopedDatabaseListReader
 {
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string DATABASE_DESTRUCTIVE_INCLUDES = 'database,environments';
     private const string BASE_URL = 'https://cloud.laravel.com/api';
-    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.12';
+    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.13';
 
     public function __construct(
         private HttpClientInterface $http,
@@ -259,6 +264,116 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         return $databases;
     }
 
+    public function scopedDatabases(string $clusterId): CloudDatabaseScopedList
+    {
+        $databases = [];
+        $path = sprintf('/databases/clusters/%s/databases', rawurlencode($clusterId));
+        $visited = [];
+        $expectedPage = 1;
+        $metadataSeen = false;
+
+        while (true) {
+            if (isset($visited[$path]) || count($visited) >= 1000) {
+                return new CloudDatabaseScopedList(
+                    $databases,
+                    CloudDatabaseScopedListStatus::MALFORMED,
+                    CloudDatabaseScopedPaginationStatus::INVALID,
+                );
+            }
+            $visited[$path] = true;
+
+            try {
+                $document = $this->get($path);
+                foreach ($this->listAt($document, 'data', $path) as $value) {
+                    $database = $this->databaseFromResource($this->valueAsMapping($value, $path), $clusterId, $path);
+                    $databases[] = $database;
+                }
+                $links = $this->mappingAt($document, 'links', $path);
+                $next = $this->optionalString($links, 'next', $path);
+            } catch (CloudResponseException $exception) {
+                if ($exception->statusCode !== null) {
+                    return new CloudDatabaseScopedList(
+                        $databases,
+                        $databases === [] ? CloudDatabaseScopedListStatus::FAILED : CloudDatabaseScopedListStatus::PARTIAL,
+                        CloudDatabaseScopedPaginationStatus::UNVERIFIED,
+                    );
+                }
+
+                return new CloudDatabaseScopedList(
+                    $databases,
+                    CloudDatabaseScopedListStatus::MALFORMED,
+                    CloudDatabaseScopedPaginationStatus::INVALID,
+                );
+            } catch (CloudException) {
+                return new CloudDatabaseScopedList(
+                    $databases,
+                    $databases === [] ? CloudDatabaseScopedListStatus::FAILED : CloudDatabaseScopedListStatus::PARTIAL,
+                    CloudDatabaseScopedPaginationStatus::UNVERIFIED,
+                );
+            }
+
+            $meta = $document['meta'] ?? null;
+            if ($meta !== null) {
+                if ((!$metadataSeen && $expectedPage !== 1)
+                    || !is_array($meta)
+                    || !isset($meta['current_page'], $meta['last_page'])
+                    || !is_int($meta['current_page']) || !is_int($meta['last_page'])) {
+                    return new CloudDatabaseScopedList(
+                        $databases,
+                        CloudDatabaseScopedListStatus::MALFORMED,
+                        CloudDatabaseScopedPaginationStatus::INVALID,
+                    );
+                }
+                $metadataSeen = true;
+                $currentPage = $meta['current_page'];
+                $lastPage = $meta['last_page'];
+                if ($currentPage !== $expectedPage || $lastPage < $currentPage) {
+                    return new CloudDatabaseScopedList(
+                        $databases,
+                        CloudDatabaseScopedListStatus::MALFORMED,
+                        CloudDatabaseScopedPaginationStatus::INVALID,
+                    );
+                }
+                if (($currentPage === $lastPage && $next !== null) || ($currentPage < $lastPage && $next === null)) {
+                    return new CloudDatabaseScopedList(
+                        $databases,
+                        CloudDatabaseScopedListStatus::MALFORMED,
+                        CloudDatabaseScopedPaginationStatus::INVALID,
+                    );
+                }
+            } elseif ($metadataSeen) {
+                return new CloudDatabaseScopedList(
+                    $databases,
+                    CloudDatabaseScopedListStatus::MALFORMED,
+                    CloudDatabaseScopedPaginationStatus::INVALID,
+                );
+            }
+
+            if ($next === null) {
+                usort($databases, static fn (CloudDatabase $left, CloudDatabase $right): int => $left->id <=> $right->id);
+
+                return new CloudDatabaseScopedList(
+                    $databases,
+                    CloudDatabaseScopedListStatus::COMPLETE,
+                    $metadataSeen
+                        ? CloudDatabaseScopedPaginationStatus::VALIDATED
+                        : CloudDatabaseScopedPaginationStatus::UNVERIFIED,
+                );
+            }
+            if ((str_starts_with($next, 'https://') && !str_starts_with($next, self::BASE_URL . '/'))
+                || isset($visited[$next])) {
+                return new CloudDatabaseScopedList(
+                    $databases,
+                    CloudDatabaseScopedListStatus::MALFORMED,
+                    CloudDatabaseScopedPaginationStatus::INVALID,
+                );
+            }
+
+            $path = $next;
+            ++$expectedPage;
+        }
+    }
+
     public function database(string $clusterId, string $databaseId): CloudDatabase
     {
         return $this->databaseDetail($clusterId, $databaseId, false);
@@ -358,12 +473,28 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
         $document = $this->post($path, ['branch' => $request->branch, 'name' => $request->name]);
         $resource = $this->mappingAt($document, 'data', $path);
         $attributes = $this->mappingAt($resource, 'attributes', $path);
+        $relationships = $this->optionalMapping($resource, 'relationships', $path);
+        $hasResponseApplicationRelationship = $relationships !== null
+            && array_key_exists('application', $relationships);
+        $responseApplicationId = null;
+        if ($hasResponseApplicationRelationship) {
+            $complete = true;
+            $responseApplicationId = $this->dependencyId(
+                $relationships,
+                'application',
+                'applications',
+                $path,
+                $complete,
+            );
+        }
 
         return new CloudEnvironment(
             $this->requiredResourceId($resource, 'id', $path),
             $applicationId,
             $this->requiredString($attributes, 'name', $path),
             $request->branch,
+            responseApplicationId: $responseApplicationId,
+            hasResponseApplicationRelationship: $hasResponseApplicationRelationship,
         );
     }
 

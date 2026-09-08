@@ -13,9 +13,13 @@ use LaravelCloudBlueprint\Blueprint\VariableDefinition;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseLifecycleClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudScopedDatabaseListReader;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedList;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedListStatus;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedPaginationStatus;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentVariableCollection;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDestructiveReadiness;
@@ -32,6 +36,10 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Observation\ApplicationObservationEvidence;
 use LaravelCloudBlueprint\Observation\ApplicationObservationFactory;
 use LaravelCloudBlueprint\Observation\DatabaseClusterCandidate;
+use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidenceStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceAssembler;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyQualityPolicy;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologySynthesis;
 use LaravelCloudBlueprint\Observation\DatabaseClusterObservationEvidence;
 use LaravelCloudBlueprint\Observation\DatabaseClusterObservationFactory;
 use LaravelCloudBlueprint\Observation\DatabaseParentEvidence;
@@ -72,6 +80,8 @@ final readonly class CreatePlan
         private DerivedDatabaseObservationFactory $derivedDatabaseObservations = new DerivedDatabaseObservationFactory(),
         private ResourceObservationRecorder $observationRecorder = new ResourceObservationRecorder(),
         private DatabaseAttachmentObservationFactory $databaseAttachmentObservations = new DatabaseAttachmentObservationFactory(),
+        private DatabaseClusterTopologyEvidenceAssembler $databaseTopologyEvidence = new DatabaseClusterTopologyEvidenceAssembler(),
+        private DatabaseClusterTopologyQualityPolicy $databaseTopologyQuality = new DatabaseClusterTopologyQualityPolicy(),
     ) {
     }
 
@@ -1225,7 +1235,18 @@ final readonly class CreatePlan
                 continue;
             }
 
-            $remoteDatabases = $cloud->databases($remoteCluster->id);
+            $scopedDatabases = $this->scopedDatabases($cloud, $remoteCluster->id);
+            $remoteDatabases = $scopedDatabases->databases;
+            $topology = $this->databaseTopologyEvidence->assembleScopedList(
+                $remoteCluster->id,
+                $remoteCluster,
+                $scopedDatabases,
+            );
+            $reportingTopology = $remoteCluster->childDiscoveryComplete
+                || $remoteCluster->missingRelationships !== []
+                || $remoteCluster->unknownRelationships !== []
+                ? $topology
+                : null;
             $databaseParent = DatabaseParentEvidence::resolved(
                 $clusterAddress,
                 $remoteCluster->id,
@@ -1252,6 +1273,7 @@ final readonly class CreatePlan
                                 ? EvidenceStatus::COMPLETE
                                 : EvidenceStatus::INCOMPLETE,
                             blueprintAddressCollision: true,
+                            topology: $topology,
                         ),
                     ));
                     $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::DERIVED);
@@ -1282,6 +1304,7 @@ final readonly class CreatePlan
                     $databaseParent,
                     $remoteDatabases,
                     EvidenceStatus::COMPLETE,
+                    topology: $this->observationRecorder->isReporting() ? $reportingTopology : null,
                 );
                 if ($this->observationRecorder->isReporting() && $managedDatabase !== null) {
                     $exactListMatches = array_values(array_filter(
@@ -1302,12 +1325,14 @@ final readonly class CreatePlan
                                     $remoteDatabases,
                                 ),
                                 EvidenceStatus::COMPLETE,
+                                topology: $reportingTopology,
                             );
                         } catch (CloudException) {
                             $reportingEvidence = new LogicalDatabaseObservationEvidence(
                                 $databaseParent,
                                 $remoteDatabases,
                                 EvidenceStatus::INCOMPLETE,
+                                topology: $reportingTopology,
                             );
                         }
                     }
@@ -1560,6 +1585,7 @@ final readonly class CreatePlan
         $listCompleteness = EvidenceStatus::INCOMPLETE;
         $relationshipCompleteness = EvidenceStatus::INCOMPLETE;
         $relationshipConflict = false;
+        $topology = null;
         try {
             $remoteCluster = $cloud->databaseCluster($parent->remoteId);
             $relationshipMatches = array_values(array_filter(
@@ -1575,8 +1601,17 @@ final readonly class CreatePlan
                 $relationshipConflict = count($relationshipMatches) !== 1;
             }
             if ($relationshipCompleteness === EvidenceStatus::COMPLETE && !$relationshipConflict) {
-                $databases = $cloud->databases($parent->remoteId);
-                $listCompleteness = EvidenceStatus::COMPLETE;
+                $scopedDatabases = $this->scopedDatabases($cloud, $parent->remoteId);
+                $databases = $scopedDatabases->databases;
+                $listCompleteness = $scopedDatabases->status === CloudDatabaseScopedListStatus::COMPLETE
+                    && $scopedDatabases->paginationStatus === CloudDatabaseScopedPaginationStatus::VALIDATED
+                    ? EvidenceStatus::COMPLETE
+                    : EvidenceStatus::INCOMPLETE;
+                $topology = $this->databaseTopologyEvidence->assembleScopedList(
+                    $parent->remoteId,
+                    $remoteCluster,
+                    $scopedDatabases,
+                );
             }
         } catch (CloudException) {
             // Completeness remains explicit; Cloud failure is not proof of absence.
@@ -1591,6 +1626,7 @@ final readonly class CreatePlan
                 $listCompleteness,
                 $relationshipCompleteness,
                 relationshipConflict: $relationshipConflict,
+                topology: $topology,
             ),
         ));
         if ($observation->observation === ObservationKind::UNKNOWN) {
@@ -1719,49 +1755,58 @@ final readonly class CreatePlan
 
         $missing = $cluster->missingRelationships;
         $unknown = $cluster->unknownRelationships;
-        $remoteById = [];
-        $conflictedRemoteIds = [];
-        $databaseListComplete = true;
+        $databases = [];
+        $scopedDatabases = null;
         try {
-            foreach ($cloud->databases($resource->remoteId) as $database) {
-                $identityKey = 'id:' . $database->id;
-                if (isset($remoteById[$identityKey])) {
-                    $ownershipConflict = true;
-                    $conflictedRemoteIds[$identityKey] = true;
-                    continue;
-                }
-                $remoteById[$identityKey] = $database;
-            }
+            $scopedDatabases = $this->scopedDatabases($cloud, $resource->remoteId);
+            $databases = $scopedDatabases->databases;
         } catch (CloudException) {
             $missing[] = 'databases';
-            $databaseListComplete = false;
+        }
+
+        $topology = $scopedDatabases === null
+            ? $this->databaseTopologyEvidence->assemble(
+                $resource->remoteId,
+                $cluster,
+                DatabaseClusterScopedListEvidenceStatus::FAILED,
+                $databases,
+            )
+            : $this->databaseTopologyEvidence->assembleScopedList($resource->remoteId, $cluster, $scopedDatabases);
+        $destructiveTopology = $this->databaseTopologyQuality->isDestructiveQuality($topology);
+        if ($topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING) {
+            $ownershipConflict = true;
+        }
+
+        /** @var array<string, CloudDatabase> $remoteById */
+        $remoteById = [];
+        foreach ($databases as $database) {
+            $remoteById['id:' . $database->id] ??= $database;
         }
 
         $ownedCount = 0;
         $derivedParentDependencyCount = 0;
         $unmanagedCount = 0;
-        $relationshipIds = [];
-        foreach ($cluster->databaseIds as $databaseId) {
+        foreach ($topology->childIds() as $databaseId) {
             $identityKey = 'id:' . $databaseId;
-            if (isset($relationshipIds[$identityKey])) {
-                $ownershipConflict = true;
-                continue;
-            }
-            $relationshipIds[$identityKey] = true;
-            if (!$databaseListComplete) {
-                continue;
-            }
             $remote = $remoteById[$identityKey] ?? null;
             $child = $childrenById[$identityKey] ?? null;
 
+            // Positive topology can conservatively identify an unmanaged child even when the
+            // evidence is not complete enough to authorize destructive absence.
+            if ($child === null) {
+                if (isset($databaseOwners[$identityKey])) {
+                    $ownershipConflict = true;
+                } else {
+                    ++$unmanagedCount;
+                }
+                continue;
+            }
+            if (!$destructiveTopology || $remote === null) {
+                continue;
+            }
+
             $classification = match (true) {
-                isset($conflictedRemoteIds[$identityKey]) => DatabaseClusterChildClassification::CONFLICT,
-                $remote === null => DatabaseClusterChildClassification::CONFLICT,
                 $remote->clusterId !== $resource->remoteId => DatabaseClusterChildClassification::CONFLICT,
-                $remote->relationshipClusterId !== null
-                    && $remote->relationshipClusterId !== $resource->remoteId => DatabaseClusterChildClassification::CONFLICT,
-                $child === null && isset($databaseOwners[$identityKey]) => DatabaseClusterChildClassification::CONFLICT,
-                $child === null => DatabaseClusterChildClassification::UNMANAGED,
                 $child->classification === StateOwnershipClassification::DERIVED
                     && $child->provenance === StateProvenance::CLUSTER_CREATE_RESPONSE
                     && $child->parent !== null
@@ -1777,19 +1822,13 @@ final readonly class CreatePlan
             match ($classification) {
                 DatabaseClusterChildClassification::BLUEPRINT_OWNED => ++$ownedCount,
                 DatabaseClusterChildClassification::DERIVED_PARENT_DEPENDENCY => ++$derivedParentDependencyCount,
-                DatabaseClusterChildClassification::UNMANAGED => ++$unmanagedCount,
                 DatabaseClusterChildClassification::CONFLICT => $ownershipConflict = true,
             };
         }
-        if ($databaseListComplete) {
-            foreach ($remoteById as $identityKey => $_remote) {
-                if (!isset($relationshipIds[$identityKey])) {
-                    $ownershipConflict = true;
-                }
-            }
+        if ($destructiveTopology) {
             foreach ($childrenById as $identityKey => $child) {
                 if ($child->classification === StateOwnershipClassification::DERIVED
-                    && !isset($relationshipIds[$identityKey])) {
+                    && !in_array($child->remoteId, $topology->childIds(), true)) {
                     $ownershipConflict = true;
                 }
             }
@@ -1846,7 +1885,7 @@ final readonly class CreatePlan
             $ownedCount,
             $unmanagedCount,
             $ownershipConflict,
-            $cluster->childDiscoveryComplete && $databaseListComplete && !$ownershipConflict,
+            $destructiveTopology && !$ownershipConflict,
             $unknown,
             $missing,
             count($snapshots),
@@ -2185,6 +2224,19 @@ final readonly class CreatePlan
             $derived[0]->classification,
             $derived[0]->provenance,
             DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY,
+        );
+    }
+
+    private function scopedDatabases(LaravelCloudDatabaseClient $cloud, string $clusterId): CloudDatabaseScopedList
+    {
+        if ($cloud instanceof LaravelCloudScopedDatabaseListReader) {
+            return $cloud->scopedDatabases($clusterId);
+        }
+
+        return new CloudDatabaseScopedList(
+            $cloud->databases($clusterId),
+            CloudDatabaseScopedListStatus::COMPLETE,
+            CloudDatabaseScopedPaginationStatus::VALIDATED,
         );
     }
 
