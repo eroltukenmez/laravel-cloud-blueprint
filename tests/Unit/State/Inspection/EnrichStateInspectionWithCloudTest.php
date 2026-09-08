@@ -5,9 +5,13 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\Tests\Unit\State\Inspection;
 
 use LaravelCloudBlueprint\Cloud\Contract\StateInspectionCloudReader;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudScopedDatabaseListReader;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedList;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedListStatus;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedPaginationStatus;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironmentDetails;
 use LaravelCloudBlueprint\Cloud\DTO\CloudOrganization;
@@ -124,6 +128,25 @@ final class EnrichStateInspectionWithCloudTest extends TestCase
         self::assertSame([], $cloud->mutations);
     }
 
+    public function testScopedPaginationQualityIsRetainedByTheAuthoritativeInspectionEvidencePass(): void
+    {
+        $cluster = new StateResource(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'), ResourceType::DATABASE_CLUSTER, 'cluster-owned');
+        $state = StateDocument::empty()->withResource($cluster);
+        $cloud = new ScopedInspectionCloud(
+            new CloudDatabaseScopedList(
+                [new CloudDatabase('database-observed', 'cluster-owned', 'application', 'cluster-owned')],
+                CloudDatabaseScopedListStatus::COMPLETE,
+                CloudDatabaseScopedPaginationStatus::UNVERIFIED,
+            ),
+            new CloudDatabaseCluster('cluster-owned', 'primary', 'mysql', 'ready', 'region', new CloudUnknownDatabaseConfiguration(), [], false, ['databases']),
+        );
+
+        $evidence = (new CollectStateInspectionCloudEvidence())->collect($state, $cloud);
+
+        self::assertFalse($evidence->complete);
+        self::assertSame(DatabaseClusterTopologySynthesis::INCOMPLETE, $evidence->clusterTopology('cluster-owned')->synthesis);
+    }
+
     public function testSingleEvidencePassReusesListsAndExactDetails(): void
     {
         $application = new StateResource(new ResourceAddress(ResourceType::APPLICATION, 'api'), ResourceType::APPLICATION, 'app-owned');
@@ -166,7 +189,7 @@ final class EnrichStateInspectionWithCloudTest extends TestCase
     }
 }
 
-final class InspectionCloud implements StateInspectionCloudReader
+class InspectionCloud implements StateInspectionCloudReader
 {
     /** @var list<string> */ public array $mutations = [];
     /** @var list<string> */ public array $calls = [];
@@ -183,4 +206,19 @@ final class InspectionCloud implements StateInspectionCloudReader
     public function databases(string $clusterId): array { $this->calls[] = 'databases:' . $clusterId; return $this->databases; }
     public function database(string $clusterId, string $databaseId): CloudDatabase { $this->calls[] = 'database:' . $clusterId . ':' . $databaseId; if ($this->database === null) { throw new CloudResourceNotFoundException('missing', 'GET', '', 404); } return $this->database; }
     public function databaseWithDestructiveRelationships(string $clusterId, string $databaseId): CloudDatabase { return $this->database($clusterId, $databaseId); }
+}
+
+final class ScopedInspectionCloud extends InspectionCloud implements LaravelCloudScopedDatabaseListReader
+{
+    public function __construct(private readonly CloudDatabaseScopedList $scoped, CloudDatabaseCluster $cluster)
+    {
+        parent::__construct(cluster: $cluster, databases: $scoped->databases);
+    }
+
+    public function scopedDatabases(string $clusterId): CloudDatabaseScopedList
+    {
+        $this->calls[] = 'scopedDatabases:' . $clusterId;
+
+        return $this->scoped;
+    }
 }

@@ -4,6 +4,19 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.13] - 2026-09-08
+
+### Changed
+
+- Added shared typed Database Cluster topology evidence for planning, Drift, `state:inspect`, and locked destructive execution.
+- Read-only consumers can report qualified scoped-list observations; guarded Database Cluster DELETE remains corroborated-topology-only.
+- Hardened exact row-level parent proof and scoped logical-Database pagination evidence validation.
+
+### Safety
+
+- Incomplete, conflicting, and unverified topology evidence fails closed for destructive reconciliation.
+- This release adds no destructive capability and no State schema change.
+
 ## [0.1.0-alpha.12] - 2026-09-07
 
 ### Added

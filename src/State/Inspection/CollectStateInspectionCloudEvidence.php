@@ -153,7 +153,8 @@ final readonly class CollectStateInspectionCloudEvidence
 
         return new StateInspectionCloudEvidence($complete, $applications, $environments, $clusters, $databasesByCluster,
             $environmentsByApplication, $clustersById, $databasesById, $failedEnvironmentReads, $failedClusterReads,
-            $failedDatabaseListReads, $failedDatabaseReads, $applicationsReadFailed, $databaseClustersReadFailed);
+            $failedDatabaseListReads, $failedDatabaseReads, $applicationsReadFailed, $databaseClustersReadFailed,
+            $scopedDatabaseListsByCluster);
     }
 
     /** @return list<string> */
