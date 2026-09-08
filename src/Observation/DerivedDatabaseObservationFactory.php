@@ -31,6 +31,9 @@ final readonly class DerivedDatabaseObservationFactory
         if ($evidence->blueprintAddressCollision) {
             return $this->result($derived, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::DERIVED, ReconciliationStatus::UNSUPPORTED);
         }
+        if ($evidence->topology?->synthesis === DatabaseClusterTopologySynthesis::INCOMPLETE) {
+            return $this->unknown($derived);
+        }
 
         $exact = array_values(array_filter(
             $evidence->databases(),
@@ -57,6 +60,13 @@ final readonly class DerivedDatabaseObservationFactory
             static fn (string $id): bool => $id === $derived->remoteId,
         ));
         if ($exact === []) {
+            if (in_array($evidence->topology?->synthesis, [
+                DatabaseClusterTopologySynthesis::SCOPED_COMPLETE,
+                DatabaseClusterTopologySynthesis::PARTIAL_POSITIVE,
+                DatabaseClusterTopologySynthesis::INCOMPLETE,
+            ], true)) {
+                return $this->unknown($derived);
+            }
             return $this->result(
                 $derived,
                 $evidence->replacementCandidates() === []
@@ -66,7 +76,9 @@ final readonly class DerivedDatabaseObservationFactory
                 ReconciliationStatus::UNSUPPORTED,
             );
         }
-        if (count($relationshipMatches) !== 1) {
+        if (count($relationshipMatches) !== 1
+            && $evidence->topology?->synthesis !== DatabaseClusterTopologySynthesis::SCOPED_COMPLETE
+            && $evidence->topology?->synthesis !== DatabaseClusterTopologySynthesis::PARTIAL_POSITIVE) {
             return $this->result($derived, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::DERIVED, ReconciliationStatus::UNSUPPORTED);
         }
 

@@ -20,6 +20,7 @@ use LaravelCloudBlueprint\Cloud\DTO\UpdatedCloudEnvironment;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologySynthesis;
 use LaravelCloudBlueprint\State\Inspection\EnrichStateInspectionWithCloud;
 use LaravelCloudBlueprint\State\Inspection\CollectStateInspectionCloudEvidence;
 use LaravelCloudBlueprint\State\Inspection\InspectLocalState;
@@ -101,6 +102,26 @@ final class EnrichStateInspectionWithCloudTest extends TestCase
         self::assertContains(StateDiagnosticCode::EVIDENCE_INCOMPLETE, $this->codes($incomplete));
         self::assertContains(StateDiagnosticCode::EVIDENCE_INCOMPLETE, $this->codes($failure));
         self::assertNotContains(StateDiagnosticCode::REMOTE_IDENTITY_MISSING, $this->codes($failure));
+    }
+
+    public function testScopedOnlyTopologyCanReportObservedUnmanagedChildrenWithoutClaimingDestructiveSafety(): void
+    {
+        $cluster = new StateResource(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary'), ResourceType::DATABASE_CLUSTER, 'cluster-owned');
+        $state = StateDocument::empty()->withResource($cluster);
+        $cloud = new InspectionCloud(
+            cluster: new CloudDatabaseCluster('cluster-owned', 'primary', 'mysql', 'ready', 'region', new CloudUnknownDatabaseConfiguration(), [], false, ['databases']),
+            databases: [new CloudDatabase('database-unmanaged', 'cluster-owned', 'application', 'cluster-owned')],
+        );
+
+        $evidence = (new CollectStateInspectionCloudEvidence())->collect($state, $cloud);
+        $local = (new InspectLocalState())->inspect(new LoadedState($state, StateVersion::V2));
+        $report = (new EnrichStateInspectionWithCloud())->enrich($local, $state, $evidence);
+
+        self::assertTrue($evidence->complete);
+        self::assertSame(DatabaseClusterTopologySynthesis::SCOPED_COMPLETE, $evidence->clusterTopology('cluster-owned')->synthesis);
+        self::assertContains(StateDiagnosticCode::UNMANAGED_REMOTE_CHILD, $this->codes($report));
+        self::assertStringNotContainsString('database-unmanaged', json_encode($report->diagnostics(), JSON_THROW_ON_ERROR));
+        self::assertSame([], $cloud->mutations);
     }
 
     public function testSingleEvidencePassReusesListsAndExactDetails(): void

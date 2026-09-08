@@ -13,6 +13,7 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\StateDocument;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologySynthesis;
 
 /** Collects the single authoritative, read-only Cloud evidence pass for state:inspect. */
 final readonly class CollectStateInspectionCloudEvidence
@@ -75,12 +76,6 @@ final readonly class CollectStateInspectionCloudEvidence
             if ($resource->type === ResourceType::DATABASE_CLUSTER) {
                 try {
                     $exact = $cloud->databaseCluster($resource->remoteId);
-                    if ($exact->id !== $resource->remoteId) {
-                        $complete = false;
-                    }
-                    if (!$exact->childDiscoveryComplete || $exact->missingRelationships !== [] || $exact->unknownRelationships !== []) {
-                        $complete = false;
-                    }
                     $clustersById[$resource->remoteId] = $exact;
                 } catch (CloudResourceNotFoundException) {
                     $clustersById[$resource->remoteId] = null;
@@ -121,6 +116,22 @@ final readonly class CollectStateInspectionCloudEvidence
         }
         foreach ($databasesByCluster as $databases) {
             if (!$this->uniqueIds($databases)) {
+                $complete = false;
+            }
+        }
+
+        $evidence = new StateInspectionCloudEvidence($complete, $applications, $environments, $clusters, $databasesByCluster,
+            $environmentsByApplication, $clustersById, $databasesById, $failedEnvironmentReads, $failedClusterReads,
+            $failedDatabaseListReads, $failedDatabaseReads, $applicationsReadFailed, $databaseClustersReadFailed);
+
+        foreach ($state->resources() as $resource) {
+            if ($resource->type !== ResourceType::DATABASE_CLUSTER || $evidence->cluster($resource->remoteId) === null) {
+                continue;
+            }
+            if (!in_array($evidence->clusterTopology($resource->remoteId)->synthesis, [
+                DatabaseClusterTopologySynthesis::CORROBORATED_COMPLETE,
+                DatabaseClusterTopologySynthesis::SCOPED_COMPLETE,
+            ], true)) {
                 $complete = false;
             }
         }

@@ -8,6 +8,9 @@ use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
+use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidenceStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidence;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceAssembler;
 
 final readonly class StateInspectionCloudEvidence
 {
@@ -52,4 +55,19 @@ final readonly class StateInspectionCloudEvidence
     public function databasesReadFailed(string $clusterId): bool { return isset($this->failedDatabaseListReads[$clusterId]); }
     public function database(string $clusterId, string $databaseId): ?CloudDatabase { return $this->databasesById[$clusterId][$databaseId] ?? null; }
     public function databaseReadFailed(string $clusterId, string $databaseId): bool { return isset($this->failedDatabaseReads[$clusterId . ':' . $databaseId]); }
+
+    public function clusterTopology(string $clusterId): DatabaseClusterTopologyEvidence
+    {
+        return (new DatabaseClusterTopologyEvidenceAssembler())->assemble(
+            $clusterId,
+            $this->clustersById[$clusterId] ?? null,
+            $this->databasesReadFailed($clusterId)
+                ? DatabaseClusterScopedListEvidenceStatus::FAILED
+                : (array_key_exists($clusterId, $this->databasesByCluster)
+                    ? DatabaseClusterScopedListEvidenceStatus::COMPLETE
+                    : DatabaseClusterScopedListEvidenceStatus::FAILED),
+            $this->databasesByCluster[$clusterId] ?? [],
+            $this->clusterReadFailed($clusterId),
+        );
+    }
 }

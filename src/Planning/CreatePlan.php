@@ -32,6 +32,8 @@ use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Observation\ApplicationObservationEvidence;
 use LaravelCloudBlueprint\Observation\ApplicationObservationFactory;
 use LaravelCloudBlueprint\Observation\DatabaseClusterCandidate;
+use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidenceStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceAssembler;
 use LaravelCloudBlueprint\Observation\DatabaseClusterObservationEvidence;
 use LaravelCloudBlueprint\Observation\DatabaseClusterObservationFactory;
 use LaravelCloudBlueprint\Observation\DatabaseParentEvidence;
@@ -72,6 +74,7 @@ final readonly class CreatePlan
         private DerivedDatabaseObservationFactory $derivedDatabaseObservations = new DerivedDatabaseObservationFactory(),
         private ResourceObservationRecorder $observationRecorder = new ResourceObservationRecorder(),
         private DatabaseAttachmentObservationFactory $databaseAttachmentObservations = new DatabaseAttachmentObservationFactory(),
+        private DatabaseClusterTopologyEvidenceAssembler $databaseTopologyEvidence = new DatabaseClusterTopologyEvidenceAssembler(),
     ) {
     }
 
@@ -1226,6 +1229,17 @@ final readonly class CreatePlan
             }
 
             $remoteDatabases = $cloud->databases($remoteCluster->id);
+            $topology = $this->databaseTopologyEvidence->assemble(
+                $remoteCluster->id,
+                $remoteCluster,
+                DatabaseClusterScopedListEvidenceStatus::COMPLETE,
+                $remoteDatabases,
+            );
+            $reportingTopology = $remoteCluster->childDiscoveryComplete
+                || $remoteCluster->missingRelationships !== []
+                || $remoteCluster->unknownRelationships !== []
+                ? $topology
+                : null;
             $databaseParent = DatabaseParentEvidence::resolved(
                 $clusterAddress,
                 $remoteCluster->id,
@@ -1252,6 +1266,7 @@ final readonly class CreatePlan
                                 ? EvidenceStatus::COMPLETE
                                 : EvidenceStatus::INCOMPLETE,
                             blueprintAddressCollision: true,
+                            topology: $topology,
                         ),
                     ));
                     $this->requireObservation($observation, ObservationKind::IDENTITY_CONFLICT, OwnershipStatus::DERIVED);
@@ -1282,6 +1297,7 @@ final readonly class CreatePlan
                     $databaseParent,
                     $remoteDatabases,
                     EvidenceStatus::COMPLETE,
+                    topology: $this->observationRecorder->isReporting() ? $reportingTopology : null,
                 );
                 if ($this->observationRecorder->isReporting() && $managedDatabase !== null) {
                     $exactListMatches = array_values(array_filter(
@@ -1302,12 +1318,14 @@ final readonly class CreatePlan
                                     $remoteDatabases,
                                 ),
                                 EvidenceStatus::COMPLETE,
+                                topology: $reportingTopology,
                             );
                         } catch (CloudException) {
                             $reportingEvidence = new LogicalDatabaseObservationEvidence(
                                 $databaseParent,
                                 $remoteDatabases,
                                 EvidenceStatus::INCOMPLETE,
+                                topology: $reportingTopology,
                             );
                         }
                     }
@@ -1560,6 +1578,7 @@ final readonly class CreatePlan
         $listCompleteness = EvidenceStatus::INCOMPLETE;
         $relationshipCompleteness = EvidenceStatus::INCOMPLETE;
         $relationshipConflict = false;
+        $topology = null;
         try {
             $remoteCluster = $cloud->databaseCluster($parent->remoteId);
             $relationshipMatches = array_values(array_filter(
@@ -1577,6 +1596,12 @@ final readonly class CreatePlan
             if ($relationshipCompleteness === EvidenceStatus::COMPLETE && !$relationshipConflict) {
                 $databases = $cloud->databases($parent->remoteId);
                 $listCompleteness = EvidenceStatus::COMPLETE;
+                $topology = $this->databaseTopologyEvidence->assemble(
+                    $parent->remoteId,
+                    $remoteCluster,
+                    DatabaseClusterScopedListEvidenceStatus::COMPLETE,
+                    $databases,
+                );
             }
         } catch (CloudException) {
             // Completeness remains explicit; Cloud failure is not proof of absence.
@@ -1591,6 +1616,7 @@ final readonly class CreatePlan
                 $listCompleteness,
                 $relationshipCompleteness,
                 relationshipConflict: $relationshipConflict,
+                topology: $topology,
             ),
         ));
         if ($observation->observation === ObservationKind::UNKNOWN) {

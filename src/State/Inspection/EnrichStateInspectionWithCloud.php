@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\State\Inspection;
 
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
+use LaravelCloudBlueprint\Observation\DatabaseClusterTopologySynthesis;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\StateDocument;
 use LaravelCloudBlueprint\State\StateResource;
@@ -113,23 +114,11 @@ final readonly class EnrichStateInspectionWithCloud
             return;
         }
         $this->verified($diagnostics, $resource);
-        if (!$cluster->childDiscoveryComplete || $cluster->missingRelationships !== [] || $cluster->unknownRelationships !== []) {
-            $this->incomplete($diagnostics, $resource);
-            return;
-        }
-        if ($cloud->databasesReadFailed($resource->remoteId)) {
-            $this->incomplete($diagnostics, $resource);
-            return;
-        }
-        $listed = $cloud->databasesByCluster[$resource->remoteId] ?? null;
-        if ($listed === null) {
-            $this->incomplete($diagnostics, $resource);
-            return;
-        }
-        $listedById = $this->uniqueById($listed);
-        $relationshipIds = array_fill_keys($cluster->databaseIds, true);
-        if (count($listedById) !== count($listed) || count($relationshipIds) !== count($cluster->databaseIds)
-            || array_keys($listedById) !== array_keys($relationshipIds)) {
+        $topology = $cloud->clusterTopology($resource->remoteId);
+        if (!in_array($topology->synthesis, [
+            DatabaseClusterTopologySynthesis::CORROBORATED_COMPLETE,
+            DatabaseClusterTopologySynthesis::SCOPED_COMPLETE,
+        ], true)) {
             $this->incomplete($diagnostics, $resource);
             return;
         }
@@ -139,12 +128,11 @@ final readonly class EnrichStateInspectionWithCloud
                 $owned[$child->remoteId] = $child;
             }
         }
-        foreach ($listedById as $id => $database) {
-            if ($database->clusterId !== $resource->remoteId
-                || ($database->relationshipClusterId !== null && $database->relationshipClusterId !== $resource->remoteId)) {
-                $this->incomplete($diagnostics, $resource);
-                return;
+        foreach ($cloud->databasesByCluster[$resource->remoteId] ?? [] as $database) {
+            if (!in_array($database->id, $topology->childIds(), true)) {
+                continue;
             }
+            $id = $database->id;
             if (!isset($owned[$id])) {
                 $diagnostics[] = new StateDiagnostic(DiagnosticSeverity::WARNING, StateDiagnosticCode::UNMANAGED_REMOTE_CHILD,
                     DiagnosticEvidenceSource::CLOUD, RecoveryDisposition::MANUAL_DECISION_REQUIRED, $resource->address,
@@ -184,20 +172,6 @@ final readonly class EnrichStateInspectionWithCloud
         } else {
             $this->verified($diagnostics, $resource);
         }
-    }
-
-    /**
-     * @param list<CloudDatabase> $databases
-     * @return array<string, CloudDatabase>
-     */
-    private function uniqueById(array $databases): array
-    {
-        $indexed = [];
-        foreach ($databases as $database) {
-            $indexed[$database->id] = $database;
-        }
-        ksort($indexed, SORT_STRING);
-        return $indexed;
     }
 
     /** @param list<StateDiagnostic> $diagnostics */

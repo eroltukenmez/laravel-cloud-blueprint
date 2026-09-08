@@ -18,6 +18,7 @@ final readonly class LogicalDatabaseObservationEvidence
         public EvidenceStatus $completeness,
         public bool $ownershipConflict = false,
         public bool $observeRelationships = true,
+        public ?DatabaseClusterTopologyEvidence $topology = null,
     ) {
         $this->databases = $databases;
     }

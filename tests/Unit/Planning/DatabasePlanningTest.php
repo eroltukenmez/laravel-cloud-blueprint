@@ -240,6 +240,31 @@ final class DatabasePlanningTest extends TestCase
         self::assertSame([], $derivedCloud->destructiveDatabaseCalls);
     }
 
+    public function testReportingTreatsScopedOnlyEmptyTopologyAsIncompleteRatherThanDefinitiveAbsence(): void
+    {
+        $cluster = new CloudDatabaseCluster(
+            'cluster-1',
+            'primary',
+            'laravel_mysql_8',
+            'available',
+            'eu-central-1',
+            new CloudLaravelMySqlConfiguration('db-flex.m-1vcpu-512mb', 5, 1, false, false),
+            [],
+            false,
+            ['databases'],
+        );
+        $cloud = self::matchingCloud($cluster, []);
+
+        $observation = self::observation(
+            self::observations(self::blueprint(), $cloud, self::databaseState()),
+            'database.primary.application',
+        );
+
+        self::assertSame(ObservationKind::UNKNOWN, $observation->observation);
+        self::assertSame(EvidenceStatus::INCOMPLETE, $observation->evidence);
+        self::assertSame([], $cloud->destructiveDatabaseCalls);
+    }
+
     public function testReleasedLogicalDatabaseUsesUnmanagedPlanningSemantics(): void
     {
         $released = self::databaseState()->withoutResource(
