@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\State\Inspection;
 
 use LaravelCloudBlueprint\Cloud\Contract\StateInspectionCloudReader;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudScopedDatabaseListReader;
 use LaravelCloudBlueprint\Cloud\DTO\CloudApplication;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedList;
 use LaravelCloudBlueprint\Cloud\DTO\CloudEnvironment;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
@@ -62,6 +64,8 @@ final readonly class CollectStateInspectionCloudEvidence
 
         /** @var array<string, list<CloudDatabase>> $databasesByCluster */
         $databasesByCluster = [];
+        /** @var array<string, CloudDatabaseScopedList> $scopedDatabaseListsByCluster */
+        $scopedDatabaseListsByCluster = [];
         /** @var array<string, true> $failedDatabaseListReads */
         $failedDatabaseListReads = [];
         /** @var array<string, CloudDatabaseCluster|null> $clustersById */
@@ -84,7 +88,17 @@ final readonly class CollectStateInspectionCloudEvidence
                     $failedClusterReads[$resource->remoteId] = true;
                 }
                 try {
-                    $databasesByCluster[$resource->remoteId] = $this->databases($cloud->databases($resource->remoteId));
+                    if ($cloud instanceof LaravelCloudScopedDatabaseListReader) {
+                        $scoped = $cloud->scopedDatabases($resource->remoteId);
+                        $databasesByCluster[$resource->remoteId] = $this->databases($scoped->databases);
+                        $scopedDatabaseListsByCluster[$resource->remoteId] = new CloudDatabaseScopedList(
+                            $databasesByCluster[$resource->remoteId],
+                            $scoped->status,
+                            $scoped->paginationStatus,
+                        );
+                    } else {
+                        $databasesByCluster[$resource->remoteId] = $this->databases($cloud->databases($resource->remoteId));
+                    }
                 } catch (CloudException|\UnexpectedValueException) {
                     $complete = false;
                     $failedDatabaseListReads[$resource->remoteId] = true;
@@ -122,7 +136,8 @@ final readonly class CollectStateInspectionCloudEvidence
 
         $evidence = new StateInspectionCloudEvidence($complete, $applications, $environments, $clusters, $databasesByCluster,
             $environmentsByApplication, $clustersById, $databasesById, $failedEnvironmentReads, $failedClusterReads,
-            $failedDatabaseListReads, $failedDatabaseReads, $applicationsReadFailed, $databaseClustersReadFailed);
+            $failedDatabaseListReads, $failedDatabaseReads, $applicationsReadFailed, $databaseClustersReadFailed,
+            $scopedDatabaseListsByCluster);
 
         foreach ($state->resources() as $resource) {
             if ($resource->type !== ResourceType::DATABASE_CLUSTER || $evidence->cluster($resource->remoteId) === null) {

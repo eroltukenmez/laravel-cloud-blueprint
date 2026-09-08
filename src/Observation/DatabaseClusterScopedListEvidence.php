@@ -15,6 +15,7 @@ final readonly class DatabaseClusterScopedListEvidence
     public function __construct(
         public DatabaseClusterScopedListEvidenceStatus $status,
         array $children = [],
+        public DatabaseClusterScopedPaginationStatus $paginationStatus = DatabaseClusterScopedPaginationStatus::VALIDATED,
     ) {
         if ($children !== [] && $this->status === DatabaseClusterScopedListEvidenceStatus::FAILED) {
             throw new \InvalidArgumentException('Failed scoped Database list evidence cannot contain child rows.');

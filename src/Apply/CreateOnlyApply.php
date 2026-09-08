@@ -17,8 +17,12 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseAttachmentMutationC
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseClusterDeletionClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudEnvironmentMutationClient;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudLogicalDatabaseDeletionClient;
+use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudScopedDatabaseListReader;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedList;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedListStatus;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedPaginationStatus;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseDependencyType;
 use LaravelCloudBlueprint\Cloud\DTO\DatabaseClusterLifecycleReadiness;
@@ -1891,18 +1895,20 @@ final readonly class CreateOnlyApply
             return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster still has owned child State entries after ordinary child execution.');
         }
         $listed = [];
-        $scopedListStatus = DatabaseClusterScopedListEvidenceStatus::COMPLETE;
+        $scopedDatabases = null;
         try {
-            $listed = $cloud->databases($managed->remoteId);
+            $scopedDatabases = $this->scopedDatabases($cloud, $managed->remoteId);
+            $listed = $scopedDatabases->databases;
         } catch (CloudException) {
-            $scopedListStatus = DatabaseClusterScopedListEvidenceStatus::FAILED;
         }
-        $topology = $this->databaseTopologyEvidence->assemble(
-            $managed->remoteId,
-            $cluster,
-            $scopedListStatus,
-            $listed,
-        );
+        $topology = $scopedDatabases === null
+            ? $this->databaseTopologyEvidence->assemble(
+                $managed->remoteId,
+                $cluster,
+                DatabaseClusterScopedListEvidenceStatus::FAILED,
+                $listed,
+            )
+            : $this->databaseTopologyEvidence->assembleScopedList($managed->remoteId, $cluster, $scopedDatabases);
         if (!$this->databaseTopologyQuality->isDestructiveQuality($topology)) {
             return $failure(
                 $topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING
@@ -2056,6 +2062,21 @@ final readonly class CreateOnlyApply
         }
         $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::DELETED, $message, destructiveOutcome: $kind, deleted: $deleteSent, confirmed: true, stateCheckpointed: true);
         return ['state' => $state, 'outcomes' => $outcomes, 'failure' => null];
+    }
+
+    private function scopedDatabases(
+        LaravelCloudDatabaseClusterDeletionClient $cloud,
+        string $clusterId,
+    ): CloudDatabaseScopedList {
+        if ($cloud instanceof LaravelCloudScopedDatabaseListReader) {
+            return $cloud->scopedDatabases($clusterId);
+        }
+
+        return new CloudDatabaseScopedList(
+            $cloud->databases($clusterId),
+            CloudDatabaseScopedListStatus::COMPLETE,
+            CloudDatabaseScopedPaginationStatus::VALIDATED,
+        );
     }
 
     /**

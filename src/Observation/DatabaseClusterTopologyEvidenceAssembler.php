@@ -6,6 +6,9 @@ namespace LaravelCloudBlueprint\Observation;
 
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabase;
 use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseCluster;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedList;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedListStatus;
+use LaravelCloudBlueprint\Cloud\DTO\CloudDatabaseScopedPaginationStatus;
 
 /** Assembles ownership-neutral topology evidence from already-normalized Cloud DTOs. */
 final readonly class DatabaseClusterTopologyEvidenceAssembler
@@ -13,6 +16,31 @@ final readonly class DatabaseClusterTopologyEvidenceAssembler
     public function __construct(
         private DatabaseClusterTopologyEvidenceSynthesizer $synthesizer = new DatabaseClusterTopologyEvidenceSynthesizer(),
     ) {
+    }
+
+    public function assembleScopedList(
+        string $clusterId,
+        ?CloudDatabaseCluster $cluster,
+        CloudDatabaseScopedList $scopedList,
+        bool $exactClusterReadFailed = false,
+    ): DatabaseClusterTopologyEvidence {
+        return $this->assemble(
+            $clusterId,
+            $cluster,
+            match ($scopedList->status) {
+                CloudDatabaseScopedListStatus::COMPLETE => DatabaseClusterScopedListEvidenceStatus::COMPLETE,
+                CloudDatabaseScopedListStatus::PARTIAL => DatabaseClusterScopedListEvidenceStatus::PARTIAL,
+                CloudDatabaseScopedListStatus::MALFORMED => DatabaseClusterScopedListEvidenceStatus::MALFORMED,
+                CloudDatabaseScopedListStatus::FAILED => DatabaseClusterScopedListEvidenceStatus::FAILED,
+            },
+            $scopedList->databases,
+            $exactClusterReadFailed,
+            match ($scopedList->paginationStatus) {
+                CloudDatabaseScopedPaginationStatus::VALIDATED => DatabaseClusterScopedPaginationStatus::VALIDATED,
+                CloudDatabaseScopedPaginationStatus::UNVERIFIED => DatabaseClusterScopedPaginationStatus::UNVERIFIED,
+                CloudDatabaseScopedPaginationStatus::INVALID => DatabaseClusterScopedPaginationStatus::INVALID,
+            },
+        );
     }
 
     /**
@@ -24,6 +52,7 @@ final readonly class DatabaseClusterTopologyEvidenceAssembler
         DatabaseClusterScopedListEvidenceStatus $scopedListStatus,
         array $databases = [],
         bool $exactClusterReadFailed = false,
+        DatabaseClusterScopedPaginationStatus $paginationStatus = DatabaseClusterScopedPaginationStatus::VALIDATED,
     ): DatabaseClusterTopologyEvidence {
         $identity = $exactClusterReadFailed
             ? DatabaseClusterExactIdentityStatus::FAILED
@@ -49,6 +78,7 @@ final readonly class DatabaseClusterTopologyEvidenceAssembler
                         ),
                     $databases,
                 ),
+                $paginationStatus,
             ),
         );
     }

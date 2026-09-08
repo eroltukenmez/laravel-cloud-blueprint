@@ -11,6 +11,7 @@ use LaravelCloudBlueprint\Observation\DatabaseClusterRelationshipEvidenceStatus;
 use LaravelCloudBlueprint\Observation\DatabaseClusterScopedChildEvidence;
 use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidence;
 use LaravelCloudBlueprint\Observation\DatabaseClusterScopedListEvidenceStatus;
+use LaravelCloudBlueprint\Observation\DatabaseClusterScopedPaginationStatus;
 use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidence;
 use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceSource;
 use LaravelCloudBlueprint\Observation\DatabaseClusterTopologyEvidenceSynthesizer;
@@ -249,6 +250,40 @@ final class DatabaseClusterTopologyEvidenceSynthesizerTest extends TestCase
             $policy->isDestructiveQuality($scopedOnly),
             'A complete empty scoped list must not authorize deletion.',
         );
+    }
+
+    public function testUnverifiedOrInvalidScopedPaginationCannotBecomeDestructiveQuality(): void
+    {
+        $policy = new DatabaseClusterTopologyQualityPolicy();
+        foreach ([
+            DatabaseClusterScopedPaginationStatus::UNVERIFIED,
+            DatabaseClusterScopedPaginationStatus::INVALID,
+        ] as $pagination) {
+            $evidence = $this->synthesize(
+                DatabaseClusterExactIdentityStatus::VERIFIED,
+                self::relationship(DatabaseClusterRelationshipEvidenceStatus::COMPLETE, ['database-1']),
+                new DatabaseClusterScopedListEvidence(
+                    DatabaseClusterScopedListEvidenceStatus::COMPLETE,
+                    [self::child('database-1')],
+                    $pagination,
+                ),
+            );
+
+            self::assertSame(DatabaseClusterTopologySynthesis::INCOMPLETE, $evidence->synthesis);
+            self::assertFalse($policy->isDestructiveQuality($evidence));
+        }
+
+        $empty = $this->synthesize(
+            DatabaseClusterExactIdentityStatus::VERIFIED,
+            self::relationship(DatabaseClusterRelationshipEvidenceStatus::COMPLETE),
+            new DatabaseClusterScopedListEvidence(
+                DatabaseClusterScopedListEvidenceStatus::COMPLETE,
+                [],
+                DatabaseClusterScopedPaginationStatus::INVALID,
+            ),
+        );
+        self::assertSame(DatabaseClusterTopologySynthesis::INCOMPLETE, $empty->synthesis);
+        self::assertFalse($policy->isDestructiveQuality($empty));
     }
 
     /** @return iterable<string, array{DatabaseClusterRelationshipEvidenceStatus}> */

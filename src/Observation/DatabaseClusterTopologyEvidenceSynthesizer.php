@@ -51,7 +51,8 @@ final readonly class DatabaseClusterTopologyEvidenceSynthesizer
         }
 
         $relationshipComplete = $relationship->status === DatabaseClusterRelationshipEvidenceStatus::COMPLETE;
-        $scopedComplete = $scopedList->status === DatabaseClusterScopedListEvidenceStatus::COMPLETE;
+        $scopedComplete = $scopedList->status === DatabaseClusterScopedListEvidenceStatus::COMPLETE
+            && $scopedList->paginationStatus === DatabaseClusterScopedPaginationStatus::VALIDATED;
         if ($relationshipComplete
             && $this->scopedContradictsCompleteRelationship($relationshipIds, $scopedIds, $scopedComplete)) {
             return DatabaseClusterTopologySynthesis::CONFLICTING;
