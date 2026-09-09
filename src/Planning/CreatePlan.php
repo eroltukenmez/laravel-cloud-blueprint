@@ -672,6 +672,16 @@ final readonly class CreatePlan
 
     private function blockedPlan(Blueprint $blueprint, string $reason): ExecutionPlan
     {
+        $applicationAddress = new ResourceAddress(ResourceType::APPLICATION, $blueprint->application->name);
+        if ($this->observationRecorder->find($applicationAddress) === null) {
+            $this->recordSimpleObservation(
+                $applicationAddress,
+                ObservationKind::UNKNOWN,
+                OwnershipStatus::UNKNOWN,
+                ReconciliationStatus::BLOCKED,
+                EvidenceStatus::INCOMPLETE,
+            );
+        }
         $this->recordUnresolvedDesiredChildren($blueprint);
         $actions = [$this->applicationAction($blueprint->application->name, PlanOperation::UNSUPPORTED, $reason)];
         foreach ($blueprint->environments as $environment) {
@@ -2198,13 +2208,20 @@ final readonly class CreatePlan
         ?DatabaseDependencies $dependencies = null,
         PlanChange|DatabaseParentLifecycleDependency ...$details,
     ): PlanAction {
+        $address = new ResourceAddress(ResourceType::DATABASE_CLUSTER, $name);
+
         return new PlanAction(
-            new ResourceAddress(ResourceType::DATABASE_CLUSTER, $name),
+            $address,
             ResourceType::DATABASE_CLUSTER,
             $operation,
             $reason,
             $remoteId,
-            ...array_values(array_filter([$parent, $dependencies, ...$details])),
+            ...array_values(array_filter([
+                $parent,
+                $dependencies,
+                ...$details,
+                $this->observedOwnership($address),
+            ])),
         );
     }
 
@@ -2252,13 +2269,22 @@ final readonly class CreatePlan
         ?DatabaseDestructiveRole $destructiveRole = null,
     ): PlanAction
     {
+        $address = new ResourceAddress(ResourceType::DATABASE, $name);
+
         return new PlanAction(
-            new ResourceAddress(ResourceType::DATABASE, $name),
+            $address,
             ResourceType::DATABASE,
             $operation,
             $reason,
             $remoteId,
-            ...array_values(array_filter([$parent, $dependencies, $classification, $provenance, $destructiveRole])),
+            ...array_values(array_filter([
+                $parent,
+                $dependencies,
+                $classification,
+                $provenance,
+                $destructiveRole,
+                $this->observedOwnership($address),
+            ])),
         );
     }
 
@@ -2269,13 +2295,15 @@ final readonly class CreatePlan
         DatabaseAttachmentApproval|PlanChange ...$details,
     ): PlanAction
     {
+        $address = new ResourceAddress(ResourceType::DATABASE_ATTACHMENT, $name);
+
         return new PlanAction(
-            new ResourceAddress(ResourceType::DATABASE_ATTACHMENT, $name),
+            $address,
             ResourceType::DATABASE_ATTACHMENT,
             $operation,
             $reason,
             null,
-            ...$details,
+            ...[...$details, $this->observedOwnership($address)],
         );
     }
 
@@ -2287,8 +2315,12 @@ final readonly class CreatePlan
         ?ResourceAddress $parent = null,
         PlanChange ...$changes,
     ): PlanAction {
-        return new PlanAction(new ResourceAddress(ResourceType::APPLICATION, $name), ResourceType::APPLICATION,
-            $operation, $reason, $remoteId, ...($parent === null ? $changes : [$parent, ...$changes]));
+        $address = new ResourceAddress(ResourceType::APPLICATION, $name);
+
+        return new PlanAction($address, ResourceType::APPLICATION, $operation, $reason, $remoteId,
+            ...($parent === null
+                ? [...$changes, $this->observedOwnership($address)]
+                : [$parent, ...$changes, $this->observedOwnership($address)]));
     }
 
     private function environmentAction(
@@ -2300,11 +2332,13 @@ final readonly class CreatePlan
         ?\LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies $dependencies = null,
         PlanChange ...$changes,
     ): PlanAction {
-        return new PlanAction(new ResourceAddress(ResourceType::ENVIRONMENT, $name), ResourceType::ENVIRONMENT,
+        $address = new ResourceAddress(ResourceType::ENVIRONMENT, $name);
+
+        return new PlanAction($address, ResourceType::ENVIRONMENT,
             $operation,
             $reason,
             $remoteId,
-            ...array_values(array_filter([$parent, $dependencies, ...$changes])),
+            ...array_values(array_filter([$parent, $dependencies, ...$changes, $this->observedOwnership($address)])),
         );
     }
 
@@ -2315,6 +2349,23 @@ final readonly class CreatePlan
 
     private function variableAction(ResourceAddress $address, PlanOperation $operation, string $reason): PlanAction
     {
-        return new PlanAction($address, ResourceType::VARIABLE, $operation, $reason);
+        return new PlanAction(
+            $address,
+            ResourceType::VARIABLE,
+            $operation,
+            $reason,
+            null,
+            $this->observedOwnership($address),
+        );
+    }
+
+    private function observedOwnership(ResourceAddress $address): OwnershipStatus
+    {
+        $observation = $this->observationRecorder->find($address);
+        if ($observation === null) {
+            throw new \LogicException(sprintf('Plan action "%s" requires a recorded observation.', $address));
+        }
+
+        return $observation->ownership;
     }
 }

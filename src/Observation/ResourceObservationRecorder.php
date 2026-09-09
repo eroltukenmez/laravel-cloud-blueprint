@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Observation;
 
+use LaravelCloudBlueprint\Planning\ResourceAddress;
+
 final class ResourceObservationRecorder
 {
     /** @var array<string, ResourceObservation> */
@@ -31,5 +33,10 @@ final class ResourceObservationRecorder
     public function collection(): ResourceObservationCollection
     {
         return new ResourceObservationCollection(...array_values($this->observations));
+    }
+
+    public function find(ResourceAddress $address): ?ResourceObservation
+    {
+        return $this->observations[(string) $address] ?? null;
     }
 }

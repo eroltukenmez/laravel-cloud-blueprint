@@ -66,6 +66,7 @@ final class PlanCommandTest extends TestCase
         self::assertStringContainsString('Laravel Cloud Blueprint Plan', $tester->getDisplay());
         self::assertStringContainsString('+ application.new-api', $tester->getDisplay());
         self::assertStringContainsString('+ environment.production', $tester->getDisplay());
+        self::assertStringContainsString('Reconciliation: supported.', $tester->getDisplay());
         self::assertStringContainsString('Plan: 2 to create, 0 to update, 0 unchanged, 0 unsupported.', $tester->getDisplay());
         self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
     }
@@ -85,6 +86,42 @@ final class PlanCommandTest extends TestCase
         self::assertIsArray($decoded['actions'][0]);
         self::assertSame('application.new-api', $decoded['actions'][0]['resource']);
         self::assertSame('create', $decoded['actions'][0]['operation']);
+        self::assertSame('supported', $decoded['actions'][0]['reconciliation']);
+        self::assertSame('none', $decoded['actions'][0]['ownership']);
+        foreach ($decoded['actions'] as $action) {
+            self::assertIsArray($action);
+            self::assertArrayHasKey('reconciliation', $action);
+            self::assertArrayHasKey('ownership', $action);
+        }
+    }
+
+    public function testUnmanagedNoChangeRemainsVisibleThroughTypedOwnership(): void
+    {
+        $text = $this->tester(self::validBlueprint());
+
+        self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
+        self::assertStringNotContainsString('No changes.', $text->getDisplay());
+        self::assertStringContainsString('Matching remote application is unmanaged', $text->getDisplay());
+
+        $json = $this->tester(self::validBlueprint());
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true]));
+        $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertIsArray($decoded['actions']);
+        self::assertIsArray($decoded['actions'][0]);
+        self::assertSame('unmanaged', $decoded['actions'][0]['ownership']);
+        self::assertSame('not_applicable', $decoded['actions'][0]['reconciliation']);
+    }
+
+    public function testManagedNoChangeKeepsTheExistingConciseHumanOutput(): void
+    {
+        $tester = $this->tester(self::validBlueprint(), state: self::managedState());
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute([]));
+        self::assertStringContainsString(
+            "No changes.\n\nLaravel Cloud infrastructure matches the blueprint.",
+            $tester->getDisplay(),
+        );
     }
 
     public function testUpdateTextAndJsonRenderSafeChangesAndNeverVariableValues(): void
@@ -234,6 +271,8 @@ final class PlanCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
         self::assertStringContainsString('- application.old-api', $text->getDisplay());
         self::assertStringContainsString('- environment.preview', $text->getDisplay());
+        self::assertStringContainsString('Reconciliation: blocked.', $text->getDisplay());
+        self::assertStringContainsString('Reconciliation: unsupported.', $text->getDisplay());
         self::assertStringContainsString('Plan: 0 to create, 0 to update, 2 to delete, 2 unchanged, 0 unsupported.', $text->getDisplay());
 
         $json = $this->tester(self::validBlueprint(), state: $state);
@@ -255,6 +294,8 @@ final class PlanCommandTest extends TestCase
         self::assertIsArray($actions[0]);
         self::assertIsArray($actions[1]);
         self::assertSame('delete', $actions[1]['operation']);
+        self::assertSame('unsupported', $actions[1]['reconciliation']);
+        self::assertSame('managed', $actions[1]['ownership']);
         self::assertIsString($actions[1]['reason']);
         self::assertStringContainsString('exact recorded remote identity is already missing', $actions[1]['reason']);
         self::assertSame('application.old-api', $actions[0]['parent']);
@@ -263,7 +304,7 @@ final class PlanCommandTest extends TestCase
             self::assertIsArray($action);
             self::assertArrayNotHasKey('remote_id', $action);
             self::assertArrayNotHasKey('lifecycle_status', $action);
-            self::assertArrayNotHasKey('ownership', $action);
+            self::assertArrayHasKey('ownership', $action);
             self::assertArrayNotHasKey('desired', $action);
         }
     }
@@ -280,6 +321,7 @@ final class PlanCommandTest extends TestCase
         $text = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
         self::assertSame(ExitCode::SUCCESS->value, $text->execute([]));
         self::assertStringContainsString('database_attachment, custom_domain', $text->getDisplay());
+        self::assertStringContainsString('Reconciliation: blocked.', $text->getDisplay());
         self::assertStringNotContainsString('database-internal-id', $text->getDisplay());
 
         $json = $this->tester(self::validBlueprint(), cloud: $cloud, state: $state);
@@ -289,6 +331,7 @@ final class PlanCommandTest extends TestCase
         self::assertIsArray($decoded['actions']);
         self::assertIsArray($decoded['actions'][0]);
         self::assertSame('blocked', $decoded['actions'][0]['destructive_readiness']);
+        self::assertSame('blocked', $decoded['actions'][0]['reconciliation']);
         self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['dependencies']);
         self::assertSame(['database_attachment', 'custom_domain'], $decoded['actions'][0]['blocking_dependencies']);
         self::assertSame([], $decoded['actions'][0]['informational_dependencies']);
@@ -313,6 +356,7 @@ final class PlanCommandTest extends TestCase
         self::assertIsArray($decoded['actions'][0]);
         $action = $decoded['actions'][0];
         self::assertSame('safe', $action['destructive_readiness']);
+        self::assertSame('supported', $action['reconciliation']);
         self::assertSame(['instance'], $action['dependencies']);
         self::assertSame([], $action['blocking_dependencies']);
         self::assertSame(['instance'], $action['informational_dependencies']);
@@ -553,6 +597,10 @@ final class PlanCommandTest extends TestCase
             }
             self::assertIsArray($database);
             self::assertSame($readiness, $database['destructive_readiness']);
+            self::assertSame(
+                $readiness === 'safe' ? 'supported' : 'blocked',
+                $database['reconciliation'],
+            );
             self::assertIsString($database['reason']);
             self::assertStringContainsString($database['reason'], $text->getDisplay());
             self::assertStringNotContainsString('not supported', $database['reason']);
@@ -588,6 +636,7 @@ final class PlanCommandTest extends TestCase
         $action = $actions[0];
         self::assertIsArray($action);
         self::assertSame('blocked', $action['destructive_readiness']);
+        self::assertSame('blocked', $action['reconciliation']);
         self::assertIsArray($action['blocking_dependencies']);
         self::assertContains('database_snapshot', $action['blocking_dependencies']);
         self::assertTrue($action['snapshot_discovery_complete']);

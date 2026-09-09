@@ -21,11 +21,11 @@ use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanChange;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\PlanReconciliationStatus;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\State\Contract\StateStore;
 use LaravelCloudBlueprint\State\Exception\StateCorruptedException;
 use LaravelCloudBlueprint\State\Exception\StateStorageException;
-use LaravelCloudBlueprint\State\StateOwnershipClassification;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -129,20 +129,7 @@ final class PlanCommand extends Command
         $unchanged = $plan->countByOperation(PlanOperation::NO_CHANGE);
         $unsupported = $plan->countByOperation(PlanOperation::UNSUPPORTED);
 
-        $hasUnmanagedMatches = false;
-        $hasDerivedResources = false;
-        foreach ($plan as $action) {
-            if ($action->ownershipClassification === StateOwnershipClassification::DERIVED) {
-                $hasDerivedResources = true;
-            }
-            if (str_contains($action->reason, 'unmanaged')) {
-                $hasUnmanagedMatches = true;
-                break;
-            }
-        }
-
-        if ($create === 0 && $update === 0 && $delete === 0 && $unsupported === 0
-            && !$hasUnmanagedMatches && !$hasDerivedResources) {
+        if (!$plan->hasReportableActions()) {
             $output->writeln('No changes.');
             $output->writeln('');
             $output->writeln('Laravel Cloud infrastructure matches the blueprint.');
@@ -157,6 +144,9 @@ final class PlanCommand extends Command
                 foreach ($action->changes as $change) {
                     $output->writeln(sprintf('  %s: %s → %s', $change->field, $change->before, $change->after));
                 }
+            }
+            if ($action->reconciliation !== PlanReconciliationStatus::NOT_APPLICABLE) {
+                $output->writeln(sprintf('  Reconciliation: %s.', $action->reconciliation->value));
             }
             if ($action->databaseDependencies !== null) {
                 $output->writeln(sprintf(
@@ -259,6 +249,8 @@ final class PlanCommand extends Command
                         'resource' => (string) $action->address,
                         'type' => $action->resourceType->value,
                         'operation' => $action->operation->value,
+                        'reconciliation' => $action->reconciliation->value,
+                        'ownership' => $action->ownership->value,
                         'reason' => $action->reason,
                         'parent' => $action->parent === null ? null : (string) $action->parent,
                         'classification' => $action->ownershipClassification?->value,

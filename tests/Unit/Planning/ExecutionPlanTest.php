@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Tests\Unit\Planning;
 
+use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
@@ -15,7 +16,14 @@ final class ExecutionPlanTest extends TestCase
 {
     public function testDeleteHasStableSerializedValueAndIsActionable(): void
     {
-        $plan = new ExecutionPlan(self::action(ResourceType::ENVIRONMENT, 'preview', PlanOperation::DELETE));
+        $plan = new ExecutionPlan(new PlanAction(
+            new ResourceAddress(ResourceType::ENVIRONMENT, 'preview'),
+            ResourceType::ENVIRONMENT,
+            PlanOperation::DELETE,
+            'Safe test reason.',
+            null,
+            EnvironmentDependencies::authoritativeAbsence(),
+        ));
 
         self::assertSame('delete', PlanOperation::DELETE->value);
         self::assertTrue($plan->hasActionableChanges());
@@ -48,6 +56,18 @@ final class ExecutionPlanTest extends TestCase
             static fn (PlanAction $action): string => (string) $action->address,
             iterator_to_array($plan, false),
         ));
+    }
+
+    public function testBlockedAndUnsupportedDifferencesAreReportableButNotActionable(): void
+    {
+        $plan = new ExecutionPlan(
+            self::action(ResourceType::ENVIRONMENT, 'preview', PlanOperation::DELETE),
+            self::action(ResourceType::APPLICATION, 'old-api', PlanOperation::DELETE),
+        );
+
+        self::assertFalse($plan->hasActionableChanges());
+        self::assertTrue($plan->hasReportableActions());
+        self::assertSame(2, $plan->countByOperation(PlanOperation::DELETE));
     }
 
     private static function action(

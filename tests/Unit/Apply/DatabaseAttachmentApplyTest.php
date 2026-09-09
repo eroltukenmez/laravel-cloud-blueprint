@@ -46,6 +46,7 @@ use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\PlanReconciliationStatus;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
@@ -324,6 +325,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
     {
         $plan = (new CreatePlan(new VariableValueResolver(new AttachmentValues())))->create($blueprint, $cloud, $state);
         self::assertSame(PlanOperation::UPDATE, self::attachmentPlanAction($plan)->operation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, self::attachmentPlanAction($plan)->reconciliation);
         return $plan;
     }
 

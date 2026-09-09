@@ -6,6 +6,7 @@ namespace LaravelCloudBlueprint\Planning;
 
 use Countable;
 use IteratorAggregate;
+use LaravelCloudBlueprint\Observation\OwnershipStatus;
 use Traversable;
 
 /** @implements IteratorAggregate<int, PlanAction> */
@@ -65,9 +66,25 @@ final readonly class ExecutionPlan implements Countable, IteratorAggregate
 
     public function hasActionableChanges(): bool
     {
-        return $this->countByOperation(PlanOperation::CREATE) > 0
-            || $this->countByOperation(PlanOperation::UPDATE) > 0
-            || $this->countByOperation(PlanOperation::DELETE) > 0;
+        foreach ($this->actions as $action) {
+            if ($action->reconciliation === PlanReconciliationStatus::SUPPORTED) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function hasReportableActions(): bool
+    {
+        foreach ($this->actions as $action) {
+            if ($action->operation !== PlanOperation::NO_CHANGE
+                || in_array($action->ownership, [OwnershipStatus::DERIVED, OwnershipStatus::UNMANAGED], true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function getIterator(): Traversable
