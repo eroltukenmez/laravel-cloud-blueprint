@@ -42,7 +42,6 @@ use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\UpdateEnvironmentDatabaseAttachmentRequest;
 use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
-use LaravelCloudBlueprint\Cloud\Exception\CloudAuthenticationException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudTransportException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResponseException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
@@ -149,6 +148,7 @@ final readonly class CreateOnlyApply
                         new ApplyResourceOutcome(
                             $action->address,
                             ApplyOutcomeOperation::FAILED,
+                            ApplyOutcome::FAILED,
                             'Locked Database attachment revalidation failed before mutation.',
                         ),
                     );
@@ -172,6 +172,7 @@ final readonly class CreateOnlyApply
                         new ApplyResourceOutcome(
                             $action->address,
                             ApplyOutcomeOperation::FAILED,
+                            ApplyOutcome::FAILED,
                             'Locked Database revalidation failed before mutation: ' . $exception->getMessage(),
                             $exception instanceof CloudValidationException ? $exception : null,
                         ),
@@ -186,6 +187,7 @@ final readonly class CreateOnlyApply
                             new ApplyResourceOutcome(
                                 $plannedCreate->address,
                                 ApplyOutcomeOperation::FAILED,
+                                ApplyOutcome::CONFLICT,
                                 'Database CREATE assumptions changed during locked revalidation; no POST was sent. Import any newly discovered resource before retrying.',
                             ),
                         );
@@ -203,6 +205,7 @@ final readonly class CreateOnlyApply
                             new ApplyResourceOutcome(
                                 $freshAction->address,
                                 ApplyOutcomeOperation::FAILED,
+                                ApplyOutcome::CONFLICT,
                                 'A new actionable change appeared during locked Database revalidation; no mutation was sent. Run plan again for review.',
                             ),
                         );
@@ -297,7 +300,7 @@ final readonly class CreateOnlyApply
                         && $state->find($action->address) === null) {
                         continue;
                     }
-                    $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UNCHANGED);
+                    $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UNCHANGED, ApplyOutcome::UNCHANGED);
                     if ($action->resourceType === ResourceType::APPLICATION) {
                         $applicationId = $action->remoteId;
                     } elseif ($action->remoteId !== null) {
@@ -333,7 +336,7 @@ final readonly class CreateOnlyApply
                         return $this->updateFailure($outcomes, $action, $exception);
                     }
 
-                    $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UPDATED);
+                    $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::UPDATED, ApplyOutcome::UPDATED);
                     continue;
                 }
 
@@ -369,8 +372,9 @@ final readonly class CreateOnlyApply
                             $blueprint->application->source->provider,
                         );
                         $created = $cloud->createApplication($request);
-                        if (!$this->isCompatibleApplicationCreateResponse($created, $request)) {
-                            return $this->createResponseIdentityFailure($outcomes, $action);
+                        $createResponseFailure = $this->applicationCreateResponseFailure($created, $request);
+                        if ($createResponseFailure !== null) {
+                            return $this->createResponseIdentityFailure($outcomes, $action, $createResponseFailure);
                         }
                         $applicationId = $created->id;
                         $resource = new StateResource($action->address, ResourceType::APPLICATION, $created->id);
@@ -386,8 +390,9 @@ final readonly class CreateOnlyApply
                                 $applicationId,
                                 $request,
                             );
-                            if (!$this->isCompatibleEnvironmentCreateResponse($created, $request, $applicationId)) {
-                                return $this->createResponseIdentityFailure($outcomes, $action);
+                            $createResponseFailure = $this->environmentCreateResponseFailure($created, $request, $applicationId);
+                            if ($createResponseFailure !== null) {
+                                return $this->createResponseIdentityFailure($outcomes, $action, $createResponseFailure);
                             }
                             $environmentId = $created->id;
                         } else {
@@ -405,6 +410,7 @@ final readonly class CreateOnlyApply
                     $outcomes[] = new ApplyResourceOutcome(
                         $action->address,
                         ApplyOutcomeOperation::FAILED,
+                        $this->mutationFailureOutcome($exception),
                         $exception instanceof CloudResponseException
                             ? $this->createResponseIdentityFailureMessage()
                             : $exception->getMessage(),
@@ -427,12 +433,13 @@ final readonly class CreateOnlyApply
                     $outcomes[] = new ApplyResourceOutcome(
                         $action->address,
                         ApplyOutcomeOperation::FAILED,
+                        ApplyOutcome::STATE_CHECKPOINT_FAILED,
                         'Remote resource was created but state checkpoint failed: ' . $exception->getMessage(),
                     );
                     return new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes);
                 }
 
-                $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
+                $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED, ApplyOutcome::CREATED);
 
                 if ($action->resourceType === ResourceType::APPLICATION) {
                     $environmentCreateActions = $this->environmentCreateActions($plan);
@@ -447,6 +454,7 @@ final readonly class CreateOnlyApply
                             $outcomes,
                             $environmentCreateActions[0],
                             'Unable to reconcile environments created with the application: ' . $exception->getMessage(),
+                            ApplyOutcome::UNCERTAIN,
                             $exception instanceof CloudValidationException ? $exception : null,
                         );
                     }
@@ -464,6 +472,7 @@ final readonly class CreateOnlyApply
                                     'Multiple environments named "%s" were discovered after application creation.',
                                     $environmentAction->address->name,
                                 ),
+                                ApplyOutcome::CONFLICT,
                             );
                         }
                         if ($matches === []) {
@@ -480,6 +489,7 @@ final readonly class CreateOnlyApply
                                     'Branch information is unavailable for implicitly created environment "%s".',
                                     $desired->name,
                                 ),
+                                ApplyOutcome::POSTCONDITION_FAILED,
                             );
                         }
                         if ($implicit->branch !== $desired->branch) {
@@ -490,6 +500,7 @@ final readonly class CreateOnlyApply
                                     'Implicitly created environment "%s" uses a different branch.',
                                     $desired->name,
                                 ),
+                                ApplyOutcome::POSTCONDITION_FAILED,
                             );
                         }
 
@@ -506,6 +517,7 @@ final readonly class CreateOnlyApply
                     $outcomes[] = new ApplyResourceOutcome(
                         $approvedAttachmentAction->address,
                         ApplyOutcomeOperation::UNCHANGED,
+                        ApplyOutcome::UNCHANGED,
                         'Database attachment was already reconciled during locked revalidation.',
                     );
                     continue;
@@ -533,7 +545,7 @@ final readonly class CreateOnlyApply
 
                 if ($mutationActions === []) {
                     foreach ($group as $item) {
-                        $outcomes[] = new ApplyResourceOutcome($item->action->address, ApplyOutcomeOperation::UNCHANGED);
+                        $outcomes[] = new ApplyResourceOutcome($item->action->address, ApplyOutcomeOperation::UNCHANGED, ApplyOutcome::UNCHANGED);
                     }
                     continue;
                 }
@@ -544,6 +556,7 @@ final readonly class CreateOnlyApply
                         $outcomes,
                         $group,
                         sprintf('Unable to resolve the remote identity for environment "%s".', $environmentName),
+                        ApplyOutcome::CONFLICT,
                     );
                 }
 
@@ -557,7 +570,12 @@ final readonly class CreateOnlyApply
                     }
                     $request = new SetEnvironmentVariablesRequest(...$inputs);
                 } catch (MissingEnvironmentValueException $exception) {
-                    return $this->variableFailure($outcomes, $group, $exception->getMessage());
+                    return $this->variableFailure(
+                        $outcomes,
+                        $group,
+                        $exception->getMessage(),
+                        ApplyOutcome::FAILED,
+                    );
                 }
 
                 try {
@@ -568,6 +586,7 @@ final readonly class CreateOnlyApply
                         $outcomes,
                         $group,
                         $exception->getMessage(),
+                        $this->mutationFailureOutcome($exception),
                         $exception instanceof CloudTransportException,
                         $exception instanceof CloudValidationException ? $exception : null,
                     );
@@ -582,6 +601,11 @@ final readonly class CreateOnlyApply
                             : ($item->action->operation === PlanOperation::UPDATE
                                 ? ApplyOutcomeOperation::UPDATED
                                 : ApplyOutcomeOperation::UNCHANGED),
+                        $item->action->operation === PlanOperation::CREATE
+                            ? ApplyOutcome::CREATED
+                            : ($item->action->operation === PlanOperation::UPDATE
+                                ? ApplyOutcome::UPDATED
+                                : ApplyOutcome::UNCHANGED),
                     );
                 }
             }
@@ -771,34 +795,49 @@ final readonly class CreateOnlyApply
         return false;
     }
 
-    private function isCompatibleApplicationCreateResponse(
+    private function applicationCreateResponseFailure(
         CloudApplication $response,
         CreateApplicationRequest $request,
-    ): bool {
-        return trim($response->id) !== ''
-            && $response->name === $request->name
-            && $response->region === $request->region
-            && ($response->repository === null || $response->repository === $request->repository)
-            && ($response->sourceProvider === null || $response->sourceProvider === $request->sourceProvider);
+    ): ?ApplyOutcome {
+        if (trim($response->id) === '') {
+            return ApplyOutcome::POSTCONDITION_FAILED;
+        }
+
+        return $response->name !== $request->name
+            || $response->region !== $request->region
+            || ($response->repository !== null && $response->repository !== $request->repository)
+            || ($response->sourceProvider !== null && $response->sourceProvider !== $request->sourceProvider)
+                ? ApplyOutcome::CONFLICT
+                : null;
     }
 
-    private function isCompatibleEnvironmentCreateResponse(
+    private function environmentCreateResponseFailure(
         CloudEnvironment $response,
         CreateEnvironmentRequest $request,
         string $applicationId,
-    ): bool {
-        return trim($response->id) !== ''
-            && $response->name === $request->name
-            && (!$response->hasResponseApplicationRelationship
-                || $response->responseApplicationId === $applicationId);
+    ): ?ApplyOutcome {
+        if (trim($response->id) === '') {
+            return ApplyOutcome::POSTCONDITION_FAILED;
+        }
+
+        return $response->name !== $request->name
+            || ($response->hasResponseApplicationRelationship
+                && $response->responseApplicationId !== $applicationId)
+                ? ApplyOutcome::CONFLICT
+                : null;
     }
 
     /** @param list<ApplyResourceOutcome> $outcomes */
-    private function createResponseIdentityFailure(array $outcomes, PlanAction $action): ApplyResult
+    private function createResponseIdentityFailure(
+        array $outcomes,
+        PlanAction $action,
+        ApplyOutcome $outcome,
+    ): ApplyResult
     {
         $outcomes[] = new ApplyResourceOutcome(
             $action->address,
             ApplyOutcomeOperation::FAILED,
+            $outcome,
             $this->createResponseIdentityFailureMessage(),
         );
 
@@ -918,7 +957,7 @@ final readonly class CreateOnlyApply
                 return $this->databaseAttachmentFailure(
                     $outcomes,
                     $action,
-                    DatabaseAttachmentMutationOutcome::UNCERTAIN,
+                    ApplyOutcome::UNCERTAIN,
                     'Database attachment confirmation relationship evidence is incomplete.',
                 );
             }
@@ -929,6 +968,7 @@ final readonly class CreateOnlyApply
                 $outcomes[] = new ApplyResourceOutcome(
                     $action->address,
                     ApplyOutcomeOperation::UPDATED,
+                    ApplyOutcome::UPDATED,
                     $patchFailure === null
                         ? null
                         : 'Database attachment was confirmed by authoritative read after an uncertain or refused PATCH response.',
@@ -939,35 +979,36 @@ final readonly class CreateOnlyApply
             return $this->databaseAttachmentFailure(
                 $outcomes,
                 $action,
-                DatabaseAttachmentMutationOutcome::UNCERTAIN,
+                ApplyOutcome::UNCERTAIN,
                 'Database attachment PATCH outcome could not be confirmed by authoritative read.',
             );
         }
 
         if ($patchFailure !== null) {
-            $outcome = $this->databaseAttachmentPatchIsDefinitivelyRefused($patchFailure)
-                ? DatabaseAttachmentMutationOutcome::REFUSED
-                : DatabaseAttachmentMutationOutcome::UNCERTAIN;
+            $outcome = $this->mutationIsDefinitivelyRefused($patchFailure)
+                ? ApplyOutcome::REFUSED
+                : ApplyOutcome::POSTCONDITION_FAILED;
             return $this->databaseAttachmentFailure(
                 $outcomes,
                 $action,
                 $outcome,
-                $outcome === DatabaseAttachmentMutationOutcome::REFUSED
+                $outcome === ApplyOutcome::REFUSED
                     ? 'Laravel Cloud refused the Database attachment PATCH; authoritative read did not show the desired relationship.'
-                    : 'Database attachment PATCH transmission was uncertain and authoritative read did not show the desired relationship.',
+                    : 'Authoritative read showed that the Database attachment PATCH did not establish the desired relationship.',
                 $patchFailure instanceof CloudValidationException ? $patchFailure : null,
+                $outcome === ApplyOutcome::POSTCONDITION_FAILED,
             );
         }
 
         return $this->databaseAttachmentFailure(
             $outcomes,
             $action,
-            DatabaseAttachmentMutationOutcome::CONFLICT,
+            ApplyOutcome::POSTCONDITION_FAILED,
             'Database attachment PATCH returned successfully, but authoritative read showed a different relationship.',
         );
     }
 
-    private function databaseAttachmentPatchIsDefinitivelyRefused(CloudException $exception): bool
+    private function mutationIsDefinitivelyRefused(CloudException $exception): bool
     {
         return $exception instanceof CloudApiException
             && !$exception instanceof CloudTransportException
@@ -984,12 +1025,19 @@ final readonly class CreateOnlyApply
     private function databaseAttachmentFailure(
         array $outcomes,
         PlanAction $action,
-        DatabaseAttachmentMutationOutcome $mutationOutcome,
+        ApplyOutcome $mutationOutcome,
         string $message,
         ?CloudValidationException $validation = null,
+        bool $mutationMayHaveChangedRemotely = false,
     ): array {
-        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $message, $validation);
-        $uncertain = $mutationOutcome === DatabaseAttachmentMutationOutcome::UNCERTAIN;
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::FAILED,
+            $mutationOutcome,
+            $message,
+            $validation,
+        );
+        $uncertain = $mutationOutcome === ApplyOutcome::UNCERTAIN || $mutationMayHaveChangedRemotely;
         $status = $this->confirmedMutationCount($outcomes) > 0 || $uncertain
             ? ApplyStatus::PARTIAL_FAILURE
             : ApplyStatus::FAILED;
@@ -1022,6 +1070,7 @@ final readonly class CreateOnlyApply
                 $state,
                 $clusterIds,
                 $outcomes,
+                ApplyOutcome::CONFLICT,
             );
         }
 
@@ -1036,9 +1085,24 @@ final readonly class CreateOnlyApply
                             $state,
                             $clusterIds,
                             $outcomes,
+                            ApplyOutcome::CONFLICT,
                         );
                     }
                 }
+            } catch (CloudException $exception) {
+                return $this->databaseCreateFailure(
+                    $action,
+                    'Locked Database Cluster rediscovery failed before mutation: ' . $exception->getMessage(),
+                    $state,
+                    $clusterIds,
+                    $outcomes,
+                    ApplyOutcome::FAILED,
+                    $exception instanceof CloudTransportException || $exception instanceof CloudResponseException,
+                    validation: $exception instanceof CloudValidationException ? $exception : null,
+                );
+            }
+
+            try {
                 $created = $cloud->createDatabaseCluster(new CreateDatabaseClusterRequest(
                     $desired->name,
                     $desired->type->value,
@@ -1050,6 +1114,18 @@ final readonly class CreateOnlyApply
             }
 
             $createdCluster = $created->cluster;
+            if (trim($createdCluster->id) === '') {
+                return $this->databaseCreateFailure(
+                    $action,
+                    'Database Cluster create response did not contain a usable identity; the remote outcome requires inspection and explicit import.',
+                    $state,
+                    $clusterIds,
+                    $outcomes,
+                    ApplyOutcome::POSTCONDITION_FAILED,
+                    true,
+                );
+            }
+
             if ($createdCluster->name !== $desired->name
                 || $createdCluster->type !== $desired->type->value
                 || $createdCluster->region !== $desired->region) {
@@ -1059,6 +1135,7 @@ final readonly class CreateOnlyApply
                     $state,
                     $clusterIds,
                     $outcomes,
+                    ApplyOutcome::CONFLICT,
                     true,
                 );
             }
@@ -1085,18 +1162,24 @@ final readonly class CreateOnlyApply
                     $state,
                     $clusterIds,
                     $outcomes,
+                    ApplyOutcome::STATE_CHECKPOINT_FAILED,
                     true,
                 );
             }
 
             $clusterIds[$desired->name] = $createdCluster->id;
-            $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
+            $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED, ApplyOutcome::CREATED);
             try {
                 $this->databaseReadiness->wait($cloud, $createdCluster);
             } catch (CloudException $exception) {
                 $next = $this->firstDatabaseCreateForCluster($blueprint, $desired->name);
                 if ($next !== null) {
-                    $outcomes[] = new ApplyResourceOutcome($next, ApplyOutcomeOperation::FAILED, $exception->getMessage());
+                    $outcomes[] = new ApplyResourceOutcome(
+                        $next,
+                        ApplyOutcomeOperation::FAILED,
+                        ApplyOutcome::FAILED,
+                        $exception->getMessage(),
+                    );
                 }
                 return [
                     'state' => $state,
@@ -1118,6 +1201,7 @@ final readonly class CreateOnlyApply
                 $state,
                 $clusterIds,
                 $outcomes,
+                ApplyOutcome::CONFLICT,
             );
         }
 
@@ -1130,12 +1214,39 @@ final readonly class CreateOnlyApply
                         $state,
                         $clusterIds,
                         $outcomes,
+                        ApplyOutcome::CONFLICT,
                     );
                 }
             }
+        } catch (CloudException $exception) {
+            return $this->databaseCreateFailure(
+                $action,
+                'Locked logical Database rediscovery failed before mutation: ' . $exception->getMessage(),
+                $state,
+                $clusterIds,
+                $outcomes,
+                ApplyOutcome::FAILED,
+                $exception instanceof CloudTransportException || $exception instanceof CloudResponseException,
+                validation: $exception instanceof CloudValidationException ? $exception : null,
+            );
+        }
+
+        try {
             $created = $cloud->createDatabase($clusterId, new CreateDatabaseRequest($databaseName));
         } catch (CloudException $exception) {
             return $this->databaseCloudFailure($action, $exception, $state, $clusterIds, $outcomes);
+        }
+
+        if (trim($created->id) === '') {
+            return $this->databaseCreateFailure(
+                $action,
+                'Logical Database create response did not contain a usable identity; the remote outcome requires inspection and explicit import.',
+                $state,
+                $clusterIds,
+                $outcomes,
+                ApplyOutcome::POSTCONDITION_FAILED,
+                true,
+            );
         }
 
         if ($created->clusterId !== $clusterId || $created->name !== $databaseName) {
@@ -1145,6 +1256,7 @@ final readonly class CreateOnlyApply
                 $state,
                 $clusterIds,
                 $outcomes,
+                ApplyOutcome::CONFLICT,
                 true,
             );
         }
@@ -1168,11 +1280,12 @@ final readonly class CreateOnlyApply
                 $state,
                 $clusterIds,
                 $outcomes,
+                ApplyOutcome::STATE_CHECKPOINT_FAILED,
                 true,
             );
         }
 
-        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED);
+        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::CREATED, ApplyOutcome::CREATED);
         return ['state' => $state, 'cluster_ids' => $clusterIds, 'outcomes' => $outcomes, 'failure' => null];
     }
 
@@ -1247,7 +1360,8 @@ final readonly class CreateOnlyApply
             $state,
             $clusterIds,
             $outcomes,
-            $exception instanceof CloudTransportException || $exception instanceof CloudResponseException,
+            $this->mutationFailureOutcome($exception),
+            $this->mutationMayHaveChangedRemotely($exception),
             $exception instanceof CloudValidationException ? $exception : null,
         );
     }
@@ -1263,11 +1377,18 @@ final readonly class CreateOnlyApply
         StateDocument $state,
         array $clusterIds,
         array $outcomes,
-        bool $uncertain = false,
+        ApplyOutcome $outcome,
+        bool $partialFailure = false,
         ?CloudValidationException $validation = null,
     ): array {
-        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $message, $validation);
-        $status = $this->confirmedMutationCount($outcomes) === 0 && !$uncertain
+        $outcomes[] = new ApplyResourceOutcome(
+            $action->address,
+            ApplyOutcomeOperation::FAILED,
+            $outcome,
+            $message,
+            $validation,
+        );
+        $status = $this->confirmedMutationCount($outcomes) === 0 && !$partialFailure
             ? ApplyStatus::FAILED
             : ApplyStatus::PARTIAL_FAILURE;
         return [
@@ -1314,11 +1435,13 @@ final readonly class CreateOnlyApply
         array $outcomes,
         PlanAction $action,
         string $message,
+        ApplyOutcome $outcome,
         ?CloudValidationException $validation = null,
     ): ApplyResult {
         $outcomes[] = new ApplyResourceOutcome(
             $action->address,
             ApplyOutcomeOperation::FAILED,
+            $outcome,
             $message,
             $validation,
         );
@@ -1474,6 +1597,7 @@ final readonly class CreateOnlyApply
         array $outcomes,
         array $group,
         string $message,
+        ApplyOutcome $outcome,
         bool $uncertain = false,
         ?CloudValidationException $validation = null,
     ): ApplyResult {
@@ -1483,6 +1607,7 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $item->action->address,
                 $mutation ? ApplyOutcomeOperation::FAILED : ApplyOutcomeOperation::UNCHANGED,
+                $mutation ? $outcome : ApplyOutcome::UNCHANGED,
                 $mutation ? $message : null,
                 $mutation ? $validation : null,
             );
@@ -1504,6 +1629,7 @@ final readonly class CreateOnlyApply
         $outcomes[] = new ApplyResourceOutcome(
             $action->address,
             ApplyOutcomeOperation::FAILED,
+            $this->mutationFailureOutcome($exception),
             $exception->getMessage(),
             $exception instanceof CloudValidationException ? $exception : null,
         );
@@ -1513,6 +1639,36 @@ final readonly class CreateOnlyApply
             : ApplyStatus::PARTIAL_FAILURE;
 
         return new ApplyResult($status, ...$outcomes);
+    }
+
+    private function mutationFailureOutcome(CloudException $exception): ApplyOutcome
+    {
+        if ($exception instanceof CloudResponseException) {
+            return ApplyOutcome::POSTCONDITION_FAILED;
+        }
+        if ($exception instanceof CloudTransportException) {
+            return ApplyOutcome::UNCERTAIN;
+        }
+        if ($exception instanceof CloudApiException
+            && $exception->statusCode !== null
+            && $exception->statusCode >= 400
+            && $exception->statusCode < 500) {
+            return ApplyOutcome::REFUSED;
+        }
+        if ($exception instanceof CloudApiException
+            && ($exception->statusCode === null || $exception->statusCode >= 500)) {
+            return ApplyOutcome::UNCERTAIN;
+        }
+
+        return ApplyOutcome::FAILED;
+    }
+
+    private function mutationMayHaveChangedRemotely(CloudException $exception): bool
+    {
+        $outcome = $this->mutationFailureOutcome($exception);
+
+        return $outcome === ApplyOutcome::UNCERTAIN
+            || $outcome === ApplyOutcome::POSTCONDITION_FAILED;
     }
 
     /** @param list<ApplyResourceOutcome> $outcomes */
@@ -1575,7 +1731,7 @@ final readonly class CreateOnlyApply
         array $outcomes,
     ): array {
         $failure = function (
-            DestructiveOutcome $destructiveOutcome,
+            ApplyOutcome $outcome,
             string $message,
             bool|null $deleted = false,
             bool $confirmed = false,
@@ -1585,9 +1741,9 @@ final readonly class CreateOnlyApply
             $failedOutcomes = [...$outcomes, new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                $outcome,
                 $message,
                 $validation,
-                $destructiveOutcome,
                 $deleted,
                 $confirmed,
                 false,
@@ -1604,42 +1760,42 @@ final readonly class CreateOnlyApply
 
         $managed = $state->find($action->address);
         if ($managed === null || $managed->type !== ResourceType::DATABASE) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 sprintf('Local State ownership for "%s" is missing or invalid.', (string) $action->address));
         }
         if ($action->remoteId === null || $managed->remoteId !== $action->remoteId) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 sprintf('Local State remote identity for "%s" conflicts with the approved plan.', (string) $action->address));
         }
         if ($managed->parent === null || $managed->parent->type !== ResourceType::DATABASE_CLUSTER) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 sprintf('Local State parent for "%s" is invalid.', (string) $action->address));
         }
         $parent = $state->find($managed->parent);
         if ($parent === null || $parent->type !== ResourceType::DATABASE_CLUSTER) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 sprintf('Parent Database Cluster "%s" is not owned in State.', (string) $managed->parent));
         }
         $approvedParent = $this->actionAt($approvedPlan, $managed->parent);
         if ($approvedParent === null
             || $approvedParent->remoteId === null
             || $approvedParent->remoteId !== $parent->remoteId) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 sprintf('Parent Database Cluster identity for "%s" changed after approval.', (string) $action->address));
         }
         if ($action->parent === null || (string) $action->parent !== (string) $managed->parent) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 sprintf('Parent address for "%s" changed after approval.', (string) $action->address));
         }
         foreach ($state->resources() as $resource) {
             if ((string) $resource->address !== (string) $managed->address
                 && $resource->remoteId === $managed->remoteId) {
-                return $failure(DestructiveOutcome::CONFLICT,
+                return $failure(ApplyOutcome::CONFLICT,
                     sprintf('Remote identity for "%s" is owned by multiple addresses.', (string) $action->address));
             }
         }
         if ($this->blueprintHasDatabase($blueprint, $action->address)) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 sprintf('Logical Database "%s" is declared in the locked Blueprint and cannot be deleted.', $action->address->name));
         }
 
@@ -1647,7 +1803,7 @@ final readonly class CreateOnlyApply
             $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
         } catch (CloudException $exception) {
             return $failure(
-                DestructiveOutcome::UNCERTAIN,
+                ApplyOutcome::FAILED,
                 'Locked logical Database replanning failed before mutation: ' . $exception->getMessage(),
             );
         }
@@ -1657,20 +1813,20 @@ final readonly class CreateOnlyApply
             || $freshAction->remoteId !== $managed->remoteId
             || $freshAction->parent === null
             || (string) $freshAction->parent !== (string) $managed->parent) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 'Logical Database deletion assumptions changed during locked replanning; no DELETE was sent.');
         }
         $freshDependencies = $freshAction->databaseDependencies;
         if ($freshDependencies === null || $freshDependencies->readiness() === DatabaseDestructiveReadiness::UNKNOWN) {
-            return $failure(DestructiveOutcome::REFUSED,
+            return $failure(ApplyOutcome::REFUSED,
                 'Logical Database deletion refused: locked dependency discovery is incomplete or unknown.');
         }
         if ($freshDependencies->readiness() === DatabaseDestructiveReadiness::BLOCKED) {
             if (in_array(DatabaseDependencyType::OWNERSHIP_CONFLICT, $freshDependencies->blockingCategories(), true)) {
-                return $failure(DestructiveOutcome::CONFLICT,
+                return $failure(ApplyOutcome::CONFLICT,
                     'Logical Database parent or ownership identity conflicted during locked replanning.');
             }
-            return $failure(DestructiveOutcome::REFUSED, sprintf(
+            return $failure(ApplyOutcome::REFUSED, sprintf(
                 'Logical Database deletion refused: locked dependency discovery found: %s.',
                 implode(', ', array_map(
                     static fn ($category): string => $category->value,
@@ -1680,7 +1836,7 @@ final readonly class CreateOnlyApply
         }
         $freshParent = $this->actionAt($freshPlan, $managed->parent);
         if ($freshParent === null || $freshParent->remoteId !== $parent->remoteId) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 'Parent Database Cluster identity changed during locked replanning; no DELETE was sent.');
         }
 
@@ -1693,31 +1849,31 @@ final readonly class CreateOnlyApply
                 $state,
                 $outcomes,
                 false,
-                DestructiveOutcome::ALREADY_ABSENT,
+                ApplyOutcome::ALREADY_ABSENT,
                 'already absent; local State reconciled',
             );
         } catch (CloudException $exception) {
             return $failure(
-                DestructiveOutcome::UNCERTAIN,
+                ApplyOutcome::FAILED,
                 'Locked exact logical Database rediscovery failed before mutation: ' . $exception->getMessage(),
             );
         }
 
         if ($remote->relationshipClusterId === null) {
-            return $failure(DestructiveOutcome::REFUSED,
+            return $failure(ApplyOutcome::REFUSED,
                 'Logical Database deletion refused: parent Cluster discovery is incomplete.');
         }
         if ($remote->relationshipClusterId !== $parent->remoteId) {
-            return $failure(DestructiveOutcome::CONFLICT,
+            return $failure(ApplyOutcome::CONFLICT,
                 'Logical Database parent Cluster did not match the locked State identity.');
         }
         $dependencies = $this->databaseDependencies($remote, $parent->remoteId);
         if ($dependencies->readiness() === DatabaseDestructiveReadiness::UNKNOWN) {
-            return $failure(DestructiveOutcome::REFUSED,
+            return $failure(ApplyOutcome::REFUSED,
                 'Logical Database deletion refused: attachment discovery is incomplete or contains unknown relationships.');
         }
         if ($dependencies->readiness() === DatabaseDestructiveReadiness::BLOCKED) {
-            return $failure(DestructiveOutcome::REFUSED,
+            return $failure(ApplyOutcome::REFUSED,
                 'Logical Database deletion refused: one or more Environment attachments exist.');
         }
 
@@ -1740,7 +1896,7 @@ final readonly class CreateOnlyApply
                 $state,
                 $outcomes,
                 true,
-                DestructiveOutcome::DELETE_CONFIRMED,
+                ApplyOutcome::DELETE_CONFIRMED,
                 'deleted and confirmed',
             );
         }
@@ -1749,7 +1905,9 @@ final readonly class CreateOnlyApply
                 ? 'Logical Database deletion was not confirmed: exact remote resource remains discoverable.'
                 : 'Logical Database deletion failed: ' . $deleteException->getMessage();
             return $failure(
-                DestructiveOutcome::UNCERTAIN,
+                $deleteException !== null && $this->mutationIsDefinitivelyRefused($deleteException)
+                    ? ApplyOutcome::REFUSED
+                    : ApplyOutcome::POSTCONDITION_FAILED,
                 $message,
                 false,
                 false,
@@ -1758,7 +1916,7 @@ final readonly class CreateOnlyApply
         }
 
         return $failure(
-            DestructiveOutcome::UNCERTAIN,
+            ApplyOutcome::UNCERTAIN,
             'Logical Database deletion outcome is uncertain: exact post-delete rediscovery failed.',
             null,
             false,
@@ -1804,7 +1962,7 @@ final readonly class CreateOnlyApply
         StateDocument $state,
         array $outcomes,
         bool $deleteSent,
-        DestructiveOutcome $destructiveOutcome,
+        ApplyOutcome $outcome,
         string $message,
     ): array {
         try {
@@ -1813,8 +1971,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::STATE_CHECKPOINT_FAILED,
                 'Logical Database is absent remotely, but State checkpoint failed: ' . $exception->getMessage(),
-                destructiveOutcome: DestructiveOutcome::STATE_CHECKPOINT_FAILED,
                 deleted: $deleteSent,
                 confirmed: true,
                 stateCheckpointed: false,
@@ -1829,8 +1987,8 @@ final readonly class CreateOnlyApply
         $outcomes[] = new ApplyResourceOutcome(
             $action->address,
             ApplyOutcomeOperation::DELETED,
+            $outcome,
             $message,
-            destructiveOutcome: $destructiveOutcome,
             deleted: $deleteSent,
             confirmed: true,
             stateCheckpointed: true,
@@ -1850,8 +2008,17 @@ final readonly class CreateOnlyApply
         StateDocument $state,
         array $outcomes,
     ): array {
-        $failure = function (DestructiveOutcome $kind, string $message, bool|null $deleted = false, bool $confirmed = false, ?CloudValidationException $validation = null, bool $uncertain = false) use ($action, $state, $outcomes): array {
-            $failed = [...$outcomes, new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $message, $validation, $kind, $deleted, $confirmed, false)];
+        $failure = function (ApplyOutcome $kind, string $message, bool|null $deleted = false, bool $confirmed = false, ?CloudValidationException $validation = null, bool $uncertain = false) use ($action, $state, $outcomes): array {
+            $failed = [...$outcomes, new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                $kind,
+                $message,
+                $validation,
+                $deleted,
+                $confirmed,
+                false,
+            )];
             return ['state' => $state, 'outcomes' => $failed, 'failure' => new ApplyResult(
                 $this->confirmedMutationCount($failed) > 0 || $uncertain ? ApplyStatus::PARTIAL_FAILURE : ApplyStatus::FAILED,
                 ...$failed,
@@ -1861,16 +2028,16 @@ final readonly class CreateOnlyApply
         $managed = $state->find($action->address);
         if ($managed === null || $managed->type !== ResourceType::DATABASE_CLUSTER
             || $action->remoteId === null || $action->remoteId !== $managed->remoteId) {
-            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster State identity conflicts with the approved deletion.');
+            return $failure(ApplyOutcome::CONFLICT, 'Database Cluster State identity conflicts with the approved deletion.');
         }
         foreach ($state->resources() as $candidate) {
             if ((string) $candidate->address !== (string) $managed->address && $candidate->remoteId === $managed->remoteId) {
-                return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster remote identity is owned by multiple State addresses.');
+                return $failure(ApplyOutcome::CONFLICT, 'Database Cluster remote identity is owned by multiple State addresses.');
             }
         }
         foreach ($blueprint->databaseClusters as $desired) {
             if ($desired->name === $action->address->name) {
-                return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster is still declared in the locked Blueprint; no DELETE was sent.');
+                return $failure(ApplyOutcome::CONFLICT, 'Database Cluster is still declared in the locked Blueprint; no DELETE was sent.');
             }
         }
 
@@ -1878,21 +2045,21 @@ final readonly class CreateOnlyApply
             $cluster = $cloud->databaseCluster($managed->remoteId);
         } catch (CloudResourceNotFoundException) {
             if ($state->childrenOf($managed->address) !== []) {
-                return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster is absent remotely but owned child State remains; parent State was retained.');
+                return $failure(ApplyOutcome::CONFLICT, 'Database Cluster is absent remotely but owned child State remains; parent State was retained.');
             }
-            return $this->checkpointAbsentCluster($action, $transaction, $state, $outcomes, false, DestructiveOutcome::ALREADY_ABSENT, 'already absent; local State reconciled');
+            return $this->checkpointAbsentCluster($action, $transaction, $state, $outcomes, false, ApplyOutcome::ALREADY_ABSENT, 'already absent; local State reconciled');
         } catch (CloudException $exception) {
-            return $failure(DestructiveOutcome::UNCERTAIN, 'Locked exact Database Cluster rediscovery failed before mutation: ' . $exception->getMessage());
+            return $failure(ApplyOutcome::FAILED, 'Locked exact Database Cluster rediscovery failed before mutation: ' . $exception->getMessage());
         }
         if ($cluster->id !== $managed->remoteId) {
-            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster deletion refused: exact Cluster identity conflicts with locked State.');
+            return $failure(ApplyOutcome::CONFLICT, 'Database Cluster deletion refused: exact Cluster identity conflicts with locked State.');
         }
 
         $children = $state->childrenOf($managed->address);
         $derived = array_values(array_filter($children, static fn (StateResource $child): bool => $child->type === ResourceType::DATABASE && $child->isDerived()));
         $ordinary = array_values(array_filter($children, static fn (StateResource $child): bool => !$child->isDerived()));
         if ($ordinary !== [] || count($derived) > 1) {
-            return $failure(DestructiveOutcome::CONFLICT, 'Database Cluster still has owned child State entries after ordinary child execution.');
+            return $failure(ApplyOutcome::CONFLICT, 'Database Cluster still has owned child State entries after ordinary child execution.');
         }
         $listed = [];
         $scopedDatabases = null;
@@ -1912,8 +2079,8 @@ final readonly class CreateOnlyApply
         if (!$this->databaseTopologyQuality->isDestructiveQuality($topology)) {
             return $failure(
                 $topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING
-                    ? DestructiveOutcome::CONFLICT
-                    : DestructiveOutcome::REFUSED,
+                    ? ApplyOutcome::CONFLICT
+                    : ApplyOutcome::REFUSED,
                 $topology->synthesis === DatabaseClusterTopologySynthesis::CONFLICTING
                     ? 'Database Cluster deletion refused: fresh topology evidence conflicts.'
                     : 'Database Cluster deletion refused: fresh topology evidence is incomplete.',
@@ -1928,37 +2095,37 @@ final readonly class CreateOnlyApply
                 || $child->provenance !== StateProvenance::CLUSTER_CREATE_RESPONSE
                 || $child->parent === null || (string) $child->parent !== (string) $managed->address
                 || $approved === null || (string) $approved->address !== (string) $child->address) {
-                return $failure(DestructiveOutcome::CONFLICT, 'Derived Database authorization no longer matches the approved parent lifecycle dependency.');
+                return $failure(ApplyOutcome::CONFLICT, 'Derived Database authorization no longer matches the approved parent lifecycle dependency.');
             }
             $matches = count(array_filter($listedIds, static fn (string $id): bool => $id === $child->remoteId));
             if ($matches === 0) {
                 if ($listed !== []) {
-                    return $failure(DestructiveOutcome::CONFLICT, 'Derived Database is absent but a replacement or unmanaged Cluster child exists; no mutation was sent.');
+                    return $failure(ApplyOutcome::CONFLICT, 'Derived Database is absent but a replacement or unmanaged Cluster child exists; no mutation was sent.');
                 }
                 try {
                     $cloud->databaseWithDestructiveRelationships($managed->remoteId, $child->remoteId);
-                    return $failure(DestructiveOutcome::CONFLICT, 'Derived Database exact discovery conflicts with complete Cluster topology.');
+                    return $failure(ApplyOutcome::CONFLICT, 'Derived Database exact discovery conflicts with complete Cluster topology.');
                 } catch (CloudResourceNotFoundException) {
                     $derivedAction = new PlanAction($child->address, ResourceType::DATABASE, PlanOperation::NO_CHANGE, '', $child->remoteId, $managed->address, $child->classification, $child->provenance, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY);
-                    $checkpoint = $this->checkpointAbsentDatabase($derivedAction, $transaction, $state, $outcomes, false, DestructiveOutcome::ALREADY_ABSENT, 'derived parent dependency already absent; local State reconciled');
+                    $checkpoint = $this->checkpointAbsentDatabase($derivedAction, $transaction, $state, $outcomes, false, ApplyOutcome::ALREADY_ABSENT, 'derived parent dependency already absent; local State reconciled');
                     if ($checkpoint['failure'] !== null) {
                         return $checkpoint;
                     }
                     $state = $checkpoint['state'];
                     $outcomes = $checkpoint['outcomes'];
                 } catch (CloudException $exception) {
-                    return $failure(DestructiveOutcome::UNCERTAIN, 'Derived Database exact absence could not be proven.');
+                    return $failure(ApplyOutcome::FAILED, 'Derived Database exact absence could not be proven.');
                 }
             } elseif ($matches === 1 && count($listed) === 1) {
                 try {
                     $remote = $cloud->databaseWithDestructiveRelationships($managed->remoteId, $child->remoteId);
                 } catch (CloudException $exception) {
-                    return $failure(DestructiveOutcome::UNCERTAIN, 'Derived Database exact destructive rediscovery failed before mutation.');
+                    return $failure(ApplyOutcome::FAILED, 'Derived Database exact destructive rediscovery failed before mutation.');
                 }
                 if ($remote->id !== $child->remoteId || $remote->relationshipClusterId !== $managed->remoteId
                     || !$remote->destructiveRelationshipsComplete || $remote->unknownRelationships !== []
                     || $remote->missingRelationships !== [] || $remote->environmentIds !== []) {
-                    return $failure(DestructiveOutcome::REFUSED, 'Derived Database deletion refused: exact parent or Environment attachment evidence is unsafe.');
+                    return $failure(ApplyOutcome::REFUSED, 'Derived Database deletion refused: exact parent or Environment attachment evidence is unsafe.');
                 }
                 $deleteException = null;
                 try {
@@ -1969,12 +2136,19 @@ final readonly class CreateOnlyApply
                 $verified = $this->databaseDeletionVerification->verifyAbsent($cloud, $managed->remoteId, $child->remoteId);
                 if ($verified !== 'absent') {
                     $refused = $verified === 'present'
-                        && ($deleteException instanceof CloudAuthenticationException || $deleteException instanceof CloudValidationException);
+                        && $deleteException !== null
+                        && $this->mutationIsDefinitivelyRefused($deleteException);
                     return $failure(
-                        $refused ? DestructiveOutcome::REFUSED : DestructiveOutcome::UNCERTAIN,
+                        $refused
+                            ? ApplyOutcome::REFUSED
+                            : ($verified === 'failed'
+                                ? ApplyOutcome::UNCERTAIN
+                                : ApplyOutcome::POSTCONDITION_FAILED),
                         $refused
                             ? 'Derived Database deletion was refused and the exact child remains present.'
-                            : 'Derived Database deletion outcome is uncertain; exact absence was not proven.',
+                            : ($verified === 'failed'
+                                ? 'Derived Database deletion outcome is uncertain; exact absence was not proven.'
+                                : 'Derived Database deletion did not satisfy the required absence postcondition.'),
                         $verified === 'failed' ? null : false,
                         false,
                         $deleteException instanceof CloudValidationException ? $deleteException : null,
@@ -1982,21 +2156,30 @@ final readonly class CreateOnlyApply
                     );
                 }
                 $derivedAction = new PlanAction($child->address, ResourceType::DATABASE, PlanOperation::NO_CHANGE, '', $child->remoteId, $managed->address, $child->classification, $child->provenance, DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY);
-                $checkpoint = $this->checkpointAbsentDatabase($derivedAction, $transaction, $state, $outcomes, true, DestructiveOutcome::DELETE_CONFIRMED, 'derived parent dependency deleted and confirmed');
+                $checkpoint = $this->checkpointAbsentDatabase($derivedAction, $transaction, $state, $outcomes, true, ApplyOutcome::DELETE_CONFIRMED, 'derived parent dependency deleted and confirmed');
                 if ($checkpoint['failure'] !== null) {
                     return $checkpoint;
                 }
                 $state = $checkpoint['state'];
                 $outcomes = $checkpoint['outcomes'];
             } else {
-                return $failure(DestructiveOutcome::CONFLICT, 'Derived Database identity is not the sole exact Cluster child; no DELETE was sent.');
+                return $failure(ApplyOutcome::CONFLICT, 'Derived Database identity is not the sole exact Cluster child; no DELETE was sent.');
             }
         } elseif ($listed !== []) {
-            return $failure(DestructiveOutcome::REFUSED, 'Database Cluster deletion blocked by an unmanaged logical Database child.');
+            return $failure(ApplyOutcome::REFUSED, 'Database Cluster deletion blocked by an unmanaged logical Database child.');
         }
 
-        $postChildFailure = function (DestructiveOutcome $kind, string $message, bool|null $deleted = false, bool $confirmed = false, ?CloudValidationException $validation = null, bool $uncertain = false) use ($action, $state, $outcomes): array {
-            $failed = [...$outcomes, new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, $message, $validation, $kind, $deleted, $confirmed, false)];
+        $postChildFailure = function (ApplyOutcome $kind, string $message, bool|null $deleted = false, bool $confirmed = false, ?CloudValidationException $validation = null, bool $uncertain = false) use ($action, $state, $outcomes): array {
+            $failed = [...$outcomes, new ApplyResourceOutcome(
+                $action->address,
+                ApplyOutcomeOperation::FAILED,
+                $kind,
+                $message,
+                $validation,
+                $deleted,
+                $confirmed,
+                false,
+            )];
             return ['state' => $state, 'outcomes' => $failed, 'failure' => new ApplyResult(
                 $this->confirmedMutationCount($failed) > 0 || $uncertain ? ApplyStatus::PARTIAL_FAILURE : ApplyStatus::FAILED,
                 ...$failed,
@@ -2007,7 +2190,7 @@ final readonly class CreateOnlyApply
             $cluster = $this->databaseClusterDeletionReadiness->wait($cloud, $cloud->databaseCluster($managed->remoteId));
             $freshPlan = $this->planner()->create($blueprint, $cloud, $state);
         } catch (CloudException $exception) {
-            return $postChildFailure(DestructiveOutcome::REFUSED, 'Post-child Database Cluster readiness could not be proven: ' . $exception->getMessage());
+            return $postChildFailure(ApplyOutcome::REFUSED, 'Post-child Database Cluster readiness could not be proven: ' . $exception->getMessage());
         }
         $fresh = $this->actionAt($freshPlan, $action->address);
         $dependencies = $fresh?->databaseDependencies;
@@ -2019,7 +2202,7 @@ final readonly class CreateOnlyApply
             || $dependencies->snapshotCount !== 0 || $dependencies->retainedRecovery
             || !$dependencies->snapshotDiscoveryComplete || !$dependencies->recoveryEvidenceComplete
             || $dependencies->lifecycleReadiness !== DatabaseClusterLifecycleReadiness::ELIGIBLE) {
-            return $postChildFailure(DestructiveOutcome::REFUSED, 'Post-child Database Cluster destructive rediscovery is not completely safe; no parent DELETE was sent.');
+            return $postChildFailure(ApplyOutcome::REFUSED, 'Post-child Database Cluster destructive rediscovery is not completely safe; no parent DELETE was sent.');
         }
 
         $deleteException = null;
@@ -2030,26 +2213,37 @@ final readonly class CreateOnlyApply
         }
         $verified = $this->databaseClusterDeletionVerification->verifyAbsent($cloud, $managed->remoteId);
         if ($verified === 'absent') {
-            return $this->checkpointAbsentCluster($action, $transaction, $state, $outcomes, $deleteException === null, $deleteException instanceof CloudResourceNotFoundException ? DestructiveOutcome::ALREADY_ABSENT : DestructiveOutcome::DELETE_CONFIRMED, $deleteException instanceof CloudResourceNotFoundException ? 'already absent and confirmed' : 'deleted and confirmed');
+            return $this->checkpointAbsentCluster($action, $transaction, $state, $outcomes, $deleteException === null, $deleteException instanceof CloudResourceNotFoundException ? ApplyOutcome::ALREADY_ABSENT : ApplyOutcome::DELETE_CONFIRMED, $deleteException instanceof CloudResourceNotFoundException ? 'already absent and confirmed' : 'deleted and confirmed');
         }
         if ($verified === 'present'
-            && ($deleteException instanceof CloudAuthenticationException || $deleteException instanceof CloudValidationException)) {
+            && $deleteException !== null
+            && $this->mutationIsDefinitivelyRefused($deleteException)) {
             return $postChildFailure(
-                DestructiveOutcome::REFUSED,
+                ApplyOutcome::REFUSED,
                 'Database Cluster deletion was refused and the exact Cluster remains present.',
                 false,
                 false,
                 $deleteException instanceof CloudValidationException ? $deleteException : null,
             );
         }
-        return $postChildFailure(DestructiveOutcome::UNCERTAIN, 'Database Cluster deletion outcome is uncertain; exact absence was not proven.', $verified === 'unknown' ? null : false, false, $deleteException instanceof CloudValidationException ? $deleteException : null, true);
+        if ($verified === 'present') {
+            return $postChildFailure(
+                ApplyOutcome::POSTCONDITION_FAILED,
+                'Database Cluster deletion did not satisfy the required absence postcondition.',
+                false,
+                false,
+                $deleteException instanceof CloudValidationException ? $deleteException : null,
+                true,
+            );
+        }
+        return $postChildFailure(ApplyOutcome::UNCERTAIN, 'Database Cluster deletion outcome is uncertain; exact absence was not proven.', null, false, $deleteException instanceof CloudValidationException ? $deleteException : null, true);
     }
 
     /**
      * @param list<ApplyResourceOutcome> $outcomes
      * @return array{state: StateDocument, outcomes: list<ApplyResourceOutcome>, failure: ApplyResult|null}
      */
-    private function checkpointAbsentCluster(PlanAction $action, StateTransaction $transaction, StateDocument $state, array $outcomes, bool $deleteSent, DestructiveOutcome $kind, string $message): array
+    private function checkpointAbsentCluster(PlanAction $action, StateTransaction $transaction, StateDocument $state, array $outcomes, bool $deleteSent, ApplyOutcome $kind, string $message): array
     {
         if ($state->childrenOf($action->address) !== []) {
             throw new ApplyRefusedException('Database Cluster State cannot be removed while owned child State remains.');
@@ -2057,10 +2251,10 @@ final readonly class CreateOnlyApply
         try {
             $state = $transaction->save($state->withoutResource($action->address));
         } catch (StateStorageException $exception) {
-            $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, 'Database Cluster is absent remotely, but State checkpoint failed: ' . $exception->getMessage(), destructiveOutcome: DestructiveOutcome::STATE_CHECKPOINT_FAILED, deleted: $deleteSent, confirmed: true, stateCheckpointed: false);
+            $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::FAILED, ApplyOutcome::STATE_CHECKPOINT_FAILED, 'Database Cluster is absent remotely, but State checkpoint failed: ' . $exception->getMessage(), deleted: $deleteSent, confirmed: true, stateCheckpointed: false);
             return ['state' => $state, 'outcomes' => $outcomes, 'failure' => new ApplyResult(ApplyStatus::PARTIAL_FAILURE, ...$outcomes)];
         }
-        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::DELETED, $message, destructiveOutcome: $kind, deleted: $deleteSent, confirmed: true, stateCheckpointed: true);
+        $outcomes[] = new ApplyResourceOutcome($action->address, ApplyOutcomeOperation::DELETED, $kind, $message, deleted: $deleteSent, confirmed: true, stateCheckpointed: true);
         return ['state' => $state, 'outcomes' => $outcomes, 'failure' => null];
     }
 
@@ -2100,8 +2294,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 sprintf('Local state ownership for "%s" no longer exists.', (string) $action->address),
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2117,8 +2311,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 sprintf('Local state resource type for "%s" is invalid.', (string) $action->address),
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2134,8 +2328,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 sprintf('Local state remote identity for "%s" conflicts with approved plan.', (string) $action->address),
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2151,8 +2345,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 sprintf('Local state parent for "%s" is invalid.', (string) $action->address),
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2169,8 +2363,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 sprintf('Parent Application "%s" is not owned in state.', (string) $managed->parent),
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2186,8 +2380,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 sprintf('Parent address for "%s" changed after approval.', (string) $action->address),
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2204,8 +2398,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 'Blueprint Application identity changed after approval.',
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2221,8 +2415,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 sprintf('Environment "%s" is declared in the blueprint and cannot be deleted.', $action->address->name),
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2238,8 +2432,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 sprintf('State resource "%s" cannot be deleted while it has owned children.', (string) $action->address),
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2256,8 +2450,8 @@ final readonly class CreateOnlyApply
                 $outcomes[] = new ApplyResourceOutcome(
                     $action->address,
                     ApplyOutcomeOperation::FAILED,
+                    ApplyOutcome::CONFLICT,
                     sprintf('Remote identity for "%s" is owned by multiple addresses.', (string) $action->address),
-                    destructiveOutcome: DestructiveOutcome::CONFLICT,
                     deleted: false,
                     confirmed: false,
                     stateCheckpointed: false,
@@ -2276,8 +2470,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::FAILED,
                 'Locked Cloud rediscovery failed before mutation: ' . $exception->getMessage(),
-                destructiveOutcome: DestructiveOutcome::UNCERTAIN,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2297,8 +2491,8 @@ final readonly class CreateOnlyApply
                 $outcomes[] = new ApplyResourceOutcome(
                     $action->address,
                     ApplyOutcomeOperation::FAILED,
+                    ApplyOutcome::STATE_CHECKPOINT_FAILED,
                     'Environment was already absent remotely, but State checkpoint failed: ' . $exception->getMessage(),
-                    destructiveOutcome: DestructiveOutcome::STATE_CHECKPOINT_FAILED,
                     deleted: false,
                     confirmed: true,
                     stateCheckpointed: false,
@@ -2313,8 +2507,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::DELETED,
+                ApplyOutcome::ALREADY_ABSENT,
                 'already absent; local State reconciled',
-                destructiveOutcome: DestructiveOutcome::ALREADY_ABSENT,
                 deleted: false,
                 confirmed: true,
                 stateCheckpointed: true,
@@ -2330,8 +2524,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::CONFLICT,
                 'Environment parent Application did not match the locked State identity.',
-                destructiveOutcome: DestructiveOutcome::CONFLICT,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2349,6 +2543,7 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::REFUSED,
                 sprintf(
                     'Environment deletion refused: dependency discovery found: %s.',
                     implode(', ', array_map(
@@ -2356,7 +2551,6 @@ final readonly class CreateOnlyApply
                         $dependencies->blockingCategories(),
                     )),
                 ),
-                destructiveOutcome: DestructiveOutcome::REFUSED,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2372,8 +2566,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                ApplyOutcome::REFUSED,
                 'Environment deletion refused: dependency discovery is incomplete or contains unknown relationships.',
-                destructiveOutcome: DestructiveOutcome::REFUSED,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2401,8 +2595,8 @@ final readonly class CreateOnlyApply
                 $outcomes[] = new ApplyResourceOutcome(
                     $action->address,
                     ApplyOutcomeOperation::FAILED,
+                    ApplyOutcome::STATE_CHECKPOINT_FAILED,
                     'Remote Environment was deleted but local State checkpoint failed: ' . $exception->getMessage(),
-                    destructiveOutcome: DestructiveOutcome::STATE_CHECKPOINT_FAILED,
                     deleted: true,
                     confirmed: true,
                     stateCheckpointed: false,
@@ -2417,8 +2611,8 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::DELETED,
+                ApplyOutcome::DELETE_CONFIRMED,
                 'deleted and confirmed',
-                destructiveOutcome: DestructiveOutcome::DELETE_CONFIRMED,
                 deleted: true,
                 confirmed: true,
                 stateCheckpointed: true,
@@ -2437,9 +2631,11 @@ final readonly class CreateOnlyApply
             $outcomes[] = new ApplyResourceOutcome(
                 $action->address,
                 ApplyOutcomeOperation::FAILED,
+                $deleteException !== null && $this->mutationIsDefinitivelyRefused($deleteException)
+                    ? ApplyOutcome::REFUSED
+                    : ApplyOutcome::POSTCONDITION_FAILED,
                 $message,
                 $deleteException instanceof CloudValidationException ? $deleteException : null,
-                destructiveOutcome: DestructiveOutcome::UNCERTAIN,
                 deleted: false,
                 confirmed: false,
                 stateCheckpointed: false,
@@ -2454,8 +2650,8 @@ final readonly class CreateOnlyApply
         $outcomes[] = new ApplyResourceOutcome(
             $action->address,
             ApplyOutcomeOperation::FAILED,
+            ApplyOutcome::UNCERTAIN,
             'Environment deletion outcome is uncertain: post-delete rediscovery failed.',
-            destructiveOutcome: DestructiveOutcome::UNCERTAIN,
             deleted: null,
             confirmed: false,
             stateCheckpointed: false,

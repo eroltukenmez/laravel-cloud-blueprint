@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Tests\Unit\Apply;
 
+use LaravelCloudBlueprint\Apply\ApplyOutcome;
 use LaravelCloudBlueprint\Apply\ApplyOutcomeOperation;
 use LaravelCloudBlueprint\Apply\ApplyResourceOutcome;
 use LaravelCloudBlueprint\Apply\ApplyStatus;
@@ -72,6 +73,11 @@ final class VariableApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(3, $result->createdCount());
+        foreach ($result as $outcome) {
+            if ($outcome->address->type === ResourceType::VARIABLE) {
+                self::assertSame(ApplyOutcome::CREATED, $outcome->outcome);
+            }
+        }
         self::assertCount(2, $cloud->variableRequests);
         self::assertSame(['APP_ENV' => 'production-runtime', 'APP_KEY' => 'resolved-secret'], $cloud->requestValues('env-production'));
         self::assertSame(['APP_ENV' => 'staging-runtime'], $cloud->requestValues('env-staging'));
@@ -129,6 +135,7 @@ final class VariableApplyTest extends TestCase
         self::assertSame([], $cloud->variableRequests);
         self::assertSame(['lock', 'release'], $events->values);
         $outcomes = iterator_to_array($result, false);
+        self::assertSame(ApplyOutcome::FAILED, $outcomes[2]->outcome);
         self::assertStringNotContainsString('LOCAL_APP_KEY', $outcomes[2]->message ?? '');
     }
 
@@ -149,6 +156,7 @@ final class VariableApplyTest extends TestCase
 
         self::assertSame(0, $result->createdCount());
         self::assertSame(3, $result->unchangedCount());
+        self::assertSame(ApplyOutcome::UNCHANGED, iterator_to_array($result, false)[2]->outcome);
         self::assertSame([], $cloud->variableRequests);
     }
 
@@ -172,6 +180,7 @@ final class VariableApplyTest extends TestCase
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(1, $result->updatedCount());
         self::assertSame(0, $result->createdCount());
+        self::assertSame(ApplyOutcome::UPDATED, iterator_to_array($result, false)[2]->outcome);
         self::assertSame(EnvironmentVariableMutationMethod::SET, $cloud->variableRequests['env-production']->method);
         self::assertSame(['APP_ENV' => 'apply-time-value'], $cloud->requestValues('env-production'));
         self::assertSame(9, $state->state->serial);
@@ -307,6 +316,7 @@ final class VariableApplyTest extends TestCase
         $result = self::apply()->execute($blueprint, $plan, $cloud, new VariableApplyState($events, self::managedState()));
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::REFUSED, iterator_to_array($result, false)[1]->outcome);
         self::assertSame(1, $result->updatedCount());
         self::assertStringNotContainsString('rejected-value', serialize($result));
     }
@@ -415,6 +425,7 @@ final class VariableApplyTest extends TestCase
         $result = self::apply()->execute($blueprint, $plan, $cloud, $state);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::REFUSED, iterator_to_array($result, false)[3]->outcome);
         self::assertNotNull($state->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
         self::assertSame(1, $state->state->serial);
         self::assertStringNotContainsString('secret-value', serialize($result));
@@ -437,6 +448,7 @@ final class VariableApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertCount(1, $cloud->variableRequests);
+        self::assertSame(ApplyOutcome::UNCERTAIN, iterator_to_array($result, false)[2]->outcome);
         self::assertStringNotContainsString('transport-secret', serialize($result));
     }
 

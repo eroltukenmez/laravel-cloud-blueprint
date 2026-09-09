@@ -118,7 +118,7 @@ final class ApplyCommand extends Command
 
         if (!$plan->hasActionableChanges()) {
             if ($jsonOutput) {
-                return $this->json(['status' => 'success', 'summary' => ['created' => 0, 'updated' => 0, 'unchanged' => count($plan)], 'resources' => []], $output);
+                return $this->json(['status' => 'success', 'summary' => ['created' => 0, 'updated' => 0, 'unchanged' => count($plan), 'deleted' => 0, 'failed' => 0], 'resources' => []], $output);
             }
             $output->writeln('No changes.');
             $output->writeln('');
@@ -238,8 +238,10 @@ final class ApplyCommand extends Command
     {
         foreach ($result as $outcome) {
             $output->writeln(sprintf('%s: %s', (string) $outcome->address, $outcome->operation->value));
-            if ($outcome->destructiveOutcome !== null) {
-                $output->writeln('  outcome: ' . $outcome->destructiveOutcome->value);
+            if ($outcome->deleted !== null
+                || $outcome->confirmed !== null
+                || $outcome->stateCheckpointed !== null) {
+                $output->writeln('  outcome: ' . $outcome->outcome->value);
             }
             if ($outcome->message !== null) {
                 $output->writeln('  ' . $outcome->message);
@@ -273,8 +275,9 @@ final class ApplyCommand extends Command
             'summary' => [
                 'created' => $result->createdCount(),
                 'updated' => $result->updatedCount(),
-                ...($result->hasDestructiveOutcomes() ? ['deleted' => $result->deletedCount()] : []),
                 'unchanged' => $result->unchangedCount(),
+                'deleted' => $result->deletedCount(),
+                'failed' => $result->failedCount(),
             ],
             'resources' => array_map($this->outcomeJson(...), iterator_to_array($result, false)),
         ], $output);
@@ -286,6 +289,7 @@ final class ApplyCommand extends Command
         $base = [
             'resource' => (string) $outcome->address,
             'operation' => $outcome->operation->value,
+            'outcome' => $outcome->outcome->value,
             ...($outcome->message === null ? [] : ['message' => $outcome->message]),
             ...($outcome->validation === null ? [] : [
                 'validation' => [
@@ -295,8 +299,9 @@ final class ApplyCommand extends Command
             ]),
         ];
 
-        if ($outcome->destructiveOutcome !== null) {
-            $base['outcome'] = $outcome->destructiveOutcome->value;
+        if ($outcome->deleted !== null
+            || $outcome->confirmed !== null
+            || $outcome->stateCheckpointed !== null) {
             $base['deleted'] = $outcome->deleted;
             $base['confirmed'] = $outcome->confirmed;
             $base['state_checkpointed'] = $outcome->stateCheckpointed;

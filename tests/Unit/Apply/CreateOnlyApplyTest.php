@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Tests\Unit\Apply;
 
+use LaravelCloudBlueprint\Apply\ApplyOutcome;
 use LaravelCloudBlueprint\Apply\ApplyStatus;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
@@ -54,6 +55,9 @@ final class CreateOnlyApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(3, $result->createdCount());
+        foreach ($result as $outcome) {
+            self::assertSame(ApplyOutcome::CREATED, $outcome->outcome);
+        }
         self::assertSame([
             'lock', 'create:application', 'save:application.my-api',
             'create:environment.production', 'save:environment.production',
@@ -80,6 +84,9 @@ final class CreateOnlyApplyTest extends TestCase
 
         self::assertSame(1, $result->createdCount());
         self::assertSame(1, $result->unchangedCount());
+        $outcomes = iterator_to_array($result);
+        self::assertSame(ApplyOutcome::UNCHANGED, $outcomes[0]->outcome);
+        self::assertSame(ApplyOutcome::CREATED, $outcomes[1]->outcome);
         self::assertSame(['lock', 'create:environment.production', 'save:environment.production', 'release'], $events->values);
         self::assertSame('app-existing', $cloud->environmentApplicationIds[0]);
     }
@@ -94,6 +101,7 @@ final class CreateOnlyApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(1, $result->unchangedCount());
+        self::assertSame(ApplyOutcome::UNCHANGED, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $states->state->resources());
         self::assertSame(['lock', 'release'], $events->values);
     }
@@ -374,6 +382,7 @@ final class CreateOnlyApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
+        self::assertSame(ApplyOutcome::REFUSED, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $states->state->resources());
         self::assertSame(['lock', 'create:application', 'release'], $events->values);
     }
@@ -386,6 +395,7 @@ final class CreateOnlyApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::createPlan(), new ApplyCloudClient($events), $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::STATE_CHECKPOINT_FAILED, iterator_to_array($result)[0]->outcome);
         self::assertSame(['lock', 'create:application', 'save:application.my-api', 'release'], $events->values);
     }
 
@@ -401,6 +411,7 @@ final class CreateOnlyApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::CONFLICT, iterator_to_array($result)[0]->outcome);
         self::assertSame(0, $states->state->serial);
         self::assertSame([], $states->state->resources());
         self::assertSame(['lock', 'create:application', 'release'], $events->values);
@@ -420,7 +431,7 @@ final class CreateOnlyApplyTest extends TestCase
             new CloudApplication('', 'my-api', null, 'eu-central-1', 'acme/my-api'),
         ];
 
-        foreach ($cases as $response) {
+        foreach ($cases as $index => $response) {
             $events = new ApplyEvents();
             $states = new ApplyStateStore($events);
 
@@ -432,13 +443,17 @@ final class CreateOnlyApplyTest extends TestCase
             );
 
             self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+            self::assertSame(
+                $index === 3 ? ApplyOutcome::POSTCONDITION_FAILED : ApplyOutcome::CONFLICT,
+                iterator_to_array($result)[0]->outcome,
+            );
             self::assertSame(0, $states->state->serial);
             self::assertSame([], $states->state->resources());
             self::assertSame(['lock', 'create:application', 'release'], $events->values);
         }
     }
 
-    public function testMalformedApplicationCreateResponseIsAnUncertainUncheckpointedFailure(): void
+    public function testMalformedApplicationCreateResponseIsAnUncheckpointedPostconditionFailure(): void
     {
         $events = new ApplyEvents();
         $states = new ApplyStateStore($events);
@@ -451,6 +466,7 @@ final class CreateOnlyApplyTest extends TestCase
         );
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, iterator_to_array($result)[0]->outcome);
         self::assertSame(0, $states->state->serial);
         self::assertSame([], $states->state->resources());
         self::assertSame(['lock', 'create:application', 'release'], $events->values);
@@ -469,6 +485,7 @@ final class CreateOnlyApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::REFUSED, iterator_to_array($result)[1]->outcome);
         self::assertNotNull($states->state->find(self::address(ResourceType::APPLICATION, 'my-api')));
         self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
     }
@@ -485,6 +502,7 @@ final class CreateOnlyApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::CONFLICT, iterator_to_array($result)[1]->outcome);
         self::assertSame(1, $states->state->serial);
         self::assertNotNull($states->state->find(self::address(ResourceType::APPLICATION, 'my-api')));
         self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
@@ -523,6 +541,7 @@ final class CreateOnlyApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), $plan, $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::CONFLICT, iterator_to_array($result)[1]->outcome);
         self::assertSame(4, $states->state->serial);
         self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
         self::assertSame(['lock', 'create:environment.production', 'release'], $events->values);
@@ -547,6 +566,7 @@ final class CreateOnlyApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), $plan, $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, iterator_to_array($result)[1]->outcome);
         self::assertSame(4, $states->state->serial);
         self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
         self::assertSame(['lock', 'create:environment.production', 'release'], $events->values);
@@ -561,6 +581,7 @@ final class CreateOnlyApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::createPlan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::REFUSED, iterator_to_array($result)[2]->outcome);
         self::assertNotNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'production')));
         self::assertNull($states->state->find(self::address(ResourceType::ENVIRONMENT, 'staging')));
     }
