@@ -148,6 +148,42 @@ final class DatabaseBlueprintTest extends TestCase
         self::assertValidationError(self::withCluster($cluster), 'database_clusters.primary.databases', ValidationErrorCode::EMPTY_VALUE);
     }
 
+    /** @return iterable<string, array{string}> */
+    public static function invalidDatabaseLogicalKeys(): iterable
+    {
+        yield 'Database Cluster dot' => ['primary.cluster'];
+        yield 'Database Cluster control' => ["primary\ncluster"];
+    }
+
+    #[DataProvider('invalidDatabaseLogicalKeys')]
+    public function testDatabaseClusterLogicalKeysRejectDotsAndAsciiControlCharacters(string $name): void
+    {
+        $data = self::blueprintData();
+        $data['database_clusters'] = [$name => self::mysqlCluster()];
+
+        self::assertValidationError($data, 'database_clusters.' . str_replace("\n", '\\x0A', $name), ValidationErrorCode::INVALID_LOGICAL_IDENTIFIER);
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function invalidLogicalDatabaseKeys(): iterable
+    {
+        yield 'dot' => ['application.database'];
+        yield 'DEL' => ["application\x7Fdatabase"];
+    }
+
+    #[DataProvider('invalidLogicalDatabaseKeys')]
+    public function testLogicalDatabaseKeysRejectDotsAndAsciiControlCharacters(string $name): void
+    {
+        $cluster = self::mysqlCluster();
+        $cluster['databases'] = [$name => []];
+
+        self::assertValidationError(
+            self::withCluster($cluster),
+            'database_clusters.primary.databases.' . str_replace("\x7F", '\\x7F', $name),
+            ValidationErrorCode::INVALID_LOGICAL_IDENTIFIER,
+        );
+    }
+
     public function testDerivedDefaultLogicalDatabaseNameIsReserved(): void
     {
         $cluster = self::mysqlCluster();

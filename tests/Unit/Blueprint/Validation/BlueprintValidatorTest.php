@@ -69,6 +69,7 @@ final class BlueprintValidatorTest extends TestCase
         yield 'whitespace environment reference' => [self::data(variable: ['from_env' => " \t "]), 'environments.production.variables.APP_ENV.from_env', ValidationErrorCode::EMPTY_VALUE];
         yield 'non-boolean sensitive' => [self::data(variable: ['value' => 'production', 'sensitive' => 'yes']), 'environments.production.variables.APP_ENV.sensitive', ValidationErrorCode::INVALID_TYPE];
         yield 'unknown variable property' => [self::data(variable: ['value' => 'production', 'unexpected' => true]), 'environments.production.variables.APP_ENV.unexpected', ValidationErrorCode::UNKNOWN_PROPERTY];
+        yield 'application control character' => [self::data(applicationName: "example\napi"), 'application.name', ValidationErrorCode::INVALID_LOGICAL_IDENTIFIER];
     }
 
     /** @param array<string, mixed> $data */
@@ -85,6 +86,67 @@ final class BlueprintValidatorTest extends TestCase
     public function testVariablesMayBeOmitted(): void
     {
         self::assertTrue((new BlueprintValidator())->validate(self::data(omitVariables: true))->isValid());
+    }
+
+    public function testApplicationNamesMayContainDotsButNotAsciiControlCharacters(): void
+    {
+        self::assertTrue((new BlueprintValidator())->validate(self::data(applicationName: 'example.api'))->isValid());
+    }
+
+    /** @return iterable<string, array{string, string, string}> */
+    public static function invalidCompositeLogicalKeyProvider(): iterable
+    {
+        yield 'environment dot' => ['environment', 'foo.bar', 'environments.foo.bar'];
+        yield 'environment control' => ['environment', "foo\nbar", 'environments.foo\\x0Abar'];
+        yield 'environment DEL' => ['environment', "foo\x7Fbar", 'environments.foo\\x7Fbar'];
+        yield 'variable dot' => ['variable', 'APP.NAME', 'environments.production.variables.APP.NAME'];
+        yield 'variable control' => ['variable', "APP\nNAME", 'environments.production.variables.APP\\x0ANAME'];
+        yield 'variable DEL' => ['variable', "APP\x7FNAME", 'environments.production.variables.APP\\x7FNAME'];
+    }
+
+    #[DataProvider('invalidCompositeLogicalKeyProvider')]
+    public function testCompositeLogicalKeysRejectDotsAndAsciiControlCharacters(string $kind, string $name, string $path): void
+    {
+        $data = self::data();
+        if ($kind === 'environment') {
+            $data['environments'] = [$name => ['branch' => 'main']];
+        } else {
+            $environments = $data['environments'];
+            self::assertIsArray($environments);
+            $production = $environments['production'];
+            self::assertIsArray($production);
+            $production['variables'] = [$name => ['value' => 'production']];
+            $environments['production'] = $production;
+            $data['environments'] = $environments;
+        }
+
+        $errors = iterator_to_array((new BlueprintValidator())->validate($data), false);
+
+        self::assertCount(1, $errors);
+        self::assertSame($path, $errors[0]->path);
+        self::assertSame(ValidationErrorCode::INVALID_LOGICAL_IDENTIFIER, $errors[0]->code);
+        self::assertStringNotContainsString("\n", $errors[0]->message);
+    }
+
+    public function testSafeUnicodeAndCaseSensitiveCompositeLogicalKeysRemainValid(): void
+    {
+        $data = self::data();
+        $data['environments'] = [
+            'ProdÜction' => ['branch' => 'main', 'variables' => ['APP_ÉNV' => ['value' => 'one']]],
+            'production' => ['branch' => 'main', 'variables' => ['APP_ENV' => ['value' => 'two']]],
+        ];
+
+        self::assertTrue((new BlueprintValidator())->validate($data)->isValid());
+    }
+
+    public function testVariableValuesAndEnvironmentReferencesRemainOpaque(): void
+    {
+        self::assertTrue((new BlueprintValidator())->validate(self::data(
+            variable: ['value' => "literal.with\ncontrol\x7F", 'sensitive' => true],
+        ))->isValid());
+        self::assertTrue((new BlueprintValidator())->validate(self::data(
+            variable: ['from_env' => 'APP.CONFIG'],
+        ))->isValid());
     }
 
     public function testEnvironmentCannotReferenceAnOmittedLogicalDatabase(): void

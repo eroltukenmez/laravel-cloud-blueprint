@@ -157,6 +157,40 @@ final class LocalFileStateStoreTest extends TestCase
         self::assertSame($v1, file_get_contents($this->path));
     }
 
+    public function testVersionOneRetainsHistoricalDottedAddressSuffixes(): void
+    {
+        $v1 = '{"version":1,"serial":7,"organization":"acme","resources":{'
+            . '"application.api":{"type":"application","remote_id":"app_123"},'
+            . '"environment.foo.bar":{"type":"environment","remote_id":"env_456",'
+            . '"parent":"application.api"}}}';
+        $this->writeRaw($v1);
+
+        $loaded = (new LocalFileStateStore($this->path))->load();
+
+        self::assertSame(
+            'env_456',
+            $loaded->get(ResourceAddress::fromString('environment.foo.bar'))->remoteId,
+        );
+        self::assertSame($v1, file_get_contents($this->path));
+    }
+
+    public function testVersionTwoRetainsHistoricalDottedAddressSuffixes(): void
+    {
+        $v2 = '{"version":2,"serial":7,"organization":"acme","resources":{'
+            . '"application.api":{"type":"application","remote_id":"app_123","classification":"managed"},'
+            . '"environment.foo.bar":{"type":"environment","remote_id":"env_456",'
+            . '"parent":"application.api","classification":"managed"}}}';
+        $this->writeRaw($v2);
+
+        $loaded = (new LocalFileStateStore($this->path))->load();
+
+        self::assertSame(
+            'env_456',
+            $loaded->get(ResourceAddress::fromString('environment.foo.bar'))->remoteId,
+        );
+        self::assertSame($v2, file_get_contents($this->path));
+    }
+
     public function testDerivedResourceRoundTripsWithTypedProvenanceAndParentGraph(): void
     {
         $clusterAddress = new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary');

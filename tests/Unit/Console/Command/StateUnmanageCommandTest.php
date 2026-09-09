@@ -114,6 +114,23 @@ final class StateUnmanageCommandTest extends TestCase
         self::assertSame($before, file_get_contents($this->path));
     }
 
+    public function testHistoricalDottedStateAddressCanBeUnmanaged(): void
+    {
+        mkdir(dirname($this->path), 0777, true);
+        file_put_contents($this->path, '{"version":1,"serial":0,"organization":"acme","resources":{'
+            . '"application.api":{"type":"application","remote_id":"app-id"},'
+            . '"environment.foo.bar":{"type":"environment","remote_id":"environment-id",'
+            . '"parent":"application.api"}}}');
+
+        $tester = $this->tester();
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute([
+            'address' => 'environment.foo.bar',
+            '--auto-approve' => true,
+        ]));
+        self::assertNull($this->states->load()->find(ResourceAddress::fromString('environment.foo.bar')));
+    }
+
     #[DataProvider('invalidAddressProvider')]
     public function testMalformedAndNonStateAddressesAreErrorsWithoutWrites(string $address, string $message): void
     {

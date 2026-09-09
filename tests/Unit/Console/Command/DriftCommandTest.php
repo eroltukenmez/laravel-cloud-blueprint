@@ -43,6 +43,14 @@ use Symfony\Component\Console\Tester\CommandTester;
 
 final class DriftCommandTest extends TestCase
 {
+    public function testAddressCollisionBlueprintIsRejectedBeforeDriftDiscovery(): void
+    {
+        $tester = self::tester(self::addressCollisionBlueprint(), new FailingDriftCommandCloudClient());
+
+        self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $tester->execute(['--json' => true]));
+        self::assertSame('validation_failed', self::decoded($tester)['status']);
+    }
+
     public function testHumanReportWithDifferencesSucceedsWithoutCloudOrStateMutation(): void
     {
         $cloud = new DriftCommandCloudClient();
@@ -279,6 +287,31 @@ application:
     provider: github
     repository: acme/api
 environments: {}
+YAML;
+    }
+
+    private static function addressCollisionBlueprint(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: API
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/api
+environments:
+  foo.bar:
+    branch: main
+    variables:
+      baz:
+        value: one
+  foo:
+    branch: main
+    variables:
+      bar.baz:
+        value: two
 YAML;
     }
 

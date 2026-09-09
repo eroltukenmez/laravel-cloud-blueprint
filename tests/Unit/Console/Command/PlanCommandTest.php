@@ -50,6 +50,14 @@ use LogicException;
 
 final class PlanCommandTest extends TestCase
 {
+    public function testAddressCollisionBlueprintIsRejectedBeforePlanning(): void
+    {
+        $tester = $this->tester(self::addressCollisionBlueprint(), null);
+
+        self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $tester->execute([]));
+        self::assertStringContainsString('Variable logical key "bar.baz" must not contain dots.', $tester->getDisplay());
+    }
+
     public function testItRendersATextPlanWithoutExposingTheToken(): void
     {
         $tester = $this->tester(self::validBlueprint(applicationName: 'new-api'));
@@ -648,6 +656,31 @@ application:
 environments:
   production:
     branch: main
+YAML;
+    }
+
+    private static function addressCollisionBlueprint(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: API
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/api
+environments:
+  foo.bar:
+    branch: main
+    variables:
+      baz:
+        value: one
+  foo:
+    branch: main
+    variables:
+      bar.baz:
+        value: two
 YAML;
     }
 

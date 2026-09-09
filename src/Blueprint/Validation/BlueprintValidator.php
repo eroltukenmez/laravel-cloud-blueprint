@@ -56,7 +56,7 @@ final readonly class BlueprintValidator
         }
 
         $this->unknownProperties($application, ['name', 'region', 'source'], 'application', $errors);
-        $this->requiredNonEmptyString($application, 'name', 'application.name', $errors);
+        $this->validateApplicationName($application, $errors);
         $this->requiredNonEmptyString($application, 'region', 'application.region', $errors);
 
         $source = $this->requiredMapping($application, 'source', 'application.source', $errors);
@@ -93,6 +93,28 @@ final readonly class BlueprintValidator
     }
 
     /**
+     * @param array<string, mixed> $application
+     * @param list<ValidationError> $errors
+     */
+    private function validateApplicationName(array $application, array &$errors): void
+    {
+        $path = 'application.name';
+        $this->requiredNonEmptyString($application, 'name', $path, $errors);
+
+        if (!isset($application['name']) || !is_string($application['name']) || trim($application['name']) === '') {
+            return;
+        }
+
+        $this->validateLogicalAddressSegment(
+            $application['name'],
+            $path,
+            'Application name',
+            dotsAllowed: true,
+            errors: $errors,
+        );
+    }
+
+    /**
      * @param array<string, mixed> $data
      * @param array<string, array<string, true>> $databases
      * @param list<ValidationError> $errors
@@ -108,6 +130,16 @@ final readonly class BlueprintValidator
         foreach ($environments as $name => $environment) {
             if (trim($name) === '') {
                 $errors[] = $this->error('environments', ValidationErrorCode::EMPTY_VALUE, 'Environment names must be non-empty strings.');
+                continue;
+            }
+
+            if (!$this->validateLogicalAddressSegment(
+                $name,
+                'environments.' . $this->displayLogicalAddressSegment($name),
+                'Environment logical key',
+                dotsAllowed: false,
+                errors: $errors,
+            )) {
                 continue;
             }
 
@@ -143,13 +175,23 @@ final readonly class BlueprintValidator
 
         $references = [];
         foreach ($clusters as $name => $clusterValue) {
-            $path = 'database_clusters.' . $name;
-            if (trim($name) === '' || str_contains($name, '.')) {
+            if (trim($name) === '') {
                 $errors[] = $this->error(
                     'database_clusters',
                     ValidationErrorCode::EMPTY_VALUE,
-                    'Database Cluster logical names must be non-empty and must not contain dots.',
+                    'Database Cluster logical names must be non-empty.',
                 );
+                continue;
+            }
+
+            $path = 'database_clusters.' . $this->displayLogicalAddressSegment($name);
+            if (!$this->validateLogicalAddressSegment(
+                $name,
+                $path,
+                'Database Cluster logical key',
+                dotsAllowed: false,
+                errors: $errors,
+            )) {
                 continue;
             }
 
@@ -251,23 +293,32 @@ final readonly class BlueprintValidator
 
         $references = [];
         foreach ($databases as $name => $definitionValue) {
+            $definitionPath = $path . '.' . $this->displayLogicalAddressSegment($name);
             if ($name === DerivedResource::DEFAULT_DATABASE_NAME) {
                 $errors[] = $this->error(
-                    $path . '.' . $name,
+                    $definitionPath,
                     ValidationErrorCode::UNKNOWN_PROPERTY,
                     sprintf('Logical Database name "%s" is reserved for derived infrastructure.', $name),
                 );
                 continue;
             }
-            if (trim($name) === '' || str_contains($name, '.')) {
+            if (trim($name) === '') {
                 $errors[] = $this->error(
                     $path,
                     ValidationErrorCode::EMPTY_VALUE,
-                    'Logical Database names must be non-empty and must not contain dots.',
+                    'Logical Database names must be non-empty.',
                 );
                 continue;
             }
-            $definitionPath = $path . '.' . $name;
+            if (!$this->validateLogicalAddressSegment(
+                $name,
+                $definitionPath,
+                'Logical Database key',
+                dotsAllowed: false,
+                errors: $errors,
+            )) {
+                continue;
+            }
             $definition = $this->asMapping($definitionValue, $definitionPath, $errors);
             if ($definition === null) {
                 continue;
@@ -344,7 +395,16 @@ final readonly class BlueprintValidator
                 continue;
             }
 
-            $variablePath = $path . '.' . $name;
+            $variablePath = $path . '.' . $this->displayLogicalAddressSegment($name);
+            if (!$this->validateLogicalAddressSegment(
+                $name,
+                $variablePath,
+                'Variable logical key',
+                dotsAllowed: false,
+                errors: $errors,
+            )) {
+                continue;
+            }
             $variable = $this->asMapping($variable, $variablePath, $errors);
 
             if ($variable === null) {
@@ -405,6 +465,37 @@ final readonly class BlueprintValidator
         } elseif (trim($data[$key]) === '') {
             $errors[] = $this->error($path, ValidationErrorCode::EMPTY_VALUE, 'Value must not be empty.');
         }
+    }
+
+    /**
+     * @param list<ValidationError> $errors
+     */
+    private function validateLogicalAddressSegment(
+        string $value,
+        string $path,
+        string $label,
+        bool $dotsAllowed,
+        array &$errors,
+    ): bool {
+        $policy = new LogicalAddressSegmentPolicy();
+        $violation = $policy->violation($value, $dotsAllowed);
+
+        if ($violation === null) {
+            return true;
+        }
+
+        $errors[] = $this->error(
+            $path,
+            ValidationErrorCode::INVALID_LOGICAL_IDENTIFIER,
+            sprintf('%s "%s" %s.', $label, $policy->display($value), $violation),
+        );
+
+        return false;
+    }
+
+    private function displayLogicalAddressSegment(string $value): string
+    {
+        return (new LogicalAddressSegmentPolicy())->display($value);
     }
 
     /**
