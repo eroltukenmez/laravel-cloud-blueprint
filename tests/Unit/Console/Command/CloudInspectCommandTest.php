@@ -54,6 +54,8 @@ final class CloudInspectCommandTest extends TestCase
 
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
+        self::assertSame('success', $decoded['status']);
         self::assertIsArray($decoded['organization']);
         self::assertSame('Acme Organization', $decoded['organization']['name']);
         self::assertIsArray($decoded['applications']);
@@ -71,11 +73,11 @@ final class CloudInspectCommandTest extends TestCase
             new FakeLaravelCloudClientFactory(new FakeLaravelCloudClient()),
         ));
         self::assertSame(ExitCode::GENERAL_ERROR->value, $missing->execute(['--json' => true]));
-        self::assertJsonError($missing, 'LCB_TOKEN is not set.');
+        self::assertJsonError($missing, 'LCB_TOKEN is not set.', 'authentication', 'authentication_token_missing');
 
         $cloud = $this->tester(new ThrowingInspectCloudClient());
         self::assertSame(ExitCode::GENERAL_ERROR->value, $cloud->execute(['--json' => true]));
-        self::assertJsonError($cloud, 'Laravel Cloud is unavailable.');
+        self::assertJsonError($cloud, 'Laravel Cloud is unavailable.', 'cloud', 'cloud_read_failed');
 
         foreach ([$missing, $cloud] as $tester) {
             self::assertStringNotContainsString('<error>', $tester->getDisplay());
@@ -88,8 +90,29 @@ final class CloudInspectCommandTest extends TestCase
         $tester = $this->tester(new InvalidUtf8InspectCloudClient());
 
         self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
-        self::assertJsonError($tester, 'Unable to encode command output as JSON.');
+        self::assertJsonError($tester, 'Unable to encode command output as JSON.', 'output', 'json_encoding_failed');
         self::assertStringNotContainsString('<error>', $tester->getDisplay());
+    }
+
+    public function testJsonCollectionsAreSortedByVisibleNameIndependentOfApiOrder(): void
+    {
+        $forward = $this->tester(new ReorderedInspectCloudClient(false));
+        $reverse = $this->tester(new ReorderedInspectCloudClient(true));
+
+        self::assertSame(ExitCode::SUCCESS->value, $forward->execute(['--json' => true]));
+        self::assertSame(ExitCode::SUCCESS->value, $reverse->execute(['--json' => true]));
+        self::assertSame($forward->getDisplay(), $reverse->getDisplay());
+
+        $decoded = json_decode($forward->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        $applications = $decoded['applications'];
+        self::assertIsArray($applications);
+        self::assertSame(['Alpha', 'Zulu'], array_column($applications, 'name'));
+        $application = $applications[0] ?? null;
+        self::assertIsArray($application);
+        $environments = $application['environments'];
+        self::assertIsArray($environments);
+        self::assertSame(['production', 'staging'], array_column($environments, 'name'));
     }
 
     private function tester(FakeLaravelCloudClient $client): CommandTester
@@ -100,13 +123,17 @@ final class CloudInspectCommandTest extends TestCase
         ));
     }
 
-    private static function assertJsonError(CommandTester $tester, string $message): void
+    private static function assertJsonError(CommandTester $tester, string $message, string $category, string $code): void
     {
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame('error', $decoded['status']);
-        self::assertIsString($decoded['message']);
-        self::assertStringContainsString($message, $decoded['message']);
+        self::assertIsArray($decoded['error']);
+        self::assertSame($category, $decoded['error']['category']);
+        self::assertSame($code, $decoded['error']['code']);
+        self::assertIsString($decoded['error']['message']);
+        self::assertStringContainsString($message, $decoded['error']['message']);
     }
 }
 
@@ -198,5 +225,32 @@ final class InvalidUtf8InspectCloudClient extends FakeLaravelCloudClient
     public function organization(): CloudOrganization
     {
         return new CloudOrganization('org-1', "invalid-\xB1", 'acme');
+    }
+}
+
+final class ReorderedInspectCloudClient extends FakeLaravelCloudClient
+{
+    public function __construct(private readonly bool $reverse)
+    {
+    }
+
+    public function applications(): array
+    {
+        $applications = [
+            new CloudApplication('app-z', 'Zulu', 'zulu', 'eu-central-1', 'acme/zulu'),
+            new CloudApplication('app-a', 'Alpha', 'alpha', 'eu-central-1', 'acme/alpha'),
+        ];
+
+        return $this->reverse ? array_reverse($applications) : $applications;
+    }
+
+    public function environments(string $applicationId): array
+    {
+        $environments = [
+            new CloudEnvironment($applicationId . '-staging', $applicationId, 'staging', null),
+            new CloudEnvironment($applicationId . '-production', $applicationId, 'production', 'main'),
+        ];
+
+        return $this->reverse ? array_reverse($environments) : $environments;
     }
 }

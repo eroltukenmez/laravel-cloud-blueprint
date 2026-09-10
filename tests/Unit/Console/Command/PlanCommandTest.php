@@ -6,6 +6,7 @@ namespace LaravelCloudBlueprint\Tests\Unit\Console\Command;
 
 use LaravelCloudBlueprint\Application\BlueprintLoader;
 use LaravelCloudBlueprint\Application\File\FileReader;
+use LaravelCloudBlueprint\Blueprint\Decoder\StructuredDataDecoder;
 use LaravelCloudBlueprint\Blueprint\Normalization\BlueprintNormalizer;
 use LaravelCloudBlueprint\Blueprint\Validation\BlueprintValidator;
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
@@ -78,6 +79,7 @@ final class PlanCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--json' => true]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame('success', $decoded['status']);
         self::assertIsArray($decoded['summary']);
         self::assertSame(2, $decoded['summary']['create']);
@@ -171,27 +173,35 @@ final class PlanCommandTest extends TestCase
     public function testJsonErrorsRemainStructuredForMissingBlueprintTokenValidationAndCloudFailure(): void
     {
         $missing = $this->tester(self::validBlueprint(), fileExists: false);
-        self::assertSame(ExitCode::GENERAL_ERROR->value, $missing->execute(['--json' => true]));
-        self::assertJsonError($missing, 'does not exist');
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $missing->execute(
+            ['--json' => true],
+            ['capture_stderr_separately' => true],
+        ));
+        self::assertJsonError($missing, 'does not exist', 'filesystem', 'file_not_found');
+        self::assertSame('', $missing->getErrorOutput());
 
         $token = $this->tester(self::validBlueprint(), null);
         self::assertSame(ExitCode::GENERAL_ERROR->value, $token->execute(['--json' => true]));
-        self::assertJsonError($token, 'LCB_TOKEN is not set.');
+        self::assertJsonError($token, 'LCB_TOKEN is not set.', 'authentication', 'authentication_token_missing');
 
         $validation = $this->tester("version: 1\n", null);
         self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $validation->execute(['--json' => true]));
         $validationJson = json_decode($validation->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($validationJson);
-        self::assertSame('validation_failed', $validationJson['status']);
-        self::assertIsArray($validationJson['errors']);
+        self::assertSame(1, $validationJson['contract_version']);
+        self::assertSame('error', $validationJson['status']);
+        self::assertIsArray($validationJson['error']);
+        self::assertSame('blueprint', $validationJson['error']['category']);
+        self::assertSame('blueprint_invalid', $validationJson['error']['code']);
+        self::assertIsArray($validationJson['error']['validation_errors']);
 
         $malformed = $this->tester("application:\n  name: example\n invalid: indentation\n", null);
         self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $malformed->execute(['--json' => true]));
-        self::assertJsonError($malformed, 'Blueprint YAML could not be decoded.');
+        self::assertJsonError($malformed, 'Blueprint YAML could not be decoded.', 'blueprint', 'blueprint_decode_failed');
 
         $cloud = $this->tester(self::validBlueprint(), cloud: new PlanThrowingCloudClient());
         self::assertSame(ExitCode::GENERAL_ERROR->value, $cloud->execute(['--json' => true]));
-        self::assertJsonError($cloud, 'Laravel Cloud is unavailable.');
+        self::assertJsonError($cloud, 'Laravel Cloud is unavailable.', 'cloud', 'cloud_read_failed');
 
         foreach ([$missing, $token, $validation, $malformed, $cloud] as $tester) {
             self::assertStringNotContainsString('<error>', $tester->getDisplay());
@@ -208,8 +218,16 @@ final class PlanCommandTest extends TestCase
         );
 
         self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
-        self::assertJsonError($tester, 'Unable to encode command output as JSON.');
+        self::assertJsonError($tester, 'Unable to encode command output as JSON.', 'output', 'json_encoding_failed');
         self::assertStringNotContainsString('<error>', $tester->getDisplay());
+    }
+
+    public function testValidationEncodingFailureSupersedesBlueprintExitCode(): void
+    {
+        $tester = $this->tester(self::validBlueprint(), decoder: new PlanInvalidUtf8ValidationDecoder());
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
+        self::assertJsonError($tester, 'Unable to encode command output as JSON.', 'output', 'json_encoding_failed');
     }
 
     public function testInvalidBlueprintReturnsBlueprintErrorBeforeTokenLookup(): void
@@ -657,10 +675,11 @@ final class PlanCommandTest extends TestCase
         LaravelCloudClient $cloud = new PlanCommandCloudClient(),
         bool $fileExists = true,
         ?StateDocument $state = null,
+        StructuredDataDecoder $decoder = new SymfonyYamlDecoder(),
     ): CommandTester {
         return new CommandTester(new PlanCommand(
             new PlanFileReader($blueprint, $fileExists),
-            new BlueprintLoader(new SymfonyYamlDecoder(), new BlueprintValidator(), new BlueprintNormalizer()),
+            new BlueprintLoader($decoder, new BlueprintValidator(), new BlueprintNormalizer()),
             new PlanTokenProvider($token),
             new PlanClientFactory($cloud),
             new CreatePlan(new VariableValueResolver(new PlanEnvironmentValueProvider())),
@@ -682,13 +701,17 @@ final class PlanCommandTest extends TestCase
             ));
     }
 
-    private static function assertJsonError(CommandTester $tester, string $message): void
+    private static function assertJsonError(CommandTester $tester, string $message, string $category, string $code): void
     {
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame('error', $decoded['status']);
-        self::assertIsString($decoded['message']);
-        self::assertStringContainsString($message, $decoded['message']);
+        self::assertIsArray($decoded['error']);
+        self::assertSame($category, $decoded['error']['category']);
+        self::assertSame($code, $decoded['error']['code']);
+        self::assertIsString($decoded['error']['message']);
+        self::assertStringContainsString($message, $decoded['error']['message']);
     }
 
     private static function validBlueprint(string $applicationName = 'API'): string
@@ -828,6 +851,24 @@ final class PlanCommandStateStore implements StateStore
     public function begin(): StateTransaction
     {
         throw new LogicException('Plan must not begin a state transaction.');
+    }
+}
+
+final readonly class PlanInvalidUtf8ValidationDecoder implements StructuredDataDecoder
+{
+    public function decode(string $content): array
+    {
+        return [
+            'version' => 1,
+            'organization' => 'acme',
+            'application' => [
+                'name' => 'API',
+                'region' => 'eu-central-1',
+                'source' => ['provider' => 'github', 'repository' => 'acme/api'],
+            ],
+            'environments' => [],
+            "unknown-\xB1" => true,
+        ];
     }
 }
 

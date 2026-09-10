@@ -28,8 +28,9 @@ use LaravelCloudBlueprint\Cloud\DTO\CreateApplicationRequest;
 use LaravelCloudBlueprint\Cloud\DTO\CreateEnvironmentRequest;
 use LaravelCloudBlueprint\Cloud\DTO\EnvironmentDependencies;
 use LaravelCloudBlueprint\Cloud\DTO\SetEnvironmentVariablesRequest;
-use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudApiException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudResourceNotFoundException;
+use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Console\Command\ApplyCommand;
 use LaravelCloudBlueprint\Console\ExitCode;
 use LaravelCloudBlueprint\Infrastructure\Yaml\SymfonyYamlDecoder;
@@ -113,6 +114,7 @@ final class ApplyCommandTest extends TestCase
         ]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame('success', $decoded['status']);
         self::assertSame(
             ['created' => 2, 'updated' => 0, 'unchanged' => 0, 'deleted' => 0, 'failed' => 0],
@@ -153,6 +155,7 @@ final class ApplyCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--json' => true]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame(
             ['created' => 0, 'updated' => 0, 'unchanged' => 2, 'deleted' => 0, 'failed' => 0],
             $decoded['summary'],
@@ -240,6 +243,8 @@ final class ApplyCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true, '--auto-approve' => true]));
         $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
+        self::assertSame('success', $decoded['status']);
         self::assertIsArray($decoded['resources']);
         self::assertIsArray($decoded['resources'][1]);
         self::assertSame('environment.production', $decoded['resources'][1]['resource']);
@@ -321,9 +326,31 @@ final class ApplyCommandTest extends TestCase
             self::assertSame(0, $state->beginCount);
             self::assertStringContainsString('requires --auto-approve', $tester->getDisplay());
             if (isset($options['--json'])) {
-                self::assertIsArray(json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR));
+                $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+                self::assertIsArray($decoded);
+                self::assertSame(1, $decoded['contract_version']);
+                self::assertIsArray($decoded['error']);
+                self::assertSame('mutation', $decoded['error']['category']);
+                self::assertSame('cloud_mutation_refused', $decoded['error']['code']);
             }
         }
+    }
+
+    public function testFailedApplyReportRemainsACommandSpecificVersionedReport(): void
+    {
+        [$tester] = $this->tester(new ApplyCommandCreateFailureClient());
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute([
+            '--auto-approve' => true,
+            '--json' => true,
+        ]));
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
+        self::assertSame('failed', $decoded['status']);
+        self::assertIsArray($decoded['resources']);
+        self::assertNotSame([], $decoded['resources']);
+        self::assertArrayNotHasKey('error', $decoded);
     }
 
     public function testAutoApproveAllowsEnvironmentDeleteWithOrdinaryInstance(): void
@@ -434,9 +461,13 @@ final class ApplyCommandTest extends TestCase
         self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame('error', $decoded['status']);
-        self::assertIsString($decoded['message']);
-        self::assertStringContainsString('invalid JSON', $decoded['message']);
+        self::assertIsArray($decoded['error']);
+        self::assertSame('state', $decoded['error']['category']);
+        self::assertSame('state_corrupted', $decoded['error']['code']);
+        self::assertIsString($decoded['error']['message']);
+        self::assertStringContainsString('invalid JSON', $decoded['error']['message']);
         self::assertStringNotContainsString('<error>', $tester->getDisplay());
         self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
         self::assertSame(0, $cloud->mutationCount);
@@ -452,7 +483,10 @@ final class ApplyCommandTest extends TestCase
         self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame('error', $decoded['status']);
+        self::assertIsArray($decoded['error']);
+        self::assertSame('state_read_failed', $decoded['error']['code']);
         self::assertSame(0, $cloud->mutationCount);
         self::assertSame(0, $state->beginCount);
     }
@@ -491,6 +525,8 @@ final class ApplyCommandTest extends TestCase
         ]));
         $decoded = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
+        self::assertSame('partial_failure', $decoded['status']);
         self::assertIsArray($decoded['resources']);
         self::assertIsArray($decoded['resources'][2]);
         self::assertSame('refused', $decoded['resources'][2]['outcome']);
@@ -534,8 +570,12 @@ final class ApplyCommandTest extends TestCase
         ]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame('error', $decoded['status']);
-        self::assertSame('Unable to encode command output as JSON.', $decoded['message']);
+        self::assertIsArray($decoded['error']);
+        self::assertSame('output', $decoded['error']['category']);
+        self::assertSame('json_encoding_failed', $decoded['error']['code']);
+        self::assertSame('Unable to encode command output as JSON.', $decoded['error']['message']);
         self::assertStringNotContainsString('<error>', $tester->getDisplay());
         self::assertStringNotContainsString('literal-secret-value', $tester->getDisplay());
         self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
@@ -843,6 +883,20 @@ class ApplyCommandCloudClient implements LaravelCloudClient
         }
     }
 
+}
+
+final class ApplyCommandCreateFailureClient extends ApplyCommandCloudClient
+{
+    public function __construct()
+    {
+        parent::__construct([], []);
+    }
+
+    public function createApplication(CreateApplicationRequest $request): CloudApplication
+    {
+        ++$this->mutationCount;
+        throw new CloudApiException('Laravel Cloud rejected application creation.', 'POST', '/applications', 500);
+    }
 }
 
 final class ApplyCommandEnvironmentDeleteClient extends ApplyCommandCloudClient implements LaravelCloudEnvironmentMutationClient

@@ -9,6 +9,8 @@ use LaravelCloudBlueprint\Application\State\ReleaseStateOwnership;
 use LaravelCloudBlueprint\Application\State\StateOwnershipReleaseProposal;
 use LaravelCloudBlueprint\Application\State\StateOwnershipReleaseRefusedException;
 use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Console\JsonError;
+use LaravelCloudBlueprint\Console\JsonErrorCategory;
 use LaravelCloudBlueprint\Console\JsonOutput;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
@@ -31,6 +33,8 @@ use Symfony\Component\Console\Question\ConfirmationQuestion;
 )]
 final class StateUnmanageCommand extends Command
 {
+    private const int JSON_CONTRACT_VERSION = 1;
+
     private readonly JsonOutput $jsonOutput;
 
     public function __construct(
@@ -56,25 +60,27 @@ final class StateUnmanageCommand extends Command
         $json = $input->getOption('json') === true;
         $value = $input->getArgument('address');
         if (!is_string($value)) {
-            return $this->error($output, 'State resource address must be a string.', $json);
+            return $this->error($output, 'State resource address must be a string.', $json, JsonErrorCategory::INPUT, 'invalid_resource_address', ExitCode::BLUEPRINT_ERROR);
         }
 
         try {
             $address = ResourceAddress::fromString($value);
         } catch (InvalidArgumentException) {
-            return $this->error($output, sprintf('Invalid State resource address "%s".', $value), $json);
+            return $this->error($output, sprintf('Invalid State resource address "%s".', $value), $json, JsonErrorCategory::INPUT, 'invalid_resource_address', ExitCode::BLUEPRINT_ERROR);
         }
         if (!$this->isStateResourceType($address->type)) {
             return $this->error($output, sprintf(
                 'Resource type "%s" is not State-owned and cannot be unmanaged.',
                 $address->type->value,
-            ), $json, $address);
+            ), $json, JsonErrorCategory::INPUT, 'resource_type_not_manageable', ExitCode::BLUEPRINT_ERROR);
         }
 
         try {
             $proposal = $this->releases->preview($address, $this->states);
-        } catch (StateCorruptedException|StateStorageException $exception) {
-            return $this->error($output, $exception->getMessage(), $json, $address);
+        } catch (StateCorruptedException $exception) {
+            return $this->error($output, $exception->getMessage(), $json, JsonErrorCategory::STATE, 'state_corrupted');
+        } catch (StateStorageException $exception) {
+            return $this->error($output, $exception->getMessage(), $json, JsonErrorCategory::STATE, 'state_read_failed');
         }
 
         if (!$proposal->isManaged()) {
@@ -120,8 +126,12 @@ final class StateUnmanageCommand extends Command
             $result = $this->releases->execute($proposal, $this->states);
         } catch (StateOwnershipReleaseRefusedException $exception) {
             return $this->refused($exception->proposal, $exception->getMessage(), $output, $json);
-        } catch (StateCorruptedException|StateLockedException|StateStorageException $exception) {
-            return $this->error($output, $exception->getMessage(), $json, $address);
+        } catch (StateCorruptedException $exception) {
+            return $this->error($output, $exception->getMessage(), $json, JsonErrorCategory::STATE, 'state_corrupted');
+        } catch (StateLockedException $exception) {
+            return $this->error($output, $exception->getMessage(), $json, JsonErrorCategory::STATE, 'state_lock_failed');
+        } catch (StateStorageException $exception) {
+            return $this->error($output, $exception->getMessage(), $json, JsonErrorCategory::STATE, 'state_write_failed');
         }
 
         if ($json) {
@@ -167,9 +177,9 @@ final class StateUnmanageCommand extends Command
         $message = 'Resource is not currently managed. Local State and Laravel Cloud are unchanged.';
         if ($json) {
             return $this->writeJson([
-                'status' => 'no_changes',
+                'status' => 'no_change',
                 'message' => $message,
-                'resource' => ['address' => (string) $proposal->address],
+                'resource' => $this->resource($proposal),
                 'released' => false,
             ], $output);
         }
@@ -213,30 +223,30 @@ final class StateUnmanageCommand extends Command
         OutputInterface $output,
         string $message,
         bool $json,
-        ?ResourceAddress $address = null,
+        JsonErrorCategory $category,
+        string $errorCode,
+        ExitCode $exitCode = ExitCode::GENERAL_ERROR,
     ): int {
         if ($json) {
-            return $this->writeJson([
-                'status' => 'error',
-                'message' => $message,
-                ...($address === null ? [] : ['resource' => ['address' => (string) $address]]),
-                'released' => false,
-            ], $output, ExitCode::GENERAL_ERROR);
+            return $this->jsonOutput->writeError(new JsonError($category, $errorCode, $message), $output, self::JSON_CONTRACT_VERSION)
+                ? $exitCode->value
+                : ExitCode::GENERAL_ERROR->value;
         }
 
         $output->writeln('<error>' . $message . '</error>');
-        return ExitCode::GENERAL_ERROR->value;
+        return $exitCode->value;
     }
 
-    /** @return array{address: string, type: string, parent: string|null} */
+    /** @return array{address: string, type: string|null, parent: string|null, classification: string|null} */
     private function resource(StateOwnershipReleaseProposal $proposal): array
     {
         $resource = $proposal->resource;
 
         return [
             'address' => (string) $proposal->address,
-            'type' => $resource?->type->value ?? $proposal->address->type->value,
+            'type' => $resource?->type->value,
             'parent' => $resource?->parent === null ? null : (string) $resource->parent,
+            'classification' => $resource?->classification->value,
         ];
     }
 
@@ -246,7 +256,7 @@ final class StateUnmanageCommand extends Command
         OutputInterface $output,
         ExitCode $code = ExitCode::SUCCESS,
     ): int {
-        return $this->jsonOutput->write($payload, $output) ? $code->value : ExitCode::GENERAL_ERROR->value;
+        return $this->jsonOutput->write($payload, $output, self::JSON_CONTRACT_VERSION) ? $code->value : ExitCode::GENERAL_ERROR->value;
     }
 
     private function isStateResourceType(ResourceType $type): bool

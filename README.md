@@ -276,11 +276,33 @@ Ownership release is deliberately non-recursive. An Application or Database Clus
 
 Run `lcb <command> --help` for exact usage.
 
+### Machine-readable JSON contracts
+
+Every first-party command with `--json` emits exactly one JSON document on stdout. Each command owns its contract independently and currently declares top-level `"contract_version": 1`; this version is unrelated to Blueprint schema version 1, State V2, or the CLI release version. Successful and completed no-change or refusal results retain their command-specific fields. Command-owned failures use this common envelope:
+
+```json
+{
+  "contract_version": 1,
+  "status": "error",
+  "error": {
+    "category": "filesystem",
+    "code": "file_not_found",
+    "message": "..."
+  }
+}
+```
+
+The stable machine fields are `contract_version`, `status`, `error.category`, `error.code`, and each report's typed fields. Current error categories are `input`, `blueprint`, `state`, `authentication`, `cloud`, `mutation`, `filesystem`, and `output`; `status: "error"` is reserved for this envelope. Human-facing `message`, `reason`, and validation descriptions are non-normative and must not be parsed for decisions. Blueprint validation errors remain structured under `error.validation_errors`.
+
+Contract stability is semantic; general JSON key order and byte representation are not promised. The deliberate exceptions are `drift --json --check` and `state:inspect --json --check`: for the same report, `--check` changes only the process exit status and the JSON bytes remain identical. Symfony errors raised while parsing command-line arguments happen before command execution and are outside this first-party JSON contract, so they may be human-formatted and written to stderr.
+
+`cloud:inspect` and `import` intentionally expose remote IDs for operator discovery and explicit identity adoption. Plan, Apply, Drift, State inspection, and State unmanage machine reports do not expose remote IDs; existing secret, variable-value, credential, and request-payload redaction rules continue to apply.
+
 ### Exit codes
 
-- `0`: command or report completed successfully, including a passing strict check.
-- `1`: operational, Cloud, State, token, file, or output failure.
-- `2`: Blueprint decode or validation failure.
+- `0`: command or report completed successfully, including current no-op/cancellation results and a passing strict check.
+- `1`: operational, Cloud, State, authentication, filesystem, output, or mutation failure/refusal.
+- `2`: Blueprint decode/validation or command-owned input-contract failure.
 - `3`: a strict check completed, but its policy failed.
 
 Exit code `3` does not mean LCB failed to execute. It means `lcb drift --check` or `lcb state:inspect --check` completed successfully and found observations that fail its strict policy. Normal observational reports continue to exit `0` when they complete.

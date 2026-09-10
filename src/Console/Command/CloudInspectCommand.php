@@ -8,6 +8,8 @@ use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Console\JsonError;
+use LaravelCloudBlueprint\Console\JsonErrorCategory;
 use LaravelCloudBlueprint\Console\JsonOutput;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -18,6 +20,8 @@ use Symfony\Component\Console\Output\OutputInterface;
 #[AsCommand(name: 'cloud:inspect', description: 'Discover Laravel Cloud resources using read-only requests.')]
 final class CloudInspectCommand extends Command
 {
+    private const int JSON_CONTRACT_VERSION = 1;
+
     private readonly JsonOutput $json;
 
     public function __construct(
@@ -40,7 +44,7 @@ final class CloudInspectCommand extends Command
         $token = $this->tokens->token();
 
         if ($token === null) {
-            return $this->error($output, 'LCB_TOKEN is not set.', $json);
+            return $this->error($output, 'LCB_TOKEN is not set.', $json, JsonErrorCategory::AUTHENTICATION, 'authentication_token_missing');
         }
 
         try {
@@ -53,11 +57,19 @@ final class CloudInspectCommand extends Command
                 $applications[] = [$application, $environments];
             }
         } catch (CloudException $exception) {
-            return $this->error($output, $exception->getMessage(), $json);
+            return $this->error($output, $exception->getMessage(), $json, JsonErrorCategory::CLOUD, 'cloud_read_failed');
         }
 
         if ($json) {
+            $machineApplications = $applications;
+            foreach ($machineApplications as &$item) {
+                usort($item[1], static fn ($left, $right): int => [$left->name, $left->id] <=> [$right->name, $right->id]);
+            }
+            unset($item);
+            usort($machineApplications, static fn (array $left, array $right): int => [$left[0]->name, $left[0]->id] <=> [$right[0]->name, $right[0]->id]);
+
             return $this->json->write([
+                    'status' => 'success',
                     'organization' => [
                         'id' => $organization->id,
                         'name' => $organization->name,
@@ -79,9 +91,9 @@ final class CloudInspectCommand extends Command
                                 $item[1],
                             ),
                         ],
-                        $applications,
+                        $machineApplications,
                     ),
-                ], $output)
+                ], $output, self::JSON_CONTRACT_VERSION)
                 ? ExitCode::SUCCESS->value
                 : ExitCode::GENERAL_ERROR->value;
         }
@@ -101,10 +113,15 @@ final class CloudInspectCommand extends Command
         return ExitCode::SUCCESS->value;
     }
 
-    private function error(OutputInterface $output, string $message, bool $json): int
-    {
+    private function error(
+        OutputInterface $output,
+        string $message,
+        bool $json,
+        JsonErrorCategory $category,
+        string $errorCode,
+    ): int {
         if ($json) {
-            $this->json->write(['status' => 'error', 'message' => $message], $output);
+            $this->json->writeError(new JsonError($category, $errorCode, $message), $output, self::JSON_CONTRACT_VERSION);
         } else {
             $output->writeln(sprintf('<error>%s</error>', $message));
         }
