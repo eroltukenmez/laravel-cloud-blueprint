@@ -278,6 +278,8 @@ Run `lcb <command> --help` for exact usage.
 
 ### Machine-readable JSON contracts
 
+The beta-candidate compatibility policy for CLI names and options, JSON evolution, exit codes, resource addresses, Blueprint and State formats, typed Plan/Apply/Drift semantics, redaction, and the feature freeze is documented in [Public Contracts and Compatibility](docs/compatibility.md).
+
 Every first-party command with `--json` emits exactly one JSON document on stdout. Each command owns its contract independently and currently declares top-level `"contract_version": 1`; this version is unrelated to Blueprint schema version 1, State V2, or the CLI release version. Successful and completed no-change or refusal results retain their command-specific fields. Command-owned failures use this common envelope:
 
 ```json
