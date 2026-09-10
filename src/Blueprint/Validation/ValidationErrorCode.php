@@ -15,4 +15,5 @@ enum ValidationErrorCode: string
     case EMPTY_VALUE = 'empty_value';
     case UNSUPPORTED_DATABASE_TYPE = 'unsupported_database_type';
     case INVALID_DATABASE_REFERENCE = 'invalid_database_reference';
+    case INVALID_LOGICAL_IDENTIFIER = 'invalid_logical_identifier';
 }

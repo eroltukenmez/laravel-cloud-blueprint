@@ -98,6 +98,17 @@ final class StateInspectCommandTest extends TestCase
         self::assertStringNotContainsString('app-secret-id', $tester->getDisplay());
     }
 
+    public function testJsonCheckChangesOnlyExitStatusAndNotReportBytes(): void
+    {
+        $this->saveState();
+        $normal = $this->tester(null, null);
+        $checked = $this->tester(null, null);
+
+        self::assertSame(ExitCode::SUCCESS->value, $normal->execute(['--json' => true]));
+        self::assertSame(ExitCode::SUCCESS->value, $checked->execute(['--json' => true, '--check' => true]));
+        self::assertSame($normal->getDisplay(), $checked->getDisplay());
+    }
+
     public function testCloudInspectionIsCompleteAndDiscoversSharedApplicationOnce(): void
     {
         $this->saveState(twoEnvironments: true);
@@ -114,10 +125,12 @@ final class StateInspectCommandTest extends TestCase
     public function testPartialCloudReadProducesIncompleteReportAndStrictCheckFailure(): void
     {
         $this->saveState();
-        $cloud = new StateInspectReader(failEnvironments: true);
-        $tester = $this->tester(new StateInspectTokenProvider(), $cloud);
+        $normal = $this->tester(new StateInspectTokenProvider(), new StateInspectReader(failEnvironments: true));
+        $tester = $this->tester(new StateInspectTokenProvider(), new StateInspectReader(failEnvironments: true));
 
+        self::assertSame(ExitCode::SUCCESS->value, $normal->execute(['--cloud' => true, '--json' => true]));
         self::assertSame(ExitCode::CHECK_FAILED->value, $tester->execute(['--cloud' => true, '--check' => true, '--json' => true]));
+        self::assertSame($normal->getDisplay(), $tester->getDisplay());
         $json = self::json($tester);
         self::assertIsArray($json['cloud'] ?? null);
         self::assertSame('incomplete', $json['cloud']['evidence'] ?? null);
@@ -134,6 +147,36 @@ final class StateInspectCommandTest extends TestCase
         file_put_contents($blueprint, 'not: [valid');
         self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $this->tester(new StateInspectTokenProvider(), new StateInspectReader())->execute(['--file' => $blueprint]));
         unlink($blueprint);
+    }
+
+    public function testJsonMissingFileTokenAndCorruptStateUseVersionedErrors(): void
+    {
+        $this->saveState();
+
+        $missing = $this->tester(null, null);
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $missing->execute([
+            '--file' => $this->directory . '/missing.yaml',
+            '--json' => true,
+        ]));
+        $missingError = self::json($missing);
+        self::assertIsArray($missingError['error']);
+        self::assertSame('filesystem', $missingError['error']['category']);
+        self::assertSame('file_not_found', $missingError['error']['code']);
+
+        $token = $this->tester(null, new StateInspectReader());
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $token->execute(['--cloud' => true, '--json' => true]));
+        $tokenError = self::json($token);
+        self::assertIsArray($tokenError['error']);
+        self::assertSame('authentication', $tokenError['error']['category']);
+        self::assertSame('authentication_token_missing', $tokenError['error']['code']);
+
+        file_put_contents($this->path, '{broken');
+        $corrupt = $this->tester(null, null);
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $corrupt->execute(['--json' => true]));
+        $stateError = self::json($corrupt);
+        self::assertIsArray($stateError['error']);
+        self::assertSame('state', $stateError['error']['category']);
+        self::assertSame('state_corrupted', $stateError['error']['code']);
     }
 
     private function tester(?CloudTokenProvider $token, ?StateInspectionCloudReader $reader): CommandTester
@@ -164,6 +207,7 @@ final class StateInspectCommandTest extends TestCase
     {
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version'] ?? null);
         $result = [];
         foreach ($decoded as $key => $value) {
             self::assertIsString($key);

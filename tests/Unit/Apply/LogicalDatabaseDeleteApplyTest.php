@@ -10,7 +10,7 @@ use LaravelCloudBlueprint\Apply\CreateOnlyApply;
 use LaravelCloudBlueprint\Apply\DatabaseDeletionVerification;
 use LaravelCloudBlueprint\Apply\DatabaseClusterDeletionVerification;
 use LaravelCloudBlueprint\Apply\DatabaseClusterDeletionReadiness;
-use LaravelCloudBlueprint\Apply\DestructiveOutcome;
+use LaravelCloudBlueprint\Apply\ApplyOutcome;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
 use LaravelCloudBlueprint\Blueprint\ApplicationDefinition;
 use LaravelCloudBlueprint\Blueprint\Blueprint;
@@ -75,46 +75,46 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(['cluster-1'], $cloud->clusterDeletes);
         self::assertNull($states->state->find(self::clusterAddress()));
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->outcome);
     }
 
-    /** @return iterable<string, array{CloudDatabaseCluster, list<CloudDatabase>, DestructiveOutcome}> */
+    /** @return iterable<string, array{CloudDatabaseCluster, list<CloudDatabase>, ApplyOutcome}> */
     public static function ineligibleExecutorTopologyCases(): iterable
     {
         yield 'scoped complete exact-parent child' => [
             self::clusterEvidence([], false, ['databases']),
             [self::database(parentId: 'cluster-1')],
-            DestructiveOutcome::REFUSED,
+            ApplyOutcome::REFUSED,
         ];
         yield 'scoped complete empty' => [
             self::clusterEvidence([], false, ['databases']),
             [],
-            DestructiveOutcome::REFUSED,
+            ApplyOutcome::REFUSED,
         ];
         yield 'partial positive' => [
             self::clusterEvidence([], false, ['databases']),
             [self::database(parentId: null)],
-            DestructiveOutcome::REFUSED,
+            ApplyOutcome::REFUSED,
         ];
         yield 'incomplete' => [
             self::clusterEvidence(),
             [],
-            DestructiveOutcome::REFUSED,
+            ApplyOutcome::REFUSED,
         ];
         yield 'conflicting' => [
             self::clusterEvidence(['relationship-child'], true),
             [self::database(id: 'scoped-child', parentId: 'cluster-1')],
-            DestructiveOutcome::CONFLICT,
+            ApplyOutcome::CONFLICT,
         ];
         yield 'duplicate child identity' => [
             self::clusterEvidence(['database-1', 'database-1'], true),
             [self::database(parentId: 'cluster-1')],
-            DestructiveOutcome::CONFLICT,
+            ApplyOutcome::CONFLICT,
         ];
         yield 'conflicting child parent' => [
             self::clusterEvidence(['database-1'], true),
             [self::database(parentId: 'other-cluster')],
-            DestructiveOutcome::CONFLICT,
+            ApplyOutcome::CONFLICT,
         ];
     }
 
@@ -123,7 +123,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
     public function testLockedExecutorRejectsEveryTopologyBelowCorroboratedComplete(
         CloudDatabaseCluster $cluster,
         array $listed,
-        DestructiveOutcome $expectedOutcome,
+        ApplyOutcome $expectedOutcome,
     ): void {
         $cloud = self::cloud([]);
         $cloud->clusterEvidence = [self::clusterEvidence([], true), $cluster];
@@ -142,7 +142,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
-        self::assertSame($expectedOutcome, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame($expectedOutcome, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $cloud->clusterDeletes);
         self::assertNotNull($states->state->find(self::clusterAddress()));
         self::assertSame(2, $cloud->databaseListCalls);
@@ -167,7 +167,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $states);
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
-        self::assertSame(DestructiveOutcome::REFUSED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::REFUSED, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $cloud->clusterDeletes);
         self::assertNotNull($states->state->find(self::clusterAddress()));
         self::assertSame(2, $cloud->databaseListCalls);
@@ -335,7 +335,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         self::assertSame(['cluster-1'], $cloud->clusterDeletes);
     }
 
-    public function testClusterDeleteTransportUncertaintyDoesNotRetryOrCheckpoint(): void
+    public function testClusterDeleteTransportFailureWithConfirmedPresenceIsPostconditionFailure(): void
     {
         $failure = new CloudTransportException('timeout', 'DELETE', '/cluster');
         $cloud = self::cloud([], clusterDeleteFailure: $failure);
@@ -349,7 +349,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertSame(['cluster-1'], $cloud->clusterDeletes);
         self::assertNotNull($states->state->find(self::clusterAddress()));
-        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, iterator_to_array($result)[0]->outcome);
     }
 
     public function testClusterCheckpointFailureRecoversByExact404WithoutSecondDelete(): void
@@ -362,7 +362,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         $failedStore = new LogicalDatabaseDeleteStateStore($state, true);
 
         $failed = self::apply()->execute(self::blueprintWithoutCluster(), $plan, $cloud, $failedStore);
-        self::assertSame(DestructiveOutcome::STATE_CHECKPOINT_FAILED, iterator_to_array($failed)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::STATE_CHECKPOINT_FAILED, iterator_to_array($failed)[0]->outcome);
         self::assertNotNull($failedStore->state->find(self::clusterAddress()));
         self::assertSame(['cluster-1'], $cloud->clusterDeletes);
 
@@ -370,7 +370,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         $recoveryPlan = $planner->create(self::blueprintWithoutCluster(), $cloud, $recoveryStore->state);
         $recovered = self::apply()->execute(self::blueprintWithoutCluster(), $recoveryPlan, $cloud, $recoveryStore);
 
-        self::assertSame(DestructiveOutcome::ALREADY_ABSENT, iterator_to_array($recovered)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::ALREADY_ABSENT, iterator_to_array($recovered)[0]->outcome);
         self::assertSame(['cluster-1'], $cloud->clusterDeletes);
         self::assertNull($recoveryStore->state->find(self::clusterAddress()));
     }
@@ -383,7 +383,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->outcome);
         self::assertSame([['cluster-1', 'database-1']], $cloud->deletes);
         self::assertSame([
             ['cluster-1', 'database-1'],
@@ -408,7 +408,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
             $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
             self::assertSame(ApplyStatus::FAILED, $result->status);
-            self::assertSame(DestructiveOutcome::REFUSED, iterator_to_array($result)[0]->destructiveOutcome);
+            self::assertSame(ApplyOutcome::REFUSED, iterator_to_array($result)[0]->outcome);
             self::assertSame([], $cloud->deletes);
             self::assertSame(0, $states->saveCount);
             self::assertNotNull($states->state->find(self::databaseAddress()));
@@ -422,7 +422,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
-        self::assertSame(DestructiveOutcome::CONFLICT, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::CONFLICT, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $cloud->deletes);
         self::assertSame(0, $states->saveCount);
     }
@@ -432,7 +432,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         $cloud = self::cloud(['database-1' => []]);
         $states = new LogicalDatabaseDeleteStateStore(self::state(parentRemoteId: 'changed-cluster'));
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
-        self::assertSame(DestructiveOutcome::CONFLICT, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::CONFLICT, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $cloud->deletes);
 
         $cloud = self::cloud(['database-1' => []]);
@@ -444,7 +444,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
             $states,
             static fn (): Blueprint => self::blueprint(includeDatabase: true),
         );
-        self::assertSame(DestructiveOutcome::CONFLICT, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::CONFLICT, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $cloud->deletes);
     }
 
@@ -456,13 +456,13 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
-        self::assertSame(DestructiveOutcome::ALREADY_ABSENT, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::ALREADY_ABSENT, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $cloud->deletes);
         self::assertNull($states->state->find(self::databaseAddress()));
         self::assertSame(1, $states->saveCount);
     }
 
-    public function test204StillPresentIsUncertainAndRetainsState(): void
+    public function test204StillPresentIsPostconditionFailureAndRetainsState(): void
     {
         $cloud = self::cloud(['database-1' => [
             self::database(), self::database(), self::database(), self::database(), self::database(),
@@ -471,7 +471,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
-        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, iterator_to_array($result)[0]->outcome);
         self::assertCount(1, $cloud->deletes);
         self::assertNotNull($states->state->find(self::databaseAddress()));
         self::assertSame(0, $states->saveCount);
@@ -485,7 +485,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         );
         $absentStates = new LogicalDatabaseDeleteStateStore(self::state());
         $absent = self::apply()->execute(self::blueprint(), self::plan(), $absentCloud, $absentStates);
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($absent)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, iterator_to_array($absent)[0]->outcome);
         self::assertCount(1, $absentCloud->deletes);
         self::assertNull($absentStates->state->find(self::databaseAddress()));
 
@@ -495,7 +495,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         );
         $presentStates = new LogicalDatabaseDeleteStateStore(self::state());
         $present = self::apply()->execute(self::blueprint(), self::plan(), $presentCloud, $presentStates);
-        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($present)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, iterator_to_array($present)[0]->outcome);
         self::assertCount(1, $presentCloud->deletes);
         self::assertNotNull($presentStates->state->find(self::databaseAddress()));
 
@@ -505,7 +505,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         );
         $failedStates = new LogicalDatabaseDeleteStateStore(self::state());
         $failed = self::apply()->execute(self::blueprint(), self::plan(), $failedCloud, $failedStates);
-        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($failed)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::UNCERTAIN, iterator_to_array($failed)[0]->outcome);
         self::assertCount(1, $failedCloud->deletes);
         self::assertNotNull($failedStates->state->find(self::databaseAddress()));
     }
@@ -519,7 +519,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         );
         $confirmedStates = new LogicalDatabaseDeleteStateStore(self::state());
         $confirmed = self::apply()->execute(self::blueprint(), self::plan(), $confirmedCloud, $confirmedStates);
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($confirmed)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, iterator_to_array($confirmed)[0]->outcome);
         self::assertNull($confirmedStates->state->find(self::databaseAddress()));
 
         $unknownCloud = self::cloud(
@@ -528,7 +528,7 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         );
         $unknownStates = new LogicalDatabaseDeleteStateStore(self::state());
         $unknown = self::apply()->execute(self::blueprint(), self::plan(), $unknownCloud, $unknownStates);
-        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($unknown)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::UNCERTAIN, iterator_to_array($unknown)[0]->outcome);
         self::assertNotNull($unknownStates->state->find(self::databaseAddress()));
     }
 
@@ -537,13 +537,13 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
         $cloud = self::cloud(['database-1' => [self::database(), self::database(), self::notFound()]]);
         $failedStates = new LogicalDatabaseDeleteStateStore(self::state(), failSave: true);
         $failed = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $failedStates);
-        self::assertSame(DestructiveOutcome::STATE_CHECKPOINT_FAILED, iterator_to_array($failed)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::STATE_CHECKPOINT_FAILED, iterator_to_array($failed)[0]->outcome);
         self::assertNotNull($failedStates->state->find(self::databaseAddress()));
 
         $recoveryCloud = self::cloud(['database-1' => [self::notFound(), self::notFound()]]);
         $recoveryStates = new LogicalDatabaseDeleteStateStore($failedStates->state);
         $recovered = self::apply()->execute(self::blueprint(), self::plan(), $recoveryCloud, $recoveryStates);
-        self::assertSame(DestructiveOutcome::ALREADY_ABSENT, iterator_to_array($recovered)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::ALREADY_ABSENT, iterator_to_array($recovered)[0]->outcome);
         self::assertSame([], $recoveryCloud->deletes);
         self::assertNull($recoveryStates->state->find(self::databaseAddress()));
     }
@@ -571,8 +571,8 @@ final class LogicalDatabaseDeleteApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         $outcomes = iterator_to_array($result);
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, $outcomes[0]->destructiveOutcome);
-        self::assertSame(DestructiveOutcome::UNCERTAIN, $outcomes[1]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, $outcomes[0]->outcome);
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, $outcomes[1]->outcome);
         self::assertSame(1, $states->saveCount);
         self::assertNull($states->state->find(self::databaseAddress()));
         self::assertNotNull($states->state->find(self::databaseAddress('reporting')));

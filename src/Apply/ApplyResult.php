@@ -41,10 +41,17 @@ final readonly class ApplyResult implements Countable, IteratorAggregate
         return $this->countOperation(ApplyOutcomeOperation::DELETED);
     }
 
+    public function failedCount(): int
+    {
+        return $this->countOperation(ApplyOutcomeOperation::FAILED);
+    }
+
     public function hasDestructiveOutcomes(): bool
     {
         foreach ($this->outcomes as $outcome) {
-            if ($outcome->destructiveOutcome !== null) {
+            if ($outcome->deleted !== null
+                || $outcome->confirmed !== null
+                || $outcome->stateCheckpointed !== null) {
                 return true;
             }
         }

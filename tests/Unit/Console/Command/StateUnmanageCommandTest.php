@@ -114,6 +114,23 @@ final class StateUnmanageCommandTest extends TestCase
         self::assertSame($before, file_get_contents($this->path));
     }
 
+    public function testHistoricalDottedStateAddressCanBeUnmanaged(): void
+    {
+        mkdir(dirname($this->path), 0777, true);
+        file_put_contents($this->path, '{"version":1,"serial":0,"organization":"acme","resources":{'
+            . '"application.api":{"type":"application","remote_id":"app-id"},'
+            . '"environment.foo.bar":{"type":"environment","remote_id":"environment-id",'
+            . '"parent":"application.api"}}}');
+
+        $tester = $this->tester();
+
+        self::assertSame(ExitCode::SUCCESS->value, $tester->execute([
+            'address' => 'environment.foo.bar',
+            '--auto-approve' => true,
+        ]));
+        self::assertNull($this->states->load()->find(ResourceAddress::fromString('environment.foo.bar')));
+    }
+
     #[DataProvider('invalidAddressProvider')]
     public function testMalformedAndNonStateAddressesAreErrorsWithoutWrites(string $address, string $message): void
     {
@@ -121,7 +138,7 @@ final class StateUnmanageCommandTest extends TestCase
         $before = file_get_contents($this->path);
         $tester = $this->tester();
 
-        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['address' => $address]));
+        self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $tester->execute(['address' => $address]));
         self::assertStringContainsString($message, $tester->getDisplay());
         self::assertSame($before, file_get_contents($this->path));
     }
@@ -134,6 +151,22 @@ final class StateUnmanageCommandTest extends TestCase
         yield 'Database attachment' => ['database_attachment.production', 'not State-owned'];
     }
 
+    public function testMalformedAddressJsonIsAnInputContractFailure(): void
+    {
+        $this->saveState();
+        $tester = $this->tester();
+
+        self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $tester->execute([
+            'address' => 'production',
+            '--json' => true,
+        ]));
+        $decoded = self::json($tester);
+        self::assertSame('error', $decoded['status']);
+        self::assertIsArray($decoded['error']);
+        self::assertSame('input', $decoded['error']['category']);
+        self::assertSame('invalid_resource_address', $decoded['error']['code']);
+    }
+
     public function testMalformedStateIsErrorAndUntouched(): void
     {
         mkdir(dirname($this->path), 0777, true);
@@ -142,6 +175,14 @@ final class StateUnmanageCommandTest extends TestCase
 
         self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['address' => 'environment.production']));
         self::assertSame('{broken', file_get_contents($this->path));
+
+        $json = $this->tester();
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $json->execute(['address' => 'environment.production', '--json' => true]));
+        $error = self::json($json);
+        self::assertSame('error', $error['status']);
+        self::assertIsArray($error['error']);
+        self::assertSame('state', $error['error']['category']);
+        self::assertSame('state_corrupted', $error['error']['code']);
     }
 
     public function testInteractiveCancellationAndNonInteractiveRefusalAreByteStable(): void
@@ -210,11 +251,21 @@ final class StateUnmanageCommandTest extends TestCase
         self::assertTrue($successJson['released']);
         $resource = $successJson['resource'];
         self::assertIsArray($resource);
+        self::assertSame(['address', 'type', 'parent', 'classification'], array_keys($resource));
+        self::assertSame('environment', $resource['type']);
         self::assertSame('application.my-api', $resource['parent']);
+        self::assertSame('managed', $resource['classification']);
 
         $noChanges = $this->tester();
         self::assertSame(0, $noChanges->execute(['address' => 'environment.production', '--json' => true]));
-        self::assertSame('no_changes', self::json($noChanges)['status']);
+        $noChangeJson = self::json($noChanges);
+        self::assertSame('no_change', $noChangeJson['status']);
+        self::assertSame([
+            'address' => 'environment.production',
+            'type' => null,
+            'parent' => null,
+            'classification' => null,
+        ], $noChangeJson['resource']);
 
         $refusal = $this->tester();
         self::assertSame(1, $refusal->execute([
@@ -222,6 +273,8 @@ final class StateUnmanageCommandTest extends TestCase
         ]));
         $refusalJson = self::json($refusal);
         self::assertSame('refused', $refusalJson['status']);
+        self::assertIsArray($refusalJson['resource']);
+        self::assertSame(['address', 'type', 'parent', 'classification'], array_keys($refusalJson['resource']));
         self::assertSame(['database.primary.application'], $refusalJson['children']);
 
         foreach ([$success->getDisplay(), $noChanges->getDisplay(), $refusal->getDisplay()] as $output) {
@@ -241,8 +294,10 @@ final class StateUnmanageCommandTest extends TestCase
 
         $fallback = $this->tester();
         self::assertSame(1, $fallback->execute(['address' => "environment.\xB1", '--json' => true]));
-        self::json($fallback);
-        self::assertStringContainsString('Unable to encode', $fallback->getDisplay());
+        $error = self::json($fallback);
+        self::assertIsArray($error['error']);
+        self::assertSame('output', $error['error']['category']);
+        self::assertSame('json_encoding_failed', $error['error']['code']);
     }
 
     private function tester(): CommandTester
@@ -288,6 +343,7 @@ final class StateUnmanageCommandTest extends TestCase
             self::fail('Command did not produce pure JSON: ' . $exception->getMessage());
         }
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version'] ?? null);
         $result = [];
         foreach ($decoded as $key => $value) {
             if (!is_string($key)) {

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Infrastructure\Http;
 
+use LaravelCloudBlueprint\ReleaseVersion;
 use LaravelCloudBlueprint\Cloud\CloudApiToken;
 use LaravelCloudBlueprint\Blueprint\SourceProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudDatabaseMutationClient;
@@ -61,7 +62,7 @@ final readonly class SymfonyLaravelCloudClient implements LaravelCloudDatabaseMu
     private const string ENVIRONMENT_DEPENDENCY_INCLUDES = 'application,branch,deployments,currentDeployment,primaryDomain,instances,database,cache,buckets,websocketApplication,secrets';
     private const string DATABASE_DESTRUCTIVE_INCLUDES = 'database,environments';
     private const string BASE_URL = 'https://cloud.laravel.com/api';
-    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/0.1.0-alpha.13';
+    private const string USER_AGENT = 'Laravel-Cloud-Blueprint/' . ReleaseVersion::CURRENT;
 
     public function __construct(
         private HttpClientInterface $http,

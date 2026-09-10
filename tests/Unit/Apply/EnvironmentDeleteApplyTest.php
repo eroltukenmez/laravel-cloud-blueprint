@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Tests\Unit\Apply;
 
+use LaravelCloudBlueprint\Apply\ApplyOutcome;
 use LaravelCloudBlueprint\Apply\ApplyStatus;
 use LaravelCloudBlueprint\Apply\Contract\Delay;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
-use LaravelCloudBlueprint\Apply\DestructiveOutcome;
 use LaravelCloudBlueprint\Apply\EnvironmentDeletionVerification;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
 use LaravelCloudBlueprint\Apply\Exception\StateIdentityConflictException;
@@ -62,7 +62,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->outcome);
         self::assertSame(['env-old'], $cloud->deletedIds);
         self::assertNull($states->state->find(self::environmentAddress()));
         self::assertSame('app-old', $states->state->get(self::applicationAddress())->remoteId);
@@ -80,7 +80,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
-        self::assertSame(DestructiveOutcome::ALREADY_ABSENT, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::ALREADY_ABSENT, iterator_to_array($result)[0]->outcome);
         self::assertSame([], $cloud->deletedIds);
         self::assertSame(1, $states->saveCount);
         self::assertNull($states->state->find(self::environmentAddress()));
@@ -175,7 +175,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
             $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
             self::assertSame(ApplyStatus::FAILED, $result->status);
-            self::assertSame(DestructiveOutcome::REFUSED, iterator_to_array($result)[0]->destructiveOutcome);
+            self::assertSame(ApplyOutcome::REFUSED, iterator_to_array($result)[0]->outcome);
             self::assertSame(0, $cloud->deleteCalls);
             self::assertSame(0, $states->saveCount);
         }
@@ -204,7 +204,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
             static fn (): Blueprint => self::blueprint(includeEnvironment: true),
         );
         self::assertSame(ApplyStatus::FAILED, $result->status);
-        self::assertSame(DestructiveOutcome::CONFLICT, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::CONFLICT, iterator_to_array($result)[0]->outcome);
         self::assertSame(0, $cloud->deleteCalls);
         self::assertSame(0, $states->saveCount);
     }
@@ -216,7 +216,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->outcome);
         self::assertSame(1, $cloud->deleteCalls);
         self::assertSame(1, $states->saveCount);
     }
@@ -229,7 +229,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->outcome);
         self::assertSame(1, $cloud->deleteCalls);
         self::assertSame(1, $states->saveCount);
     }
@@ -267,7 +267,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
-        self::assertSame(DestructiveOutcome::CONFLICT, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::CONFLICT, iterator_to_array($result)[0]->outcome);
         self::assertSame(0, $cloud->deleteCalls);
         self::assertSame(0, $states->saveCount);
     }
@@ -279,7 +279,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
         ], deleteFailure: self::timeout());
         $presentStates = new DeleteStateStore(self::state());
         $present = self::apply()->execute(self::blueprint(), self::plan(), $presentCloud, $presentStates);
-        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($present)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, iterator_to_array($present)[0]->outcome);
         self::assertSame(1, $presentCloud->deleteCalls);
         self::assertSame(0, $presentStates->saveCount);
 
@@ -288,12 +288,12 @@ final class EnvironmentDeleteApplyTest extends TestCase
         ], deleteFailure: self::timeout());
         $failureStates = new DeleteStateStore(self::state());
         $failure = self::apply()->execute(self::blueprint(), self::plan(), $failureCloud, $failureStates);
-        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($failure)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::UNCERTAIN, iterator_to_array($failure)[0]->outcome);
         self::assertSame(1, $failureCloud->deleteCalls);
         self::assertSame(0, $failureStates->saveCount);
     }
 
-    public function test204WhileStillPresentRetainsStateAndDoesNotSendSecondDelete(): void
+    public function test204WhileStillPresentIsPostconditionFailureAndDoesNotSendSecondDelete(): void
     {
         $cloud = new DeleteCloud([
             [self::environment()], [self::environment()], [self::environment()], [self::environment()],
@@ -302,7 +302,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
 
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
-        self::assertSame(DestructiveOutcome::UNCERTAIN, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, iterator_to_array($result)[0]->outcome);
         self::assertSame(1, $cloud->deleteCalls);
         self::assertSame(0, $states->saveCount);
         self::assertNotNull($states->state->find(self::environmentAddress()));
@@ -316,7 +316,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(), self::plan(), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
-        self::assertSame(DestructiveOutcome::STATE_CHECKPOINT_FAILED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::STATE_CHECKPOINT_FAILED, iterator_to_array($result)[0]->outcome);
         self::assertNotNull($states->state->find(self::environmentAddress()));
         self::assertSame(7, $states->state->serial);
     }
@@ -345,7 +345,7 @@ final class EnvironmentDeleteApplyTest extends TestCase
         $result = self::apply()->execute(self::blueprint(includeEnvironment: true, environmentName: 'staging'), $plan, $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
-        self::assertSame(DestructiveOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->destructiveOutcome);
+        self::assertSame(ApplyOutcome::DELETE_CONFIRMED, iterator_to_array($result)[0]->outcome);
         self::assertNull($states->state->find(self::environmentAddress()));
         self::assertNull($states->state->find($staging));
         self::assertSame(8, $states->state->serial);

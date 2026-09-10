@@ -91,6 +91,7 @@ final class ImportCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--json' => true, '--auto-approve' => true]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertIsArray($decoded['summary']);
         self::assertIsArray($decoded['resources']);
         self::assertIsArray($decoded['resources'][0]);
@@ -123,6 +124,14 @@ final class ImportCommandTest extends TestCase
         self::assertSame(0, $states->beginCount);
         self::assertSame(0, $states->saveCount);
         self::assertSame(0, $cloud->mutationCount);
+
+        [$json, , $jsonStates] = self::tester($state);
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $json->execute(['--json' => true, '--auto-approve' => true]));
+        $refusal = json_decode($json->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($refusal);
+        self::assertSame(1, $refusal['contract_version']);
+        self::assertSame('refused', $refusal['status']);
+        self::assertSame(0, $jsonStates->saveCount);
     }
 
     public function testUnsupportedCandidatesAreRenderedAndRefuseImport(): void
@@ -177,6 +186,7 @@ final class ImportCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--json' => true]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertIsArray($decoded['summary']);
         self::assertIsArray($decoded['resources']);
         self::assertSame('no_changes', $decoded['status']);
@@ -201,8 +211,12 @@ final class ImportCommandTest extends TestCase
         ]));
         $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
         self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
         self::assertSame('error', $decoded['status']);
-        self::assertSame('Unable to encode command output as JSON.', $decoded['message']);
+        self::assertIsArray($decoded['error']);
+        self::assertSame('output', $decoded['error']['category']);
+        self::assertSame('json_encoding_failed', $decoded['error']['code']);
+        self::assertSame('Unable to encode command output as JSON.', $decoded['error']['message']);
         self::assertStringNotContainsString('<error>', $tester->getDisplay());
         self::assertStringNotContainsString('literal-secret-value', $tester->getDisplay());
         self::assertStringNotContainsString('super-secret-token', $tester->getDisplay());
@@ -218,15 +232,32 @@ final class ImportCommandTest extends TestCase
         self::assertSame(0, $states->beginCount);
     }
 
-    /** @return array{CommandTester, ImportCommandCloud, ImportCommandStateStore} */
-    private static function tester(?StateDocument $initial = null, ?ImportCommandCloud $cloud = null): array
+    public function testJsonAuthenticationFailureUsesTheCommonErrorEnvelope(): void
     {
+        [$tester] = self::tester(token: null);
+
+        self::assertSame(ExitCode::GENERAL_ERROR->value, $tester->execute(['--json' => true]));
+        $decoded = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($decoded);
+        self::assertSame(1, $decoded['contract_version']);
+        self::assertSame('error', $decoded['status']);
+        self::assertIsArray($decoded['error']);
+        self::assertSame('authentication', $decoded['error']['category']);
+        self::assertSame('authentication_token_missing', $decoded['error']['code']);
+    }
+
+    /** @return array{CommandTester, ImportCommandCloud, ImportCommandStateStore} */
+    private static function tester(
+        ?StateDocument $initial = null,
+        ?ImportCommandCloud $cloud = null,
+        ?CloudApiToken $token = new CloudApiToken('super-secret-token'),
+    ): array {
         $cloud ??= new ImportCommandCloud();
         $states = new ImportCommandStateStore($initial ?? StateDocument::empty());
         $command = new ImportCommand(
             new ImportCommandFileReader(),
             new BlueprintLoader(new SymfonyYamlDecoder(), new BlueprintValidator(), new BlueprintNormalizer()),
-            new ImportCommandTokenProvider(),
+            new ImportCommandTokenProvider($token),
             new ImportCommandClientFactory($cloud),
             new ImportResources(new CreateImportProposal()),
             $states,
@@ -268,9 +299,13 @@ YAML;
 
 final readonly class ImportCommandTokenProvider implements CloudTokenProvider
 {
-    public function token(): CloudApiToken
+    public function __construct(private ?CloudApiToken $token)
     {
-        return new CloudApiToken('super-secret-token');
+    }
+
+    public function token(): ?CloudApiToken
+    {
+        return $this->token;
     }
 }
 

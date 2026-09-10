@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Tests\Unit\Apply;
 
+use LaravelCloudBlueprint\Apply\ApplyOutcome;
+use LaravelCloudBlueprint\Apply\ApplyResourceOutcome;
+use LaravelCloudBlueprint\Apply\ApplyResult;
 use LaravelCloudBlueprint\Apply\ApplyStatus;
 use LaravelCloudBlueprint\Apply\DatabaseClusterReadiness;
 use LaravelCloudBlueprint\Apply\Contract\Delay;
@@ -65,6 +68,9 @@ final class DatabaseCreateApplyTest extends TestCase
         $result = self::apply($blueprint, $cloud, $states);
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
+        self::assertSame(ApplyOutcome::CREATED, self::outcome($result, ResourceType::DATABASE_CLUSTER, 'primary')->outcome);
+        self::assertSame(ApplyOutcome::CREATED, self::outcome($result, ResourceType::DATABASE, 'primary.application')->outcome);
+        self::assertSame(ApplyOutcome::CREATED, self::outcome($result, ResourceType::DATABASE, 'primary.reporting')->outcome);
         self::assertSame(['cluster:primary', 'database:application', 'database:reporting'], $cloud->mutations);
         self::assertSame(3, $states->saveCount);
         self::assertNotNull($states->state->find(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary')));
@@ -98,8 +104,9 @@ final class DatabaseCreateApplyTest extends TestCase
         $cloud = new DatabaseMutationCloud(clusters: [DatabaseMutationCloud::cluster()]);
         $states = new DatabaseMutationStateStore($state);
 
-        self::apply(self::blueprint('application'), $cloud, $states);
+        $result = self::apply(self::blueprint('application'), $cloud, $states);
 
+        self::assertSame(ApplyOutcome::CREATED, self::outcome($result, ResourceType::DATABASE, 'primary.application')->outcome);
         self::assertSame(['database:application'], $cloud->mutations);
         self::assertSame('cluster-1', $cloud->databaseCreateParents[0]);
     }
@@ -112,6 +119,8 @@ final class DatabaseCreateApplyTest extends TestCase
         $result = self::apply(self::blueprint('application', 'reporting'), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::CREATED, self::outcome($result, ResourceType::DATABASE_CLUSTER, 'primary')->outcome);
+        self::assertSame(ApplyOutcome::UNCERTAIN, self::outcome($result, ResourceType::DATABASE, 'primary.reporting')->outcome);
         self::assertNotNull($states->state->find(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary')));
         self::assertNotNull($states->state->find(new ResourceAddress(ResourceType::DATABASE, 'primary.application')));
         self::assertNull($states->state->find(new ResourceAddress(ResourceType::DATABASE, 'primary.reporting')));
@@ -125,6 +134,7 @@ final class DatabaseCreateApplyTest extends TestCase
         $result = self::apply(self::blueprint('application'), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::UNCERTAIN, self::outcome($result, ResourceType::DATABASE_CLUSTER, 'primary')->outcome);
         self::assertSame(1, $cloud->clusterCreateCalls);
         self::assertSame(0, $states->saveCount);
         self::assertStringContainsString('uncertain', serialize($result));
@@ -138,6 +148,7 @@ final class DatabaseCreateApplyTest extends TestCase
         $result = self::apply(self::blueprint('application'), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::STATE_CHECKPOINT_FAILED, self::outcome($result, ResourceType::DATABASE_CLUSTER, 'primary')->outcome);
         self::assertSame(['cluster:primary'], $cloud->mutations);
         self::assertSame([], $states->state->resources());
         self::assertStringContainsString('import', serialize($result));
@@ -151,6 +162,7 @@ final class DatabaseCreateApplyTest extends TestCase
         $result = self::apply(self::blueprint('application', 'reporting'), $cloud, $states);
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
+        self::assertSame(ApplyOutcome::STATE_CHECKPOINT_FAILED, self::outcome($result, ResourceType::DATABASE, 'primary.application')->outcome);
         self::assertSame(['cluster:primary', 'database:application'], $cloud->mutations);
         self::assertNotNull($states->state->find(new ResourceAddress(ResourceType::DATABASE_CLUSTER, 'primary')));
         self::assertNull($states->state->find(new ResourceAddress(ResourceType::DATABASE, 'primary.application')));
@@ -221,6 +233,7 @@ final class DatabaseCreateApplyTest extends TestCase
         $result = self::apply(self::blueprint('application'), $cloud, $states);
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
+        self::assertSame(ApplyOutcome::CONFLICT, self::outcome($result, ResourceType::DATABASE_CLUSTER, 'primary')->outcome);
         self::assertSame(0, $cloud->clusterCreateCalls);
         self::assertStringContainsString('Import', serialize($result));
     }
@@ -260,6 +273,7 @@ final class DatabaseCreateApplyTest extends TestCase
         $result = self::apply(self::blueprint('application'), $cloud, $states);
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
+        self::assertSame(ApplyOutcome::CONFLICT, self::outcome($result, ResourceType::ENVIRONMENT, 'production')->outcome);
         self::assertSame([], $cloud->mutations);
         self::assertSame(0, $states->saveCount);
         self::assertStringContainsString('new actionable change', serialize($result));
@@ -275,6 +289,20 @@ final class DatabaseCreateApplyTest extends TestCase
         $plan = (new CreatePlan($values))->create($blueprint, $cloud, $states->state);
         return (new CreateOnlyApply($values, $readiness ?? new DatabaseClusterReadiness()))
             ->execute($blueprint, $plan, $cloud, $states);
+    }
+
+    private static function outcome(
+        ApplyResult $result,
+        ResourceType $type,
+        string $name,
+    ): ApplyResourceOutcome {
+        foreach ($result as $outcome) {
+            if ($outcome->address->type === $type && $outcome->address->name === $name) {
+                return $outcome;
+            }
+        }
+
+        throw new \LogicException('Missing expected Apply resource outcome.');
     }
 
     private static function blueprint(string ...$databases): Blueprint

@@ -12,6 +12,8 @@ use LaravelCloudBlueprint\Cloud\Contract\CloudTokenProvider;
 use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Console\JsonError;
+use LaravelCloudBlueprint\Console\JsonErrorCategory;
 use LaravelCloudBlueprint\Console\JsonOutput;
 use LaravelCloudBlueprint\Drift\CreateDriftReport;
 use LaravelCloudBlueprint\Drift\DriftCheckEvaluator;
@@ -34,6 +36,8 @@ use Symfony\Component\Console\Output\OutputInterface;
 )]
 final class DriftCommand extends Command
 {
+    private const int JSON_CONTRACT_VERSION = 1;
+
     private readonly JsonOutput $json;
 
     public function __construct(
@@ -66,34 +70,38 @@ final class DriftCommand extends Command
         $check = $input->getOption('check') === true;
         $path = $input->getOption('file');
         if (!is_string($path)) {
-            return $this->error($output, 'The --file option must be a path.', ExitCode::GENERAL_ERROR, $json);
+            return $this->error($output, 'The --file option must be a path.', ExitCode::BLUEPRINT_ERROR, $json, JsonErrorCategory::INPUT, 'invalid_file_option');
         }
         if (!$this->files->exists($path)) {
-            return $this->error($output, sprintf('Blueprint file "%s" does not exist.', $path), ExitCode::GENERAL_ERROR, $json);
+            return $this->error($output, sprintf('Blueprint file "%s" does not exist.', $path), ExitCode::GENERAL_ERROR, $json, JsonErrorCategory::FILESYSTEM, 'file_not_found');
         }
 
         try {
             $loaded = $this->blueprints->load($this->files->read($path));
         } catch (StructuredDataDecodingException) {
-            return $this->error($output, 'Blueprint YAML could not be decoded.', ExitCode::BLUEPRINT_ERROR, $json);
+            return $this->error($output, 'Blueprint YAML could not be decoded.', ExitCode::BLUEPRINT_ERROR, $json, JsonErrorCategory::BLUEPRINT, 'blueprint_decode_failed');
         } catch (FileOperationException $exception) {
-            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json);
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json, JsonErrorCategory::FILESYSTEM, 'file_read_failed');
         }
 
         if (!$loaded->isValid()) {
             if ($json) {
-                $this->json->write([
-                    'status' => 'validation_failed',
-                    'errors' => array_map(
+                return $this->error(
+                    $output,
+                    'Blueprint validation failed.',
+                    ExitCode::BLUEPRINT_ERROR,
+                    true,
+                    JsonErrorCategory::BLUEPRINT,
+                    'blueprint_invalid',
+                    ['validation_errors' => array_map(
                         static fn ($error): array => [
                             'path' => $error->path,
                             'code' => $error->code->value,
                             'message' => $error->message,
                         ],
                         iterator_to_array($loaded->validation, false),
-                    ),
-                ], $output);
-                return ExitCode::BLUEPRINT_ERROR->value;
+                    )],
+                );
             }
             foreach ($loaded->validation as $error) {
                 $output->writeln(sprintf('[%s] %s: %s', $error->code->value, $error->path, $error->message));
@@ -104,7 +112,7 @@ final class DriftCommand extends Command
 
         $token = $this->tokens->token();
         if ($token === null) {
-            return $this->error($output, 'LCB_TOKEN is not set.', ExitCode::GENERAL_ERROR, $json);
+            return $this->error($output, 'LCB_TOKEN is not set.', ExitCode::GENERAL_ERROR, $json, JsonErrorCategory::AUTHENTICATION, 'authentication_token_missing');
         }
 
         try {
@@ -113,14 +121,22 @@ final class DriftCommand extends Command
                 $this->clients->create($token),
                 $this->states->load(),
             );
-        } catch (OrganizationMismatchException|MissingEnvironmentValueException|CloudException|StateCorruptedException|StateStorageException $exception) {
-            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json);
+        } catch (OrganizationMismatchException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json, JsonErrorCategory::BLUEPRINT, 'blueprint_organization_mismatch');
+        } catch (MissingEnvironmentValueException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json, JsonErrorCategory::INPUT, 'environment_value_missing');
+        } catch (CloudException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json, JsonErrorCategory::CLOUD, 'cloud_read_failed');
+        } catch (StateCorruptedException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json, JsonErrorCategory::STATE, 'state_corrupted');
+        } catch (StateStorageException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $json, JsonErrorCategory::STATE, 'state_read_failed');
         }
 
         $checkResult = $check ? $this->checkEvaluator->evaluate($report) : null;
 
         if ($json) {
-            $written = $this->json->write($this->jsonRenderer->render($report), $output);
+            $written = $this->json->write($this->jsonRenderer->render($report), $output, self::JSON_CONTRACT_VERSION);
             if (!$written) {
                 return ExitCode::GENERAL_ERROR->value;
             }
@@ -151,10 +167,20 @@ final class DriftCommand extends Command
             : ExitCode::SUCCESS->value;
     }
 
-    private function error(OutputInterface $output, string $message, ExitCode $code, bool $json): int
-    {
+    /** @param array<string, mixed> $details */
+    private function error(
+        OutputInterface $output,
+        string $message,
+        ExitCode $code,
+        bool $json,
+        JsonErrorCategory $category,
+        string $errorCode,
+        array $details = [],
+    ): int {
         if ($json) {
-            $this->json->write(['status' => 'error', 'message' => $message], $output);
+            return $this->json->writeError(new JsonError($category, $errorCode, $message, $details), $output, self::JSON_CONTRACT_VERSION)
+                ? $code->value
+                : ExitCode::GENERAL_ERROR->value;
         } else {
             $output->writeln(sprintf('<error>%s</error>', $message));
         }

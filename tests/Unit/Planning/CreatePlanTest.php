@@ -31,6 +31,7 @@ use LaravelCloudBlueprint\Planning\Exception\OrganizationMismatchException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\PlanReconciliationStatus;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
@@ -49,6 +50,20 @@ final class CreatePlanTest extends TestCase
         self::planner()->create(self::blueprint(), $cloud, StateDocument::empty());
     }
 
+    public function testStateOrganizationMismatchProducesTypedUnsupportedPlan(): void
+    {
+        $plan = self::planner()->create(
+            self::blueprint(),
+            new PlanningCloudClient(applications: [self::remoteApplication()]),
+            StateDocument::empty()->withOrganization('different-organization'),
+        );
+
+        foreach ($plan as $action) {
+            self::assertSame(PlanOperation::UNSUPPORTED, $action->operation);
+            self::assertSame(PlanReconciliationStatus::UNSUPPORTED, $action->reconciliation);
+        }
+    }
+
     public function testMissingApplicationCreatesApplicationAndEveryEnvironmentWithoutEnvironmentLookup(): void
     {
         $cloud = new PlanningCloudClient();
@@ -61,6 +76,9 @@ final class CreatePlanTest extends TestCase
         );
         self::assertSame(3, $plan->countByOperation(PlanOperation::CREATE));
         self::assertTrue($plan->hasActionableChanges());
+        foreach ($plan as $action) {
+            self::assertSame(PlanReconciliationStatus::SUPPORTED, $action->reconciliation);
+        }
         self::assertSame(['organization', 'applications'], $cloud->calls);
     }
 
@@ -83,6 +101,9 @@ final class CreatePlanTest extends TestCase
         self::assertSame(3, $plan->countByOperation(PlanOperation::NO_CHANGE));
         self::assertSame(0, $plan->countByOperation(PlanOperation::CREATE));
         self::assertSame(0, $plan->countByOperation(PlanOperation::UPDATE));
+        foreach ($plan as $action) {
+            self::assertSame(PlanReconciliationStatus::NOT_APPLICABLE, $action->reconciliation);
+        }
         self::assertSame(['organization', 'applications', 'environments:app-1'], $cloud->calls);
     }
 
@@ -160,6 +181,9 @@ final class CreatePlanTest extends TestCase
 
         self::assertSame(PlanOperation::NO_CHANGE, $actions[0]->operation);
         self::assertSame(PlanOperation::UPDATE, $actions[1]->operation);
+        self::assertSame(PlanReconciliationStatus::NOT_APPLICABLE, $actions[0]->reconciliation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, $actions[1]->reconciliation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, $actions[2]->reconciliation);
         self::assertSame('branch', $actions[1]->changes[0]->field);
         self::assertSame('other', $actions[1]->changes[0]->before);
         self::assertSame('main', $actions[1]->changes[0]->after);
@@ -410,6 +434,7 @@ final class CreatePlanTest extends TestCase
 
         $action = self::action($plan, 'application.old-api');
         self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertSame(PlanReconciliationStatus::UNSUPPORTED, $action->reconciliation);
         self::assertStringContainsString('destructive execution is not enabled', $action->reason);
         self::assertSame('app-old', $action->remoteId);
         self::assertSame(1, count($state->resources()));
@@ -476,6 +501,7 @@ final class CreatePlanTest extends TestCase
 
         $action = self::action($plan, 'environment.preview');
         self::assertSame(PlanOperation::DELETE, $action->operation);
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $action->reconciliation);
         self::assertStringContainsString('State-owned', $action->reason);
         self::assertStringContainsString('absent from the blueprint', $action->reason);
         self::assertSame('env-preview', $action->remoteId);
@@ -508,6 +534,7 @@ final class CreatePlanTest extends TestCase
         self::assertSame(PlanOperation::DELETE, $action->operation);
         self::assertSame($dependencies, $action->environmentDependencies);
         self::assertSame(EnvironmentDestructiveReadiness::BLOCKED, $action->environmentDependencies->readiness());
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $action->reconciliation);
         self::assertStringContainsString('database_attachment', $action->reason);
         self::assertStringContainsString('custom_domain', $action->reason);
         self::assertStringContainsString('secret', $action->reason);
@@ -539,6 +566,7 @@ final class CreatePlanTest extends TestCase
         self::assertSame(PlanOperation::DELETE, $action->operation);
         self::assertNotNull($action->environmentDependencies);
         self::assertSame(EnvironmentDestructiveReadiness::SAFE, $action->environmentDependencies->readiness());
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, $action->reconciliation);
         self::assertSame([EnvironmentDependencyType::INSTANCE], $action->environmentDependencies->informationalCategories());
         self::assertStringContainsString('Expected child dependencies: instance', $action->reason);
     }

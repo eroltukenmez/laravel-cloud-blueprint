@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Tests\Unit\Apply;
 
+use LaravelCloudBlueprint\Apply\ApplyOutcome;
+use LaravelCloudBlueprint\Apply\ApplyOutcomeOperation;
 use LaravelCloudBlueprint\Apply\ApplyStatus;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
@@ -76,6 +78,14 @@ final class UpdateReconciliationTest extends TestCase
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame($expectedUpdates, $result->updatedCount());
+        foreach ($result as $outcome) {
+            self::assertSame(
+                $outcome->operation === ApplyOutcomeOperation::UPDATED
+                    ? ApplyOutcome::UPDATED
+                    : ApplyOutcome::UNCHANGED,
+                $outcome->outcome,
+            );
+        }
         self::assertSame(11, $state->state->serial);
         self::assertSame(0, $state->saveCount);
 

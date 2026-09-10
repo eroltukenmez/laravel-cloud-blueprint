@@ -57,6 +57,7 @@ use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanChange;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\PlanReconciliationStatus;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
@@ -88,7 +89,10 @@ final class DatabasePlanningTest extends TestCase
 
         self::assertSame(PlanOperation::CREATE, self::action($plan, 'database_cluster.primary')->operation);
         self::assertSame(PlanOperation::CREATE, self::action($plan, 'database.primary.application')->operation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, self::action($plan, 'database_cluster.primary')->reconciliation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, self::action($plan, 'database.primary.application')->reconciliation);
         self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database_attachment.production')->operation);
+        self::assertSame(PlanReconciliationStatus::UNSUPPORTED, self::action($plan, 'database_attachment.production')->reconciliation);
         self::assertSame(1, $plan->countByOperation(PlanOperation::UNSUPPORTED));
     }
 
@@ -112,8 +116,10 @@ final class DatabasePlanningTest extends TestCase
         $cluster = self::action($plan, 'database_cluster.primary');
         $database = self::action($plan, 'database.primary.application');
         self::assertSame(PlanOperation::NO_CHANGE, $cluster->operation);
+        self::assertSame(PlanReconciliationStatus::NOT_APPLICABLE, $cluster->reconciliation);
         self::assertStringContainsString('Owned', $cluster->reason);
         self::assertSame(PlanOperation::NO_CHANGE, $database->operation);
+        self::assertSame(PlanReconciliationStatus::NOT_APPLICABLE, $database->reconciliation);
         self::assertStringContainsString('Owned', $database->reason);
         self::assertSame(PlanOperation::UNSUPPORTED, self::action($plan, 'database_attachment.production')->operation);
     }
@@ -127,6 +133,7 @@ final class DatabasePlanningTest extends TestCase
         $action = self::action($plan, 'database_attachment.production');
 
         self::assertSame(PlanOperation::UPDATE, $action->operation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, $action->reconciliation);
         self::assertSame(['database'], array_map(static fn (PlanChange $change): string => $change->field, $action->changes));
         self::assertStringNotContainsString('database-1', json_encode($action, JSON_THROW_ON_ERROR));
     }
@@ -364,6 +371,7 @@ final class DatabasePlanningTest extends TestCase
             self::databaseState(),
         ), 'database.primary.application');
         self::assertSame(DatabaseDestructiveReadiness::SAFE, $safe->databaseDependencies?->readiness());
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, $safe->reconciliation);
         self::assertStringContainsString('eligible for guarded deletion', $safe->reason);
         self::assertStringNotContainsString('not supported', $safe->reason);
         self::assertSame([['cluster-1', 'database-1']], $safeCloud->destructiveDatabaseCalls);
@@ -379,6 +387,7 @@ final class DatabasePlanningTest extends TestCase
         $dependencies = $attached->databaseDependencies;
         self::assertNotNull($dependencies);
         self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $dependencies->readiness());
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $attached->reconciliation);
         self::assertSame(
             [DatabaseDependencyType::ENVIRONMENT_ATTACHMENT],
             $dependencies->blockingCategories(),
@@ -444,6 +453,7 @@ final class DatabasePlanningTest extends TestCase
             $clusterOnlyState,
         ), 'database_cluster.primary');
         self::assertSame(DatabaseDestructiveReadiness::SAFE, $safe->databaseDependencies?->readiness());
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, $safe->reconciliation);
 
         $ownedCluster = self::mysqlCluster(databaseIds: ['database-1'], childDiscoveryComplete: true);
         $owned = self::action(self::plan(
@@ -452,6 +462,7 @@ final class DatabasePlanningTest extends TestCase
             self::databaseState(),
         ), 'database_cluster.primary');
         self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $owned->databaseDependencies?->readiness());
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $owned->reconciliation);
         self::assertContains(DatabaseDependencyType::OWNED_DATABASE_CHILD, $owned->databaseDependencies->categories());
 
         $unmanagedCluster = self::mysqlCluster(databaseIds: ['unmanaged-id'], childDiscoveryComplete: true);
@@ -462,6 +473,7 @@ final class DatabasePlanningTest extends TestCase
         );
         $unmanaged = self::action($unmanagedPlan, 'database_cluster.primary');
         self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $unmanaged->databaseDependencies?->readiness());
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $unmanaged->reconciliation);
         self::assertContains(DatabaseDependencyType::UNMANAGED_DATABASE_CHILD, $unmanaged->databaseDependencies->categories());
         self::assertNull(self::findAction($unmanagedPlan, 'database.primary.reporting'));
     }
@@ -550,6 +562,7 @@ final class DatabasePlanningTest extends TestCase
         );
         self::assertSame([], $dependencies->blockingCategories());
         self::assertSame(PlanOperation::NO_CHANGE, $derived->operation);
+        self::assertSame(PlanReconciliationStatus::NOT_APPLICABLE, $derived->reconciliation);
         self::assertSame(DatabaseDestructiveRole::PARENT_LIFECYCLE_DEPENDENCY, $derived->destructiveRole);
         self::assertSame([], $cloud->destructiveDatabaseCalls);
     }
@@ -824,6 +837,7 @@ final class DatabasePlanningTest extends TestCase
 
         self::assertNotNull($action->databaseDependencies);
         self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $action->databaseDependencies->readiness());
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $action->reconciliation);
         self::assertContains(DatabaseDependencyType::DATABASE_SNAPSHOT, $action->databaseDependencies->categories());
         self::assertContains(DatabaseDependencyType::RETAINED_DATABASE_RECOVERY, $action->databaseDependencies->categories());
         self::assertContains('snapshot_status', $action->databaseDependencies->unknownRelationships);
@@ -848,6 +862,7 @@ final class DatabasePlanningTest extends TestCase
         $unknownAction = self::action(self::plan(self::blueprint(database: false), $failed, $state), 'database_cluster.primary');
         self::assertNotNull($unknownAction->databaseDependencies);
         self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $unknownAction->databaseDependencies->readiness());
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $unknownAction->reconciliation);
         self::assertContains('snapshots', $unknownAction->databaseDependencies->missingRelationships);
         self::assertFalse($unknownAction->databaseDependencies->snapshotDiscoveryComplete);
 
@@ -859,6 +874,7 @@ final class DatabasePlanningTest extends TestCase
         ), 'database_cluster.primary');
         self::assertNotNull($unknownStatus->databaseDependencies);
         self::assertSame(DatabaseDestructiveReadiness::UNKNOWN, $unknownStatus->databaseDependencies->readiness());
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $unknownStatus->reconciliation);
         self::assertContains('cluster_lifecycle', $unknownStatus->databaseDependencies->unknownRelationships);
 
         $creating = self::action(self::plan(
@@ -869,6 +885,7 @@ final class DatabasePlanningTest extends TestCase
         ), 'database_cluster.primary');
         self::assertNotNull($creating->databaseDependencies);
         self::assertSame(DatabaseDestructiveReadiness::BLOCKED, $creating->databaseDependencies->readiness());
+        self::assertSame(PlanReconciliationStatus::BLOCKED, $creating->reconciliation);
         self::assertContains(DatabaseDependencyType::DATABASE_CLUSTER_LIFECYCLE,
             $creating->databaseDependencies->blockingCategories());
 
@@ -1276,6 +1293,17 @@ final class DatabasePlanningTest extends TestCase
 
         self::assertNull(self::findAction($plan, 'database_attachment.production'));
         self::assertSame(1, $cloud->environmentCalls);
+    }
+
+    public function testMatchingManagedAttachmentHasNoApplicableReconciliation(): void
+    {
+        $action = self::action(
+            self::plan(self::blueprint(), self::matchingCloud(), self::attachmentState()),
+            'database_attachment.production',
+        );
+
+        self::assertSame(PlanOperation::NO_CHANGE, $action->operation);
+        self::assertSame(PlanReconciliationStatus::NOT_APPLICABLE, $action->reconciliation);
     }
 
     public function testPlanOrderingKeepsParentsAndAttachmentBeforeVariables(): void

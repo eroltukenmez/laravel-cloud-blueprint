@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LaravelCloudBlueprint\Tests\Unit\Console;
 
 use LaravelCloudBlueprint\Console\LcbApplication;
+use LaravelCloudBlueprint\ReleaseVersion;
 use PHPUnit\Framework\TestCase;
 
 final class LcbApplicationTest extends TestCase
@@ -14,7 +15,8 @@ final class LcbApplicationTest extends TestCase
         $application = new LcbApplication();
 
         self::assertSame('Laravel Cloud Blueprint', $application->getName());
-        self::assertSame('0.1.0-alpha.13', $application->getVersion());
+        self::assertSame('0.1.0-alpha.14', ReleaseVersion::CURRENT);
+        self::assertSame(ReleaseVersion::CURRENT, $application->getVersion());
     }
 
     public function testCommandDescriptionsClarifyReadOnlyLocalStateAndCloudMutationBoundaries(): void

@@ -43,6 +43,18 @@ use Symfony\Component\Console\Tester\CommandTester;
 
 final class DriftCommandTest extends TestCase
 {
+    public function testAddressCollisionBlueprintIsRejectedBeforeDriftDiscovery(): void
+    {
+        $tester = self::tester(self::addressCollisionBlueprint(), new FailingDriftCommandCloudClient());
+
+        self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $tester->execute(['--json' => true]));
+        $error = self::decoded($tester);
+        self::assertSame('error', $error['status']);
+        self::assertIsArray($error['error']);
+        self::assertSame('blueprint', $error['error']['category']);
+        self::assertSame('blueprint_invalid', $error['error']['code']);
+    }
+
     public function testHumanReportWithDifferencesSucceedsWithoutCloudOrStateMutation(): void
     {
         $cloud = new DriftCommandCloudClient();
@@ -98,12 +110,20 @@ final class DriftCommandTest extends TestCase
     {
         $invalid = self::tester("version: 1\n");
         self::assertSame(ExitCode::BLUEPRINT_ERROR->value, $invalid->execute(['--json' => true]));
-        self::assertSame('validation_failed', self::decoded($invalid)['status']);
+        $validation = self::decoded($invalid);
+        self::assertSame('error', $validation['status']);
+        self::assertIsArray($validation['error']);
+        self::assertSame('blueprint_invalid', $validation['error']['code']);
+        self::assertIsArray($validation['error']['validation_errors']);
 
         $failure = self::tester(self::blueprint(), new FailingDriftCommandCloudClient());
         self::assertSame(ExitCode::GENERAL_ERROR->value, $failure->execute(['--json' => true]));
         $error = self::decoded($failure);
-        self::assertSame(['status' => 'error', 'message' => 'Scoped Cloud discovery failed.'], $error);
+        self::assertSame('error', $error['status']);
+        self::assertIsArray($error['error']);
+        self::assertSame('cloud', $error['error']['category']);
+        self::assertSame('cloud_read_failed', $error['error']['code']);
+        self::assertSame('Scoped Cloud discovery failed.', $error['error']['message']);
         self::assertStringNotContainsString('command-token-sentinel', $failure->getDisplay());
     }
 
@@ -150,6 +170,10 @@ final class DriftCommandTest extends TestCase
         self::assertSame(ExitCode::SUCCESS->value, $tester->execute(['--check' => true]));
         self::assertStringContainsString('Check passed.', $tester->getDisplay());
         self::assertStringNotContainsString('Check failed:', $tester->getDisplay());
+
+        $json = self::tester(self::blueprint(), $cloud, new DriftCommandStateStore($state));
+        self::assertSame(ExitCode::SUCCESS->value, $json->execute(['--json' => true, '--check' => true]));
+        self::assertSame(1, self::decoded($json)['contract_version']);
     }
 
     public function testCheckModeDoesNotChangeJsonOutput(): void
@@ -162,7 +186,7 @@ final class DriftCommandTest extends TestCase
 
         self::assertSame(ExitCode::SUCCESS->value, $normal->execute(['--json' => true]));
         self::assertSame(ExitCode::DRIFT_CHECK_FAILED->value, $checked->execute(['--json' => true, '--check' => true]));
-        self::assertSame(self::decoded($normal), self::decoded($checked));
+        self::assertSame($normal->getDisplay(), $checked->getDisplay());
     }
 
     public function testHumanCheckFailureIncludesEvaluatorCountAndNormalModeHasNoFooter(): void
@@ -282,6 +306,31 @@ environments: {}
 YAML;
     }
 
+    private static function addressCollisionBlueprint(): string
+    {
+        return <<<'YAML'
+version: 1
+organization: acme
+application:
+  name: API
+  region: eu-central-1
+  source:
+    provider: github
+    repository: acme/api
+environments:
+  foo.bar:
+    branch: main
+    variables:
+      baz:
+        value: one
+  foo:
+    branch: main
+    variables:
+      bar.baz:
+        value: two
+YAML;
+    }
+
     /** @return array<string, mixed> */
     private static function decoded(CommandTester $tester): array
     {
@@ -289,6 +338,7 @@ YAML;
         if (!is_array($decoded)) {
             throw new LogicException('Command output must be a JSON object.');
         }
+        self::assertSame(1, $decoded['contract_version'] ?? null);
 
         $object = [];
         foreach ($decoded as $key => $value) {

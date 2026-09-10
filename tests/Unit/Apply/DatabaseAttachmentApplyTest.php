@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Tests\Unit\Apply;
 
+use LaravelCloudBlueprint\Apply\ApplyOutcome;
 use LaravelCloudBlueprint\Apply\ApplyStatus;
 use LaravelCloudBlueprint\Apply\CreateOnlyApply;
 use LaravelCloudBlueprint\Apply\Exception\ApplyRefusedException;
@@ -46,6 +47,7 @@ use LaravelCloudBlueprint\Planning\Contract\EnvironmentValueProvider;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\PlanReconciliationStatus;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
@@ -83,6 +85,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(1, $result->updatedCount());
+        self::assertSame(ApplyOutcome::UPDATED, self::attachmentOutcome($result)->outcome);
         self::assertSame([$expected], $cloud->patches);
         self::assertSame(['patch', 'confirm'], $cloud->mutationEvents);
         self::assertSame(0, $state->saveCount);
@@ -101,6 +104,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(5, $result->unchangedCount());
+        self::assertSame(ApplyOutcome::UNCHANGED, self::attachmentOutcome($result)->outcome);
         self::assertSame([], $cloud->patches);
         self::assertSame(0, $state->saveCount);
     }
@@ -178,7 +182,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
         }
     }
 
-    public function testPatchSuccessWithConfirmationMismatchIsConflictWithoutRetry(): void
+    public function testPatchSuccessWithConfirmationMismatchIsPostconditionFailureWithoutRetry(): void
     {
         $cloud = new AttachmentCloud(null);
         $cloud->confirmationDatabaseId = 'database-third';
@@ -187,7 +191,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
         self::assertSame(1, count($cloud->patches));
-        self::assertStringContainsString('different relationship', self::attachmentOutcome($result)->message ?? '');
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, self::attachmentOutcome($result)->outcome);
     }
 
     public function testTransportFailureConfirmedDesiredIsSuccessWithoutRetry(): void
@@ -200,9 +204,10 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::SUCCESS, $result->status);
         self::assertSame(1, count($cloud->patches));
+        self::assertSame(ApplyOutcome::UPDATED, self::attachmentOutcome($result)->outcome);
     }
 
-    public function testTransportFailureWithPreviousOrIncompleteConfirmationIsUncertainWithoutRetry(): void
+    public function testTransportFailureWithAuthoritativePreviousRelationshipIsPostconditionFailureWithoutRetry(): void
     {
         $cloud = new AttachmentCloud(null);
         $cloud->patchFailure = new CloudTransportException('sentinel-token timeout', 'PATCH', '/environments/sentinel-env');
@@ -213,6 +218,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertSame(1, count($cloud->patches));
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, self::attachmentOutcome($result)->outcome);
         self::assertStringNotContainsString('sentinel-token', serialize($result));
     }
 
@@ -225,7 +231,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $incompleteResult->status);
         self::assertCount(1, $incomplete->patches);
-        self::assertStringContainsString('incomplete', self::attachmentOutcome($incompleteResult)->message ?? '');
+        self::assertSame(ApplyOutcome::UNCERTAIN, self::attachmentOutcome($incompleteResult)->outcome);
 
         $failed = new AttachmentCloud(null);
         $failed->patchFailure = new CloudTransportException('timeout', 'PATCH', '/environments/env-1');
@@ -234,10 +240,10 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $failedResult->status);
         self::assertCount(1, $failed->patches);
-        self::assertStringContainsString('could not be confirmed', self::attachmentOutcome($failedResult)->message ?? '');
+        self::assertSame(ApplyOutcome::UNCERTAIN, self::attachmentOutcome($failedResult)->outcome);
     }
 
-    public function testFiveHundredPatchFailureIsUncertainAndNeverRetried(): void
+    public function testFiveHundredPatchFailureWithMismatchedPostconditionIsNeverRetried(): void
     {
         $cloud = new AttachmentCloud(null);
         $cloud->patchFailure = new CloudApiException('server failure', 'PATCH', '/environments/env-1', 503);
@@ -246,7 +252,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::PARTIAL_FAILURE, $result->status);
         self::assertCount(1, $cloud->patches);
-        self::assertStringContainsString('uncertain', self::attachmentOutcome($result)->message ?? '');
+        self::assertSame(ApplyOutcome::POSTCONDITION_FAILED, self::attachmentOutcome($result)->outcome);
     }
 
     /** @return iterable<string, array{int}> */
@@ -267,7 +273,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
 
         self::assertSame(ApplyStatus::FAILED, $result->status);
         self::assertCount(1, $cloud->patches);
-        self::assertStringContainsString('refused', self::attachmentOutcome($result)->message ?? '');
+        self::assertSame(ApplyOutcome::REFUSED, self::attachmentOutcome($result)->outcome);
         self::assertStringNotContainsString('sentinel-credential', serialize($result));
     }
 
@@ -284,6 +290,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
         self::assertSame(['branch', 'patch', 'confirm'], $cloud->mutationEvents);
         self::assertSame(1, $result->updatedCount());
         self::assertSame(\LaravelCloudBlueprint\Apply\ApplyOutcomeOperation::FAILED, self::attachmentOutcome($result)->operation);
+        self::assertSame(ApplyOutcome::REFUSED, self::attachmentOutcome($result)->outcome);
         self::assertSame('main', $cloud->branch);
     }
 
@@ -324,6 +331,7 @@ final class DatabaseAttachmentApplyTest extends TestCase
     {
         $plan = (new CreatePlan(new VariableValueResolver(new AttachmentValues())))->create($blueprint, $cloud, $state);
         self::assertSame(PlanOperation::UPDATE, self::attachmentPlanAction($plan)->operation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, self::attachmentPlanAction($plan)->reconciliation);
         return $plan;
     }
 

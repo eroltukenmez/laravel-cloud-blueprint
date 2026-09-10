@@ -4,6 +4,29 @@ This project uses a Keep a Changelog-inspired format.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.14] - 2026-09-10
+
+### Added
+
+- Published the pre-Beta compatibility policy for CLI commands, JSON contracts, resource addresses, Blueprint v1, State, planning, Apply, Drift, import, and local ownership release.
+- Added executable public-contract checks for the command surface, JSON contract versions, exit codes, typed result taxonomies, Blueprint schema support, and State V1-to-V2 readability.
+
+### Changed
+
+- Hardened resource-address parsing and Blueprint logical identifier validation so ambiguous address collisions fail before planning.
+- Unified typed planning ownership and reconciliation evidence, Apply outcomes, JSON failure envelopes, deterministic Cloud inspection ordering, and command exit behavior ahead of the Beta freeze.
+- Centralized the release version used by the CLI banner and Laravel Cloud API user agent.
+
+### Safety
+
+- This release adds no destructive capability, State schema, Blueprint schema, authentication change, or automatic retry behavior.
+- Existing State V1 remains readable; current State writes remain V2 and preserve managed, derived, and provenance distinctions.
+
+### Compatibility
+
+- JSON contract v1 output changed during Alpha as documented; incompatible changes after Beta require a contract-version bump.
+- Blueprint v1 remains the only supported Blueprint schema. The stricter logical identifier rules reject previously ambiguous input rather than reinterpret it.
+
 ## [0.1.0-alpha.13] - 2026-09-08
 
 ### Changed

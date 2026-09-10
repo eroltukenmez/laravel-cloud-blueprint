@@ -31,6 +31,7 @@ use LaravelCloudBlueprint\Planning\Exception\MissingEnvironmentValueException;
 use LaravelCloudBlueprint\Planning\ExecutionPlan;
 use LaravelCloudBlueprint\Planning\PlanAction;
 use LaravelCloudBlueprint\Planning\PlanOperation;
+use LaravelCloudBlueprint\Planning\PlanReconciliationStatus;
 use LaravelCloudBlueprint\Planning\ResourceAddress;
 use LaravelCloudBlueprint\Planning\ResourceType;
 use LaravelCloudBlueprint\Planning\VariableValueResolver;
@@ -93,6 +94,9 @@ final class VariablePlanningTest extends TestCase
         self::assertSame(PlanOperation::CREATE, $actions[2]->operation);
         self::assertSame(PlanOperation::NO_CHANGE, $actions[3]->operation);
         self::assertSame(PlanOperation::UPDATE, $actions[4]->operation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, $actions[2]->reconciliation);
+        self::assertSame(PlanReconciliationStatus::NOT_APPLICABLE, $actions[3]->reconciliation);
+        self::assertSame(PlanReconciliationStatus::SUPPORTED, $actions[4]->reconciliation);
         self::assertSame('Environment variable differs from desired state.', $actions[4]->reason);
         self::assertSame([], $actions[4]->changes);
         self::assertSame(['organization', 'applications', 'environments:app-1', 'environment:env-1'], $cloud->calls);
@@ -112,6 +116,7 @@ final class VariablePlanningTest extends TestCase
         ));
 
         self::assertSame(PlanOperation::UNSUPPORTED, $actions[2]->operation);
+        self::assertSame(PlanReconciliationStatus::UNSUPPORTED, $actions[2]->reconciliation);
         self::assertSame('Remote environment variable information is unavailable.', $actions[2]->reason);
     }
 

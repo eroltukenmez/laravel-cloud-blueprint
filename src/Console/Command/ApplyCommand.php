@@ -19,6 +19,8 @@ use LaravelCloudBlueprint\Cloud\Contract\LaravelCloudClientFactory;
 use LaravelCloudBlueprint\Cloud\Exception\CloudException;
 use LaravelCloudBlueprint\Cloud\Exception\CloudValidationException;
 use LaravelCloudBlueprint\Console\ExitCode;
+use LaravelCloudBlueprint\Console\JsonError;
+use LaravelCloudBlueprint\Console\JsonErrorCategory;
 use LaravelCloudBlueprint\Console\JsonOutput;
 use LaravelCloudBlueprint\Planning\CreatePlan;
 use LaravelCloudBlueprint\Planning\Exception\AmbiguousResourceMatchException;
@@ -41,6 +43,8 @@ use Symfony\Component\Console\Question\ConfirmationQuestion;
 #[AsCommand(name: 'apply', description: 'Apply supported changes; may modify Laravel Cloud resources.')]
 final class ApplyCommand extends Command
 {
+    private const int JSON_CONTRACT_VERSION = 1;
+
     private readonly JsonOutput $jsonOutput;
 
     public function __construct(
@@ -71,18 +75,18 @@ final class ApplyCommand extends Command
         $jsonOutput = $input->getOption('json') === true;
         $path = $input->getOption('file');
         if (!is_string($path)) {
-            return $this->error($output, 'The --file option must be a path.', ExitCode::GENERAL_ERROR, $jsonOutput);
+            return $this->error($output, 'The --file option must be a path.', ExitCode::BLUEPRINT_ERROR, $jsonOutput, JsonErrorCategory::INPUT, 'invalid_file_option');
         }
         if (!$this->files->exists($path)) {
-            return $this->error($output, sprintf('Blueprint file "%s" does not exist.', $path), ExitCode::GENERAL_ERROR, $jsonOutput);
+            return $this->error($output, sprintf('Blueprint file "%s" does not exist.', $path), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::FILESYSTEM, 'file_not_found');
         }
 
         try {
             $loaded = $this->blueprints->load($this->files->read($path));
         } catch (StructuredDataDecodingException) {
-            return $this->error($output, 'Blueprint YAML could not be decoded.', ExitCode::BLUEPRINT_ERROR, $jsonOutput);
+            return $this->error($output, 'Blueprint YAML could not be decoded.', ExitCode::BLUEPRINT_ERROR, $jsonOutput, JsonErrorCategory::BLUEPRINT, 'blueprint_decode_failed');
         } catch (FileOperationException $exception) {
-            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::FILESYSTEM, 'file_read_failed');
         }
 
         if (!$loaded->isValid()) {
@@ -98,7 +102,7 @@ final class ApplyCommand extends Command
 
         $token = $this->tokens->token();
         if ($token === null) {
-            return $this->error($output, 'LCB_TOKEN is not set.', ExitCode::GENERAL_ERROR, $jsonOutput);
+            return $this->error($output, 'LCB_TOKEN is not set.', ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::AUTHENTICATION, 'authentication_token_missing');
         }
 
         try {
@@ -106,19 +110,29 @@ final class ApplyCommand extends Command
             $plan = $this->planner->create($loaded->blueprint(), $cloud, $this->states->load());
         } catch (CloudValidationException $exception) {
             return $this->renderCloudValidationFailure($exception, $output, $jsonOutput);
-        } catch (OrganizationMismatchException|AmbiguousResourceMatchException|MissingEnvironmentValueException|CloudException|StateCorruptedException|StateStorageException $exception) {
-            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
+        } catch (OrganizationMismatchException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::BLUEPRINT, 'blueprint_organization_mismatch');
+        } catch (AmbiguousResourceMatchException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::CLOUD, 'cloud_resource_ambiguous');
+        } catch (MissingEnvironmentValueException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::INPUT, 'environment_value_missing');
+        } catch (CloudException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::CLOUD, 'cloud_read_failed');
+        } catch (StateCorruptedException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::STATE, 'state_corrupted');
+        } catch (StateStorageException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::STATE, 'state_read_failed');
         }
 
         try {
             $this->apply->assertSupported($plan);
         } catch (ApplyRefusedException $exception) {
-            return $this->error($output, 'Apply refused. ' . $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
+            return $this->error($output, 'Apply refused. ' . $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::MUTATION, 'cloud_mutation_refused');
         }
 
         if (!$plan->hasActionableChanges()) {
             if ($jsonOutput) {
-                return $this->json(['status' => 'success', 'summary' => ['created' => 0, 'updated' => 0, 'unchanged' => count($plan)], 'resources' => []], $output);
+                return $this->json(['status' => 'success', 'summary' => ['created' => 0, 'updated' => 0, 'unchanged' => count($plan), 'deleted' => 0, 'failed' => 0], 'resources' => []], $output);
             }
             $output->writeln('No changes.');
             $output->writeln('');
@@ -131,7 +145,7 @@ final class ApplyCommand extends Command
         $hasDestructive = $plan->countByOperation(PlanOperation::DELETE) > 0;
 
         if (!$autoApprove && ($nonInteractive || $jsonOutput)) {
-            return $this->error($output, 'Apply requires --auto-approve when running non-interactively.', ExitCode::GENERAL_ERROR, $jsonOutput);
+            return $this->error($output, 'Apply requires --auto-approve when running non-interactively.', ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::MUTATION, 'cloud_mutation_refused');
         }
 
         if (!$jsonOutput) {
@@ -179,8 +193,16 @@ final class ApplyCommand extends Command
                     return $locked->blueprint();
                 },
             );
-        } catch (ApplyRefusedException|StateIdentityConflictException|StateCorruptedException|StateLockedException|StateStorageException $exception) {
-            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput);
+        } catch (ApplyRefusedException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::MUTATION, 'cloud_mutation_refused');
+        } catch (StateIdentityConflictException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::STATE, 'state_identity_conflict');
+        } catch (StateCorruptedException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::STATE, 'state_corrupted');
+        } catch (StateLockedException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::STATE, 'state_lock_failed');
+        } catch (StateStorageException $exception) {
+            return $this->error($output, $exception->getMessage(), ExitCode::GENERAL_ERROR, $jsonOutput, JsonErrorCategory::STATE, 'state_write_failed');
         }
 
         if ($jsonOutput) {
@@ -238,8 +260,10 @@ final class ApplyCommand extends Command
     {
         foreach ($result as $outcome) {
             $output->writeln(sprintf('%s: %s', (string) $outcome->address, $outcome->operation->value));
-            if ($outcome->destructiveOutcome !== null) {
-                $output->writeln('  outcome: ' . $outcome->destructiveOutcome->value);
+            if ($outcome->deleted !== null
+                || $outcome->confirmed !== null
+                || $outcome->stateCheckpointed !== null) {
+                $output->writeln('  outcome: ' . $outcome->outcome->value);
             }
             if ($outcome->message !== null) {
                 $output->writeln('  ' . $outcome->message);
@@ -273,8 +297,9 @@ final class ApplyCommand extends Command
             'summary' => [
                 'created' => $result->createdCount(),
                 'updated' => $result->updatedCount(),
-                ...($result->hasDestructiveOutcomes() ? ['deleted' => $result->deletedCount()] : []),
                 'unchanged' => $result->unchangedCount(),
+                'deleted' => $result->deletedCount(),
+                'failed' => $result->failedCount(),
             ],
             'resources' => array_map($this->outcomeJson(...), iterator_to_array($result, false)),
         ], $output);
@@ -286,6 +311,7 @@ final class ApplyCommand extends Command
         $base = [
             'resource' => (string) $outcome->address,
             'operation' => $outcome->operation->value,
+            'outcome' => $outcome->outcome->value,
             ...($outcome->message === null ? [] : ['message' => $outcome->message]),
             ...($outcome->validation === null ? [] : [
                 'validation' => [
@@ -295,8 +321,9 @@ final class ApplyCommand extends Command
             ]),
         ];
 
-        if ($outcome->destructiveOutcome !== null) {
-            $base['outcome'] = $outcome->destructiveOutcome->value;
+        if ($outcome->deleted !== null
+            || $outcome->confirmed !== null
+            || $outcome->stateCheckpointed !== null) {
             $base['deleted'] = $outcome->deleted;
             $base['confirmed'] = $outcome->confirmed;
             $base['state_checkpointed'] = $outcome->stateCheckpointed;
@@ -311,14 +338,18 @@ final class ApplyCommand extends Command
         bool $jsonOutput,
     ): int {
         if ($jsonOutput) {
-            $this->json([
-                'status' => 'error',
-                'message' => $exception->getMessage(),
-                'validation' => [
+            return $this->error(
+                $output,
+                $exception->getMessage(),
+                ExitCode::GENERAL_ERROR,
+                true,
+                JsonErrorCategory::CLOUD,
+                'cloud_validation_failed',
+                ['validation' => [
                     'message' => $exception->apiMessage,
                     'errors' => $exception->fieldErrors,
-                ],
-            ], $output);
+                ]],
+            );
         } else {
             $output->writeln(sprintf('<error>%s</error>', $exception->getMessage()));
             $this->renderValidationDetails($exception, $output);
@@ -343,11 +374,20 @@ final class ApplyCommand extends Command
         }
     }
 
-    private function error(OutputInterface $output, string $message, ExitCode $code, bool $json = false): int
-    {
+    /** @param array<string, mixed> $details */
+    private function error(
+        OutputInterface $output,
+        string $message,
+        ExitCode $code,
+        bool $json,
+        JsonErrorCategory $category,
+        string $errorCode,
+        array $details = [],
+    ): int {
         if ($json) {
-            $this->json(['status' => 'error', 'message' => $message], $output);
-            return $code->value;
+            return $this->jsonOutput->writeError(new JsonError($category, $errorCode, $message, $details), $output, self::JSON_CONTRACT_VERSION)
+                ? $code->value
+                : ExitCode::GENERAL_ERROR->value;
         }
 
         $output->writeln(sprintf('<error>%s</error>', $message));
@@ -357,20 +397,24 @@ final class ApplyCommand extends Command
     /** @param array<string, mixed> $data */
     private function json(array $data, OutputInterface $output): int
     {
-        return $this->jsonOutput->write($data, $output)
+        return $this->jsonOutput->write($data, $output, self::JSON_CONTRACT_VERSION)
             ? ExitCode::SUCCESS->value
             : ExitCode::GENERAL_ERROR->value;
     }
 
     private function validationJson(\LaravelCloudBlueprint\Blueprint\Validation\ValidationResult $validation, OutputInterface $output): int
     {
-        $this->json([
-            'status' => 'validation_failed',
-            'errors' => array_map(
+        return $this->error(
+            $output,
+            'Blueprint validation failed.',
+            ExitCode::BLUEPRINT_ERROR,
+            true,
+            JsonErrorCategory::BLUEPRINT,
+            'blueprint_invalid',
+            ['validation_errors' => array_map(
                 static fn ($error): array => ['path' => $error->path, 'code' => $error->code->value, 'message' => $error->message],
                 iterator_to_array($validation, false),
-            ),
-        ], $output);
-        return ExitCode::BLUEPRINT_ERROR->value;
+            )],
+        );
     }
 }

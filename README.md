@@ -11,7 +11,7 @@
 Laravel Cloud Blueprint is an unofficial community CLI for describing a supported subset of Laravel Cloud resources in version-controlled YAML blueprints. It produces a read-only plan before mutation, then reconciles supported application, environment, environment-variable, Database, and attachment changes when you apply it.
 
 > [!WARNING]
-> Version `0.1.0-alpha.13` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
+> Version `0.1.0-alpha.14` is early alpha software with a deliberately limited mutation model. This is an unofficial community project and is not affiliated with or maintained by Laravel.
 
 ## See the Plan Before You Apply
 
@@ -42,14 +42,14 @@ lcb --version
 Expected output:
 
 ```text
-Laravel Cloud Blueprint 0.1.0-alpha.13
+Laravel Cloud Blueprint 0.1.0-alpha.14
 ```
 
 Composer's global bin directory must be available in `PATH` for the `lcb` command to be found.
 
 ## Status
 
-Current version: `0.1.0-alpha.13`.
+Current version: `0.1.0-alpha.14`.
 
 The current build can discover and compare applications, environments, environment variables, Database Clusters, logical Databases, and Environment attachments. It can create missing resources in that supported set, update an environment's branch, an existing variable's value, or a managed attachment, and safely delete eligible State-owned Environments, logical Databases, or Database Clusters removed from the Blueprint. Database deletion requires exact State identity and complete dependency evidence. Application repository and region changes, renames, automatic adoption, remote state, and Database update/replacement remain unsupported.
 
@@ -276,11 +276,35 @@ Ownership release is deliberately non-recursive. An Application or Database Clus
 
 Run `lcb <command> --help` for exact usage.
 
+### Machine-readable JSON contracts
+
+The beta-candidate compatibility policy for CLI names and options, JSON evolution, exit codes, resource addresses, Blueprint and State formats, typed Plan/Apply/Drift semantics, redaction, and the feature freeze is documented in [Public Contracts and Compatibility](docs/compatibility.md).
+
+Every first-party command with `--json` emits exactly one JSON document on stdout. Each command owns its contract independently and currently declares top-level `"contract_version": 1`; this version is unrelated to Blueprint schema version 1, State V2, or the CLI release version. Successful and completed no-change or refusal results retain their command-specific fields. Command-owned failures use this common envelope:
+
+```json
+{
+  "contract_version": 1,
+  "status": "error",
+  "error": {
+    "category": "filesystem",
+    "code": "file_not_found",
+    "message": "..."
+  }
+}
+```
+
+The stable machine fields are `contract_version`, `status`, `error.category`, `error.code`, and each report's typed fields. Current error categories are `input`, `blueprint`, `state`, `authentication`, `cloud`, `mutation`, `filesystem`, and `output`; `status: "error"` is reserved for this envelope. Human-facing `message`, `reason`, and validation descriptions are non-normative and must not be parsed for decisions. Blueprint validation errors remain structured under `error.validation_errors`.
+
+Contract stability is semantic; general JSON key order and byte representation are not promised. The deliberate exceptions are `drift --json --check` and `state:inspect --json --check`: for the same report, `--check` changes only the process exit status and the JSON bytes remain identical. Symfony errors raised while parsing command-line arguments happen before command execution and are outside this first-party JSON contract, so they may be human-formatted and written to stderr.
+
+`cloud:inspect` and `import` intentionally expose remote IDs for operator discovery and explicit identity adoption. Plan, Apply, Drift, State inspection, and State unmanage machine reports do not expose remote IDs; existing secret, variable-value, credential, and request-payload redaction rules continue to apply.
+
 ### Exit codes
 
-- `0`: command or report completed successfully, including a passing strict check.
-- `1`: operational, Cloud, State, token, file, or output failure.
-- `2`: Blueprint decode or validation failure.
+- `0`: command or report completed successfully, including current no-op/cancellation results and a passing strict check.
+- `1`: operational, Cloud, State, authentication, filesystem, output, or mutation failure/refusal.
+- `2`: Blueprint decode/validation or command-owned input-contract failure.
 - `3`: a strict check completed, but its policy failed.
 
 Exit code `3` does not mean LCB failed to execute. It means `lcb drift --check` or `lcb state:inspect --check` completed successfully and found observations that fail its strict policy. Normal observational reports continue to exit `0` when they complete.
@@ -294,6 +318,8 @@ Exit code `3` does not mean LCB failed to execute. It means `lcb drift --check` 
 - `UNSUPPORTED`: satisfying the difference would require behavior unavailable in this release.
 
 Text plans use `+` for create, `~` for update, `-` for delete intent, `=` for no change, and `!` for unsupported. When present, DELETE counts are included in text and JSON summaries.
+
+Plan `operation` is the desired-state action and retains the meanings above. Every JSON action also includes `reconciliation`, the current Plan-time LCB capability for that specific action: `supported` means the implementation supports it and the Plan's current prerequisites are satisfied, `blocked` means supported lifecycle behavior is prevented by current evidence or safety conditions, `unsupported` means Apply intentionally lacks that reconciliation capability, and `not_applicable` means no mutation applies, including `no_change`. The `reason` field is human-readable and non-normative; automation should use the typed fields. `supported` is not an execution guarantee: Apply revalidates mutable State, ownership, Cloud, dependency, topology, lifecycle, and recovery evidence under lock before mutation and fails closed if fresh evidence differs.
 
 Planning is read-only and deterministic. State-owned resources absent from the Blueprint are represented child-first as DELETE intent using their exact stored identities; unmanaged same-name resources never become deletion targets. Environment DELETE intent includes conservative live discovery of attached databases, caches, WebSockets, domains, instances, deployments, secrets, filesystems, and default-environment status. Instances are reported as expected Environment children and do not by themselves block deletion; all other discovered categories remain blockers. Missing, malformed, or unknown relationship data is never treated as safe. Only complete, SAFE Environment DELETE actions can reach guarded apply execution.
 
@@ -310,6 +336,10 @@ Environment variables remain desired-only and are not recorded as owned state re
 ## Apply Semantics
 
 Apply always creates a fresh plan and refuses unsupported actions before Cloud mutation. Supported changes request approval unless auto-approved; interactive approval defaults to no, and `--json` or non-interactive mode does not imply approval. Environment, logical Database, and Database Cluster DELETE show a permanent-deletion warning, then reload State and Blueprint under lock and perform fresh exact-ID dependency discovery. DELETE is transmitted at most once and a 204 or error never removes State without subsequent authoritative absence. Cluster absence verification uses an immediate exact GET plus up to eleven delayed GET retries. Each confirmed child absence is checkpointed before parent work; Cloud-side atomicity is not claimed. Potentially destructive or duplicate-creating requests are never automatically retried.
+
+Every resource in Apply JSON has both `operation` and `outcome`. `operation` retains the high-level result (`created`, `updated`, `unchanged`, `deleted`, or `failed`); `outcome` is the stable semantic classification. The outcome vocabulary is `created`, `updated`, `unchanged`, `delete_confirmed`, `already_absent`, `refused`, `conflict`, `uncertain`, `postcondition_failed`, `state_checkpoint_failed`, and `failed`. The optional `message` and validation text are explanatory and non-normative; automation must not parse their wording. Apply JSON summaries always contain integer `created`, `updated`, `unchanged`, `deleted`, and `failed` counts.
+
+`refused` means a known safety condition or definitive Cloud rejection prevented reconciliation, while contradictory exact identity or ownership evidence is `conflict`. `uncertain` is reserved for a mutation that may have been transmitted or applied when authoritative evidence cannot resolve the result; LCB does not blindly retry it. `postcondition_failed` means a response or authoritative follow-up could not satisfy a required result check, including an unusable returned identity or a read that proves the desired relationship was not established. `state_checkpoint_failed` means remote reconciliation was confirmed but its required local ownership checkpoint failed; LCB retains conservative recovery behavior and does not roll back the Cloud mutation. The generic `failed` outcome is reserved for deterministic execution failures that have no more precise classification.
 
 Supported work is processed in dependency order: application, environments, Database Clusters, logical Databases, then environment-variable groups. Environment branch updates use Laravel Cloud's environment PATCH endpoint and accept a confirmed success response without requiring an `attributes.branch` string. Variables are sent per environment with Laravel Cloud's `method=set` mode for both create and update.
 
@@ -339,7 +369,7 @@ Managed Application and Environment addresses are resolved by their stored remot
 
 When LCB creates a Database Cluster, the successful CREATE response must contain exactly one valid default logical Database relationship. LCB atomically checkpoints the Cluster and that child at the reserved internal address `database.<cluster>.__derived_default`, classified as `derived` with `cluster_create_response` provenance, before creating Blueprint-declared Databases. The address and provenance never depend on the Cloud name. Missing, ambiguous, malformed, or conflicting response evidence fails closed, and a valid relationship identity remains sufficient when the corresponding included resource is absent. During Cluster destructive-readiness evaluation, only this exact typed provenance plus complete matching Cluster and Database discovery can classify the child as a `parent_lifecycle_dependency`. It remains retained during ordinary reconciliation and may be deleted only inside an explicitly approved guarded parent lifecycle. Releasing it with `state:unmanage` removes that authorization and makes the live child an unmanaged blocker.
 
-Blueprint logical Database keys may not use the reserved `__derived_default` segment. Legacy and imported Clusters do not gain derived provenance through names or later discovery; their existing default children remain unmanaged. Guarded Database Cluster deletion requires exact captured provenance and never infers authorization from a default-looking name or topology.
+Blueprint logical Database keys may not use the reserved `__derived_default` segment. Blueprint Environment, Environment-variable, Database Cluster, and logical Database keys are address segments: they must be non-empty and may not contain dots, ASCII control characters, or DEL. Application names may contain dots because their address is unambiguous, but may not contain ASCII control characters or DEL. Legacy and imported Clusters do not gain derived provenance through names or later discovery; their existing default children remain unmanaged. Guarded Database Cluster deletion requires exact captured provenance and never infers authorization from a default-looking name or topology.
 
 Clusters created before derived-default provenance tracking may expose their Cloud-created default database as unmanaged. LCB does not infer `DERIVED` ownership from names, ordering, count, or later Cloud reads. Explicit ownership recovery may be required before guarded cleanup.
 
