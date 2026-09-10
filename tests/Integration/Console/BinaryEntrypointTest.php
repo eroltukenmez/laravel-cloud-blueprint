@@ -8,7 +8,7 @@ use PHPUnit\Framework\TestCase;
 
 final class BinaryEntrypointTest extends TestCase
 {
-    private const string VERSION_OUTPUT = 'Laravel Cloud Blueprint 0.1.0-alpha.13';
+    private const string VERSION_OUTPUT = 'Laravel Cloud Blueprint 0.1.0-alpha.14';
 
     public function testRepositoryBinaryUsesLocalVendorAutoloadFallback(): void
     {
@@ -19,7 +19,7 @@ final class BinaryEntrypointTest extends TestCase
         ]);
 
         self::assertSame(0, $exitCode);
-        self::assertStringContainsString(self::VERSION_OUTPUT, $output);
+        self::assertSame(self::VERSION_OUTPUT, trim($output));
     }
 
     public function testComposerProxyAutoloadPathWorksWithoutPackageLocalVendorDirectory(): void
@@ -44,7 +44,7 @@ final class BinaryEntrypointTest extends TestCase
             [$exitCode, $output] = $this->runProcess([PHP_BINARY, $proxy, '--version']);
 
             self::assertSame(0, $exitCode);
-            self::assertStringContainsString(self::VERSION_OUTPUT, $output);
+            self::assertSame(self::VERSION_OUTPUT, trim($output));
             self::assertDirectoryDoesNotExist($temporaryDirectory . '/package/vendor');
         } finally {
             unlink($proxy);

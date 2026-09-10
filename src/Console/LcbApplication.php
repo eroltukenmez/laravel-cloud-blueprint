@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LaravelCloudBlueprint\Console;
 
+use LaravelCloudBlueprint\ReleaseVersion;
 use LaravelCloudBlueprint\Application\BlueprintLoader;
 use LaravelCloudBlueprint\Application\CloudBlueprintExporter;
 use LaravelCloudBlueprint\Application\Import\CreateImportProposal;
@@ -40,7 +41,7 @@ use Symfony\Component\Console\Application;
 final class LcbApplication extends Application
 {
     public const string NAME = 'Laravel Cloud Blueprint';
-    public const string VERSION = '0.1.0-alpha.13';
+    public const string VERSION = ReleaseVersion::CURRENT;
 
     public function __construct()
     {
